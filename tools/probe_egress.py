@@ -25,6 +25,10 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 PORT_BASE = 30000
+UTLS_FINGERPRINTS = {
+    "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
+    "random", "randomized",
+}
 
 
 class UnsupportedConfig(ValueError):
@@ -63,7 +67,9 @@ def _tls(params: dict[str, list[str]], security: str) -> dict[str, Any] | None:
     sni = _first(params, "sni", "peer")
     if sni:
         tls["server_name"] = sni
-    fingerprint = _first(params, "fp", "fingerprint")
+    fingerprint = _first(params, "fp", "fingerprint").lower()
+    if fingerprint and fingerprint not in UTLS_FINGERPRINTS:
+        fingerprint = ""
     # sing-box requires uTLS for Reality. Many share links omit `fp`; Chrome is
     # the conventional default and avoids generating an invalid outbound.
     if security == "reality" and not fingerprint:
