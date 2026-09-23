@@ -64,6 +64,10 @@ def _tls(params: dict[str, list[str]], security: str) -> dict[str, Any] | None:
     if sni:
         tls["server_name"] = sni
     fingerprint = _first(params, "fp", "fingerprint")
+    # sing-box requires uTLS for Reality. Many share links omit `fp`; Chrome is
+    # the conventional default and avoids generating an invalid outbound.
+    if security == "reality" and not fingerprint:
+        fingerprint = "chrome"
     if fingerprint:
         tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
     if _first(params, "allowInsecure", "insecure") in ("1", "true"):
