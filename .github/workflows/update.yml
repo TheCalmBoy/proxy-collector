@@ -1,0 +1,42 @@
+name: Update Proxy Subscription
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download GeoLite2 Country DB
+        run: |
+          curl -L -o GeoLite2-Country.mmdb "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
+
+      - name: Run Processing Script
+        run: |
+          python main.py
+
+      - name: Push Output to gh-pages Branch
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "auto: update proxy sub"
+          branch: gh-pages
+          create_branch: true
+          file_pattern: "output/sub.txt"
