@@ -1,2 +1,2 @@
-requests
-geoip2
+requests>=2.32,<3
+geoip2>=5,<6

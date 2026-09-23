@@ -1,42 +1,83 @@
-name: Update Proxy Subscription
+name: Update Proxy Database
 
 on:
   schedule:
     - cron: "0 */3 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: proxy-database-update
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.13"
+          cache: pip
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
-      - name: Download GeoLite2 Country DB
+      - name: Download DB-IP Lite country database
+        shell: bash
         run: |
-          curl -L -o GeoLite2-Country.mmdb "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
+          set -euo pipefail
 
-      - name: Run Processing Script
+          current="$(date -u +%Y-%m)"
+          previous="$(date -u -d '1 month ago' +%Y-%m)"
+
+          download() {
+            local month="$1"
+            local url="https://download.db-ip.com/free/dbip-country-lite-${month}.mmdb.gz"
+            echo "Trying ${url}"
+            if curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
+              "${url}" -o GeoLite2-Country.mmdb.gz; then
+              echo "Downloaded DB-IP Lite ${month}"
+              return 0
+            fi
+            return 1
+          }
+
+          if ! download "${current}"; then
+            echo "Current month database unavailable; trying previous month ${previous}."
+            download "${previous}"
+          fi
+
+          gzip -dc GeoLite2-Country.mmdb.gz > GeoLite2-Country.mmdb
+          test -s GeoLite2-Country.mmdb
+          ls -lh GeoLite2-Country.mmdb
+
+      - name: Run collector
+        run: python main.py
+
+      - name: Show generated summary
         run: |
-          python main.py
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Push Output to gh-pages Branch
-        uses: stefanzweifel/git-auto-commit-action@v5
+          manifest = json.loads(Path("output/manifest.json").read_text())
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Deploy generated database to gh-pages
+        uses: peaceiris/actions-gh-pages@v4.1.0
         with:
-          commit_message: "auto: update proxy sub"
-          branch: gh-pages
-          create_branch: true
-          file_pattern: "output/sub.txt"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./output
+          force_orphan: true
+          full_commit_message: "auto: update proxy database"

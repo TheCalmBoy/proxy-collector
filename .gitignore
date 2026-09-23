@@ -1,0 +1,12 @@
+# Local GeoIP database
+aGeoLite2-Country.mmdb
+GeoLite2-Country.mmdb.gz
+
+# Generated local output
+/output/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
