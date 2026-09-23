@@ -51,6 +51,12 @@ python main.py
 
 The workflow deploys `output/` to `gh-pages`. In the repository's Pages settings, select GitHub Actions / the `gh-pages` deployment as appropriate for the repository configuration.
 
+## Real proxy egress checks
+
+The separate `Probe proxy egress IPs` workflow starts up to 100 supported VLESS, VMess, Shadowsocks, and Trojan links through sing-box, requests `/ip` through each local SOCKS listener, waits five minutes, then retests the same links. It runs on a six-hour schedule or by manual dispatch. Each run checks at most 100 links, with up to 50 requests active concurrently. The result is available as a 14-day Actions artifact named `proxy-egress-report-<run-id>`.
+
+Before running it, add an Actions repository secret named `IP_CHECK_WORKER_TOKEN` containing the Worker bearer token from `.api-bearer-token` in the separate Worker project. Keep that value private. The Worker URL is already configured in the workflow. Unsupported URI schemes and protocol options are counted and skipped rather than guessed. The report includes observed egress IPs and FFraud reputation fields; generated sing-box configs and source proxy credentials are kept out of the artifact.
+
 ## Data attribution
 
 DB-IP Lite is licensed under CC BY 4.0. See `output/ATTRIBUTION.txt` and https://db-ip.com.
