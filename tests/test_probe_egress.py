@@ -23,6 +23,12 @@ class ParseProxyUriTests(unittest.TestCase):
         )
         self.assertEqual(outbound["tls"]["utls"]["fingerprint"], "chrome")
 
+    def test_vless_reality_replaces_unsupported_fingerprint(self):
+        outbound = parse_proxy_uri(
+            "vless://user-id@example.com:443?security=reality&pbk=public-key&fp=unsafe"
+        )
+        self.assertEqual(outbound["tls"]["utls"]["fingerprint"], "chrome")
+
     def test_vmess_websocket_tls(self):
         payload = base64.b64encode(json.dumps({
             "add": "example.com", "port": "443", "id": "user-id", "aid": "0",
