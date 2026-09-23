@@ -20,4 +20,4 @@ def parse_host(uri: str) -> str | None:
 
         if uri.startswith("vmess://"):
             b64_part = uri[8:].split("#")[0]
-            b64_part += "=" * (-len(b64_part) 
+            remainder = len(b64_part) 
