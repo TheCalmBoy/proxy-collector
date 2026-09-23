@@ -1,0 +1,59 @@
+name: Probe proxy egress IPs
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxy-egress-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PROBE_BATCH_SIZE: "100"
+      PROBE_CONCURRENCY: "50"
+      RETEST_DELAY_SECONDS: "300"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.14.0"
+          archive="sing-box-${version}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}" \
+            -o "/tmp/${archive}"
+          echo "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63  /tmp/${archive}" | sha256sum --check --status
+          tar -xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Run initial and delayed egress checks
+        env:
+          WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
+          WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
+        run: python tools/probe_egress.py
+
+      - name: Upload egress report
+        if: always() && hashFiles('probe-output/report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-egress-report-${{ github.run_id }}
+          path: probe-output/report.json
+          retention-days: 14
