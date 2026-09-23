@@ -374,10 +374,24 @@ async def main() -> int:
         print("No supported proxy links were found.", file=sys.stderr)
         return 1
 
-    batch_size = max(1, int(os.getenv("PROBE_BATCH_SIZE", "100")))
+    batch_setting = os.getenv("PROBE_BATCH_SIZE", "all").strip().lower()
     seed = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    random.Random(seed).shuffle(candidates)
-    selected = candidates[:batch_size]
+    if batch_setting in ("all", "0"):
+        batch_size = len(candidates)
+        selected = candidates
+        selection_mode = "all"
+    else:
+        try:
+            batch_size = int(batch_setting)
+        except ValueError:
+            print("PROBE_BATCH_SIZE must be 'all' or a positive integer.", file=sys.stderr)
+            return 2
+        if batch_size < 1:
+            print("PROBE_BATCH_SIZE must be 'all' or a positive integer.", file=sys.stderr)
+            return 2
+        random.Random(seed).shuffle(candidates)
+        selected = candidates[:batch_size]
+        selection_mode = "sample"
     selected_uris = [uri for uri, _ in selected]
     config, records, config_stats = build_sing_box_config(selected_uris)
     if not records:
@@ -424,7 +438,13 @@ async def main() -> int:
         "source": SOURCE_URL,
         "worker": WORKER_URL,
         "sing_box_version": subprocess.run([SING_BOX, "version"], capture_output=True, text=True).stdout.strip(),
-        "selection": {"batch_size": batch_size, "seed_hour_utc": seed, "retest_delay_seconds": delay},
+        "selection": {
+            "mode": selection_mode,
+            "batch_size": len(selected),
+            "candidate_count": len(candidates),
+            "seed_hour_utc": seed if selection_mode == "sample" else None,
+            "retest_delay_seconds": delay,
+        },
         "config_support": {**config_stats, "unsupported_source_schemes": skipped},
         "summary": _summarize(first, second),
         "results": first + second,
