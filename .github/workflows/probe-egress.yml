@@ -2,7 +2,7 @@ name: Probe proxy egress IPs
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      PROBE_BATCH_SIZE: "100"
+      PROBE_BATCH_SIZE: "all"
       PROBE_CONCURRENCY: "50"
       RETEST_DELAY_SECONDS: "300"
 
