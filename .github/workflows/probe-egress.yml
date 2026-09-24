@@ -58,25 +58,29 @@ jobs:
           path: probe-output/report.json
           retention-days: 14
 
-      - name: Check out Pages feed
-        if: success() && hashFiles('probe-output/egress-health.json') != ''
-        uses: actions/checkout@v7
-        with:
-          ref: gh-pages
-          path: gh-pages
-          fetch-depth: 0
-
       - name: Publish latest egress health index
         if: success() && hashFiles('probe-output/egress-health.json') != ''
-        run: |
-          set -euo pipefail
-          cp probe-output/egress-health.json gh-pages/egress-health.json
-          cd gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add egress-health.json
-          if ! git diff --cached --quiet; then
-            git commit -m "auto: publish proxy egress health"
-            git pull --rebase origin gh-pages
-            git push origin HEAD:gh-pages
-          fi
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = Buffer.from(fs.readFileSync('probe-output/egress-health.json')).toString('base64');
+            const { owner, repo } = context.repo;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              let sha;
+              try {
+                const existing = await github.rest.repos.getContent({ owner, repo, path: 'egress-health.json', ref: 'gh-pages' });
+                sha = existing.data.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path: 'egress-health.json', branch: 'gh-pages', sha,
+                  message: 'auto: publish proxy egress health', content,
+                });
+                break;
+              } catch (error) {
+                if (error.status !== 409 || attempt === 3) throw error;
+              }
+            }
