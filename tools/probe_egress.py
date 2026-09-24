@@ -461,7 +461,7 @@ async def main() -> int:
             "checked_at": generated_at,
         }
     (OUTPUT / "egress-health.json").write_text(
-        json.dumps({"generated_at": generated_at, "configs": health}, separators=(",", ":")) + "\\n",
+        json.dumps({"generated_at": generated_at, "configs": health}, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
 
