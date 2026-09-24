@@ -74,9 +74,13 @@ class SpeedMeasurementTests(unittest.TestCase):
     def test_download_rate_excludes_time_to_first_byte(self):
         self.assertEqual(_download_rate_mbps(1_000_000, 1_000_000, 0.2, 1.2), 1.0)
 
+    def test_partial_download_still_measures_throughput(self):
+        self.assertEqual(_download_rate_mbps(300_000, 5_000_000, 0.2, 30.2), 0.01)
+
     def test_incomplete_or_unmeasurable_download_has_no_rate(self):
-        self.assertIsNone(_download_rate_mbps(500_000, 1_000_000, 0.1, 0.5))
+        self.assertIsNone(_download_rate_mbps(0, 1_000_000, 0.1, 0.5))
         self.assertIsNone(_download_rate_mbps(1_000_000, 1_000_000, 0.5, 0.5))
+        self.assertIsNone(_download_rate_mbps(6_000_000, 5_000_000, 0.2, 1.2))
 
     def test_uses_the_lowest_speed_even_when_retests_differ(self):
         self.assertEqual(_lowest_speed(10.0, 7.0), 7.0)

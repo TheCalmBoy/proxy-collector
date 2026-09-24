@@ -247,9 +247,9 @@ def _tag(uri: str) -> str:
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:8].upper()
 
 
-def _download_rate_mbps(payload_bytes: int, expected_bytes: int, starttransfer: float, total: float) -> float | None:
+def _download_rate_mbps(payload_bytes: int, max_payload_bytes: int, starttransfer: float, total: float) -> float | None:
     transfer_seconds = total - starttransfer
-    if payload_bytes != expected_bytes or transfer_seconds <= 0:
+    if payload_bytes <= 0 or payload_bytes > max_payload_bytes or transfer_seconds <= 0:
         return None
     return payload_bytes / 1_000_000 / transfer_seconds
 
@@ -351,21 +351,22 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "worker_response_incomplete"}
     latency_ms = None
     download_mb_s = None
+    speed_sample_bytes_received = len(downloaded)
     speed_error = None
     if marker:
         try:
             downloaded_size, starttransfer, total = map(float, metric.decode("ascii").strip().split())
             latency_ms = round(starttransfer * 1000, 1)
-            if process.returncode != 0:
-                speed_error = f"curl_exit_{process.returncode}"
-            elif int(downloaded_size) != len(response_body):
+            if int(downloaded_size) != len(response_body):
                 speed_error = "incomplete_speed_payload"
-            elif len(downloaded) != SPEED_TEST_BYTES:
+            elif not 0 < len(downloaded) <= SPEED_TEST_BYTES:
                 speed_error = "incomplete_speed_payload"
             elif total <= starttransfer:
                 speed_error = "speed_payload_too_fast_to_measure"
             else:
                 download_mb_s = _download_rate_mbps(len(downloaded), SPEED_TEST_BYTES, starttransfer, total)
+                if len(downloaded) < SPEED_TEST_BYTES:
+                    speed_error = "partial_speed_sample"
         except (UnicodeDecodeError, ValueError):
             speed_error = "invalid_speed_metrics"
     else:
@@ -389,6 +390,7 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "threat_tags": ffraud.get("threat_tags", []),
         "latency_ms": latency_ms,
         "download_mb_s": download_mb_s,
+        "speed_sample_bytes_received": speed_sample_bytes_received,
         "speed_error": speed_error,
         "cache": (result.get("cache") or {}).get("ffraud"),
     }
