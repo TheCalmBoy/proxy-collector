@@ -290,7 +290,7 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "fail",
         "connect-timeout = 10",
         "max-time = 25",
-        'write-out = "\\n__EGRESS_METRICS__%{time_connect}"',
+        'write-out = "\\n__EGRESS_METRICS__%{time_starttransfer}"',
     ]
     async with semaphore:
         process = await asyncio.create_subprocess_exec(
@@ -302,13 +302,13 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
     if process.returncode != 0:
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": f"curl_exit_{process.returncode}"}
-    payload, marker, metric = stdout.partition(b"\\n__EGRESS_METRICS__")
+    payload, marker, metric = stdout.partition(b"\n__EGRESS_METRICS__")
     if not marker:
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "missing_curl_metrics"}
     try:
         latency_ms = round(float(metric.decode("ascii").strip()) * 1000, 1)
         result = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "invalid_worker_json"}
     ffraud = result.get("ffraud") if isinstance(result, dict) else None
     if not isinstance(ffraud, dict) or not result.get("ip"):
