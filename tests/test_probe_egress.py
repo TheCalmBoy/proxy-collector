@@ -2,7 +2,7 @@ import base64
 import json
 import unittest
 
-from tools.probe_egress import UnsupportedConfig, _consistent_speed, _download_rate_mbps, build_sing_box_config, parse_proxy_uri
+from tools.probe_egress import MIN_DOWNLOAD_MB_S, UnsupportedConfig, _download_rate_mbps, _lowest_speed, _valid_speed, build_sing_box_config, parse_proxy_uri
 
 
 class ParseProxyUriTests(unittest.TestCase):
@@ -78,10 +78,15 @@ class SpeedMeasurementTests(unittest.TestCase):
         self.assertIsNone(_download_rate_mbps(500_000, 1_000_000, 0.1, 0.5))
         self.assertIsNone(_download_rate_mbps(1_000_000, 1_000_000, 0.5, 0.5))
 
-    def test_only_close_retests_get_a_conservative_speed_label(self):
-        self.assertEqual(_consistent_speed(10.0, 8.0), 8.0)
-        self.assertIsNone(_consistent_speed(10.0, 7.0))
-        self.assertIsNone(_consistent_speed(10.0, None))
+    def test_uses_the_lowest_speed_even_when_retests_differ(self):
+        self.assertEqual(_lowest_speed(10.0, 7.0), 7.0)
+        self.assertEqual(_lowest_speed(10.0, None), 10.0)
+
+    def test_drops_unmeasurable_or_under_ten_kilobytes_per_second(self):
+        self.assertIsNone(_valid_speed(None, None))
+        self.assertIsNone(_valid_speed(MIN_DOWNLOAD_MB_S / 2, None))
+        self.assertIsNone(_valid_speed(MIN_DOWNLOAD_MB_S / 2, MIN_DOWNLOAD_MB_S * 2))
+        self.assertEqual(_valid_speed(MIN_DOWNLOAD_MB_S, None), MIN_DOWNLOAD_MB_S)
 
 
 if __name__ == "__main__":
