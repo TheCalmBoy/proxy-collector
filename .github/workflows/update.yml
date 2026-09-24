@@ -63,6 +63,17 @@ jobs:
       - name: Run collector
         run: python main.py
 
+      - name: Preserve latest egress health index
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)"
+          if curl --fail --location --silent --show-error "$url" -o /tmp/egress-health.json; then
+            cp /tmp/egress-health.json output/egress-health.json
+          else
+            echo "No published egress health index yet."
+          fi
+
       - name: Show generated summary
         run: |
           python - <<'PY'

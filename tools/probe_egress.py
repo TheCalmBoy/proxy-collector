@@ -238,7 +238,10 @@ def _read_source() -> list[str]:
 
 
 def _tag(uri: str) -> str:
-    return hashlib.sha256(uri.encode("utf-8")).hexdigest()[:12]
+    # Match main.py's stable feed ID: first 8 uppercase hex chars of the
+    # source URI without its display fragment.
+    base = uri.split("#", 1)[0]
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:8].upper()
 
 
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
@@ -287,6 +290,7 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "fail",
         "connect-timeout = 10",
         "max-time = 25",
+        'write-out = "\\n__EGRESS_METRICS__%{time_starttransfer}"',
     ]
     async with semaphore:
         process = await asyncio.create_subprocess_exec(
@@ -298,9 +302,13 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
     if process.returncode != 0:
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": f"curl_exit_{process.returncode}"}
+    payload, marker, metric = stdout.partition(b"\n__EGRESS_METRICS__")
+    if not marker:
+        return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "missing_curl_metrics"}
     try:
-        result = json.loads(stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        latency_ms = round(float(metric.decode("ascii").strip()) * 1000, 1)
+        result = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "invalid_worker_json"}
     ffraud = result.get("ffraud") if isinstance(result, dict) else None
     if not isinstance(ffraud, dict) or not result.get("ip"):
@@ -320,7 +328,9 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "tor": ffraud.get("tor"),
         "hosting": ffraud.get("hosting"),
         "recent_abuse": ffraud.get("recent_abuse"),
+        "connection_type": ffraud.get("connection_type"),
         "threat_tags": ffraud.get("threat_tags", []),
+        "latency_ms": latency_ms,
         "cache": (result.get("cache") or {}).get("ffraud"),
     }
 
@@ -433,8 +443,30 @@ async def main() -> int:
             core.kill()
             core.wait()
 
+    generated_at = datetime.now(timezone.utc).isoformat()
+    first_by_id = {row["id"]: row for row in first if row["ok"]}
+    second_by_id = {row["id"]: row for row in second if row["ok"]}
+    health = {}
+    for identifier in sorted(first_by_id.keys() & second_by_id.keys()):
+        initial, delayed = first_by_id[identifier], second_by_id[identifier]
+        stable = initial["ip"] == delayed["ip"]
+        latencies = [row["latency_ms"] for row in (initial, delayed) if row.get("latency_ms") is not None]
+        health[identifier] = {
+            "risk": delayed.get("risk"),
+            "fraud_score": delayed.get("fraud_score"),
+            "connection_type": delayed.get("connection_type"),
+            "stability": "Stable" if stable else "Changed",
+            "retest_minutes": round(delay / 60, 1),
+            "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            "checked_at": generated_at,
+        }
+    (OUTPUT / "egress-health.json").write_text(
+        json.dumps({"generated_at": generated_at, "configs": health}, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
     report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
         "source": SOURCE_URL,
         "worker": WORKER_URL,
         "sing_box_version": subprocess.run([SING_BOX, "version"], capture_output=True, text=True).stdout.strip(),
