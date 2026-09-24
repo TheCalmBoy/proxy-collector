@@ -2,7 +2,7 @@ import base64
 import json
 import unittest
 
-from tools.probe_egress import UnsupportedConfig, build_sing_box_config, parse_proxy_uri
+from tools.probe_egress import UnsupportedConfig, _consistent_speed, _download_rate_mbps, build_sing_box_config, parse_proxy_uri
 
 
 class ParseProxyUriTests(unittest.TestCase):
@@ -68,6 +68,20 @@ class ParseProxyUriTests(unittest.TestCase):
         self.assertEqual(len(config["route"]["rules"]), 2)
         self.assertEqual(stats["supported"], 2)
         self.assertEqual(config["route"]["rules"][0]["action"], "route")
+
+
+class SpeedMeasurementTests(unittest.TestCase):
+    def test_download_rate_excludes_time_to_first_byte(self):
+        self.assertEqual(_download_rate_mbps(1_000_000, 1_000_000, 0.2, 1.2), 1.0)
+
+    def test_incomplete_or_unmeasurable_download_has_no_rate(self):
+        self.assertIsNone(_download_rate_mbps(500_000, 1_000_000, 0.1, 0.5))
+        self.assertIsNone(_download_rate_mbps(1_000_000, 1_000_000, 0.5, 0.5))
+
+    def test_only_close_retests_get_a_conservative_speed_label(self):
+        self.assertEqual(_consistent_speed(10.0, 8.0), 8.0)
+        self.assertIsNone(_consistent_speed(10.0, 7.0))
+        self.assertIsNone(_consistent_speed(10.0, None))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 PORT_BASE = 30000
+SPEED_TEST_BYTES = 1_000_000
 UTLS_FINGERPRINTS = {
     "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
     "random", "randomized",
@@ -244,6 +245,22 @@ def _tag(uri: str) -> str:
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:8].upper()
 
 
+def _download_rate_mbps(payload_bytes: int, expected_bytes: int, starttransfer: float, total: float) -> float | None:
+    transfer_seconds = total - starttransfer
+    if payload_bytes != expected_bytes or transfer_seconds <= 0:
+        return None
+    return round(payload_bytes / 1_000_000 / transfer_seconds, 2)
+
+
+def _consistent_speed(first: float | None, second: float | None) -> float | None:
+    if not first or not second:
+        return None
+    if abs(first - second) / max(first, second) > 0.25:
+        return None
+    # Use the slower sample as a conservative repeatable estimate.
+    return round(min(first, second), 1)
+
+
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
     inbounds: list[dict[str, Any]] = []
     outbounds: list[dict[str, Any]] = []
@@ -281,16 +298,18 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
 
 
 async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
+    body_path = Path("/tmp") / f"proxy-egress-{record['id']}.bin"
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
-        f'url = "{worker_url}/ip"',
+        f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
         f'header = "Authorization: Bearer {token}"',
         "silent",
         "show-error",
         "fail",
         "connect-timeout = 10",
-        "max-time = 25",
-        'write-out = "\\n__EGRESS_METRICS__%{time_starttransfer}"',
+        "max-time = 30",
+        f'output = "{body_path}"',
+        'write-out = "\\n__EGRESS_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
     async with semaphore:
         process = await asyncio.create_subprocess_exec(
@@ -300,19 +319,42 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
-    if process.returncode != 0:
+    _, marker, metric = stdout.partition(b"\n__EGRESS_METRICS__")
+    if not body_path.exists():
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": f"curl_exit_{process.returncode}"}
-    payload, marker, metric = stdout.partition(b"\n__EGRESS_METRICS__")
-    if not marker:
+    response_body = body_path.read_bytes()
+    body_path.unlink(missing_ok=True)
+    metadata_line, separator, downloaded = response_body.partition(b"\n")
+    if not separator:
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "missing_curl_metrics"}
     try:
-        latency_ms = round(float(metric.decode("ascii").strip()) * 1000, 1)
-        result = json.loads(payload)
+        result = json.loads(metadata_line)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "invalid_worker_json"}
     ffraud = result.get("ffraud") if isinstance(result, dict) else None
     if not isinstance(ffraud, dict) or not result.get("ip"):
         return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "worker_response_incomplete"}
+    latency_ms = None
+    download_mb_s = None
+    speed_error = None
+    if marker:
+        try:
+            downloaded_size, starttransfer, total = map(float, metric.decode("ascii").strip().split())
+            latency_ms = round(starttransfer * 1000, 1)
+            if process.returncode != 0:
+                speed_error = f"curl_exit_{process.returncode}"
+            elif int(downloaded_size) != len(response_body):
+                speed_error = "incomplete_speed_payload"
+            elif len(downloaded) != SPEED_TEST_BYTES:
+                speed_error = "incomplete_speed_payload"
+            elif total <= starttransfer:
+                speed_error = "speed_payload_too_fast_to_measure"
+            else:
+                download_mb_s = _download_rate_mbps(len(downloaded), SPEED_TEST_BYTES, starttransfer, total)
+        except (UnicodeDecodeError, ValueError):
+            speed_error = "invalid_speed_metrics"
+    else:
+        speed_error = "missing_speed_metrics"
     return {
         "id": record["id"],
         "scheme": record["scheme"],
@@ -331,6 +373,8 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "connection_type": ffraud.get("connection_type"),
         "threat_tags": ffraud.get("threat_tags", []),
         "latency_ms": latency_ms,
+        "download_mb_s": download_mb_s,
+        "speed_error": speed_error,
         "cache": (result.get("cache") or {}).get("ffraud"),
     }
 
@@ -340,7 +384,8 @@ async def _run_round(records: list[dict[str, Any]], round_name: str, semaphore: 
     for row in results:
         row["round"] = round_name
     ok = sum(1 for row in results if row["ok"])
-    print(f"{round_name}: {ok}/{len(results)} returned an IP")
+    measured_speeds = sum(1 for row in results if row.get("download_mb_s") is not None)
+    print(f"{round_name}: {ok}/{len(results)} returned an IP; {measured_speeds}/{len(results)} completed a speed sample")
     return results
 
 
@@ -349,10 +394,14 @@ def _summarize(first: list[dict[str, Any]], second: list[dict[str, Any]]) -> dic
     second_by_id = {row["id"]: row for row in second if row["ok"]}
     comparable = sorted(first_by_id.keys() & second_by_id.keys())
     changed = [key for key in comparable if first_by_id[key]["ip"] != second_by_id[key]["ip"]]
+    comparable_speeds = [key for key in comparable if first_by_id[key].get("download_mb_s") and second_by_id[key].get("download_mb_s")]
+    stable_speeds = [key for key in comparable_speeds if _consistent_speed(first_by_id[key]["download_mb_s"], second_by_id[key]["download_mb_s"]) is not None]
     return {
         "tested_both_rounds": len(comparable),
         "stable_ip": len(comparable) - len(changed),
         "changed_ip": len(changed),
+        "speed_tested_both_rounds": len(comparable_speeds),
+        "speed_consistent_both_rounds": len(stable_speeds),
         "dynamic_configs": [
             {"id": key, "first_ip": first_by_id[key]["ip"], "second_ip": second_by_id[key]["ip"]}
             for key in changed
@@ -458,6 +507,8 @@ async def main() -> int:
             "stability": "Stable" if stable else "Changed",
             "retest_minutes": round(delay / 60, 1),
             "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
+            "download_mb_s": _consistent_speed(initial.get("download_mb_s"), delayed.get("download_mb_s")),
+            "speed_stable": _consistent_speed(initial.get("download_mb_s"), delayed.get("download_mb_s")) is not None,
             "checked_at": generated_at,
         }
     (OUTPUT / "egress-health.json").write_text(
@@ -476,6 +527,8 @@ async def main() -> int:
             "candidate_count": len(candidates),
             "seed_hour_utc": seed if selection_mode == "sample" else None,
             "retest_delay_seconds": delay,
+            "speed_sample_bytes": SPEED_TEST_BYTES,
+            "speed_consistency_tolerance": 0.25,
         },
         "config_support": {**config_stats, "unsupported_source_schemes": skipped},
         "summary": _summarize(first, second),
