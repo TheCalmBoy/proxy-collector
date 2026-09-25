@@ -319,7 +319,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     """Run 5 MB download speed test via Worker"""
     body_path = Path("/tmp") / f"speed-{record['id']}.bin"
     config_lines = [
-        f'proxy = "socks5h://127.0.0.1:{record["server_port"]}"',
+        f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
         f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
         f'header = "Authorization: Bearer {token}"',
         "silent",
@@ -413,7 +413,8 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             "id": identifier,
             "scheme": outbound["type"],
             "server": outbound["server"],
-            "server_port": port,
+            "server_port": outbound["server_port"],
+            "port": port,
             "uri": uri,
         })
         stats["supported"] += 1
@@ -480,7 +481,7 @@ async def main() -> int:
         # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            _tcp_connect("127.0.0.1", r["server_port"], TCP_TIMEOUT) for r in records
+            _tcp_connect("127.0.0.1", r["port"], TCP_TIMEOUT) for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
@@ -488,7 +489,7 @@ async def main() -> int:
         # Tier 2: Packet loss test (through sing-box inbounds)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            _packet_test("127.0.0.1", r["server_port"], r["scheme"]) for r in tier1_survivors
+            _packet_test("127.0.0.1", r["port"], r["scheme"]) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")
