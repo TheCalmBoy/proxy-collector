@@ -49,7 +49,7 @@ jobs:
       - name: Verify sing-box works
         run: |
           echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' | sing-box check -c -
-          timeout 3 sing-box run -c - <<<'{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' || true
+          timeout 3 sing-box run -c - <<<'{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' 2>/dev/null || true
           echo "sing-box test passed"
 
       - name: Download DB-IP Lite country database
