@@ -262,6 +262,25 @@ def query_ip_api(
                     if isinstance(item, dict) and item.get("query"):
                         results[str(item["query"])] = item
 
+            # ip-api answers status=fail per IP when the batch asks for fields
+            # the caller's tier cannot see, and GitHub's runner ranges are
+            # frequently rejected outright. Surface why, so a 0-success run is
+            # not mistaken for "all residential".
+            failed = [
+                item
+                for item in batch_results
+                if isinstance(item, dict) and item.get("status") != "success"
+            ]
+            if failed:
+                sample = failed[0]
+                print(
+                    f"  {len(failed)}/{len(chunk)} lookups failed: "
+                    f"status={sample.get('status')!r} "
+                    f"message={str(sample.get('message'))[:120]!r} "
+                    f"query={sample.get('query')!r}"
+                )
+            else:
+                print(f"  {len(chunk)}/{len(chunk)} lookups succeeded")
             for ip in chunk:
                 results.setdefault(ip, {"status": "error", "message": "missing result"})
 
