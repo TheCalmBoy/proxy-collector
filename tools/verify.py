@@ -323,7 +323,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     """Run 5 MB download speed test via Worker"""
     body_path = Path("/tmp") / f"speed-{record['id']}.bin"
     config_lines = [
-        f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
+        f'proxy = "socks5h://127.0.0.1:{record["server_port"]}"',
         f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
         f'header = "Authorization: Bearer {token}"',
         "silent",
