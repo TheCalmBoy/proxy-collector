@@ -368,9 +368,7 @@ async def _https_request_inner(
                 + struct.pack("!H", port)
             )
             await writer.drain()
-            version, reply, _reserved, address_type = await asyncio.wait_for(
-                reader.readexactly(4), timeout=1.5
-            )
+            version, reply, _reserved, address_type = await reader.readexactly(4)
             if version != 5 or reply != 0:
                 raise OSError(f"socks5_reply_{reply}")
             if address_type == 1:
@@ -398,7 +396,7 @@ async def _https_request_inner(
                 "User-Agent: proxy-collector/1.0\r\nConnection: close\r\n\r\n".encode()
             )
             await writer.drain()
-            status_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            status_line = await reader.readline()
             if not status_line.startswith(b"HTTP/1.1 2") and not status_line.startswith(b"HTTP/1.0 2"):
                 raise OSError("https_non_2xx")
 
@@ -411,41 +409,39 @@ async def _https_request_inner(
     finally:
         if writer is not None:
             writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
 
 
 async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
-    """Run 20 SOCKS CONNECT + 20 HTTPS requests over 40 seconds."""
-    interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
-    tcp_latencies = []
-    https_latencies = []
+    """Run 20 concurrent SOCKS CONNECT + HTTPS GET pairs over 40 seconds."""
+    tcp_latencies: list[float] = []
+    https_latencies: list[float] = []
     tcp_success = 0
     https_success = 0
+    started_at = time.perf_counter()
+
+    async def run_round() -> None:
+        nonlocal tcp_success, https_success
+        tcp_result, https_result = await asyncio.gather(
+            _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT),
+            _https_request(
+                record["port"],
+                "https://cloudflare.com/cdn-cgi/trace",
+                TCP_TIMEOUT,
+            ),
+        )
+        if tcp_result[0]:
+            tcp_success += 1
+            tcp_latencies.append((time.perf_counter() - started_at) * 1000)
+        if https_result[0] and https_result[1] is not None:
+            https_success += 1
+            https_latencies.append(https_result[1])
 
     for _ in range(PACKET_TEST_COUNT):
-        start = time.perf_counter()
-        ok, _reply = await _socks5_connect(
-            record["port"],
-            "1.1.1.1",
-            443,
-            TCP_TIMEOUT,
-        )
-        if ok:
-            tcp_success += 1
-            tcp_latencies.append((time.perf_counter() - start) * 1000)
-
-        ok, latency_ms = await _https_request(
-            record["port"],
-            "https://cloudflare.com/cdn-cgi/trace",
-            TCP_TIMEOUT,
-        )
-        if ok and latency_ms is not None:
-            https_success += 1
-            https_latencies.append(latency_ms)
-        await asyncio.sleep(interval)
+        await run_round()
+        remaining = PACKET_TEST_DURATION - (time.perf_counter() - started_at)
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(PACKET_TEST_DURATION / PACKET_TEST_COUNT, remaining))
 
     tcp_rate = tcp_success / PACKET_TEST_COUNT
     https_rate = https_success / PACKET_TEST_COUNT

@@ -46,7 +46,8 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
             return True, 1.0
 
         with (
-            mock.patch.object(verify, "PACKET_TEST_DURATION", 0),
+            mock.patch.object(verify, "PACKET_TEST_DURATION", 40),
+            mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
             mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
             mock.patch.object(verify, "_https_request", fake_https_request, create=True),
         ):
@@ -73,7 +74,8 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
             return result
 
         with (
-            mock.patch.object(verify, "PACKET_TEST_DURATION", 0),
+            mock.patch.object(verify, "PACKET_TEST_DURATION", 40),
+            mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
             mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
             mock.patch.object(verify, "_https_request", counted_https_request, create=True),
         ):
@@ -82,6 +84,36 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tcp"]["success_count"], 20)
         self.assertEqual(result["https"]["success_count"], 17)
         self.assertFalse(result["passed"])
+
+    async def test_https_request_closes_stream_without_waiting(self):
+        writer = mock.Mock()
+        writer.drain = mock.AsyncMock()
+        writer.wait_closed = mock.AsyncMock()
+        writer.start_tls = mock.AsyncMock(return_value=None)
+
+        socks_reader = asyncio.StreamReader()
+        socks_reader.feed_data(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
+        socks_reader.feed_eof()
+        tls_reader = asyncio.StreamReader()
+        tls_reader.feed_data(b"HTTP/1.1 200 OK\r\n\r\n")
+        tls_reader.feed_eof()
+
+        async def supported_greeting(_reader, _writer):
+            return b"\x05\x00"
+
+        with (
+            mock.patch("tools.verify._read_socks5_greeting", supported_greeting),
+            mock.patch("tools.verify.asyncio.open_connection", return_value=(socks_reader, writer)),
+            mock.patch.object(writer, "start_tls", new=mock.AsyncMock(return_value=None)),
+            mock.patch("tools.verify.asyncio.StreamReader.readline", new=mock.AsyncMock(
+                return_value=b"HTTP/1.1 200 OK\r\n"
+            )),
+        ):
+            ok, _latency = await verify._https_request(30000, "https://example.com/", 1.5)
+
+        self.assertTrue(ok)
+        writer.close.assert_called_once()
+        writer.wait_closed.assert_not_awaited()
 
     async def test_socks5_connect_rejects_non_success_reply(self):
         reader = asyncio.StreamReader()
