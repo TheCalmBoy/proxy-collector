@@ -601,6 +601,41 @@ async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     return proc
 
 
+def limit_verification(
+    config: dict[str, Any],
+    records: list[dict[str, Any]],
+    stats: dict[str, int],
+    limit: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
+    """Keep only the first `limit` already-parsed records, config stays consistent."""
+    if limit <= 0 or len(records) <= limit:
+        return config, records, stats
+
+    kept_tags = {record["id"] for record in records[:limit]}
+    limited = records[:limit]
+    return {
+        "log": config["log"],
+        "inbounds": [
+            inbound
+            for inbound in config["inbounds"]
+            if inbound["tag"].removeprefix("in-") in kept_tags
+        ],
+        "outbounds": [
+            outbound
+            for outbound in config["outbounds"]
+            if outbound["tag"] == "direct" or outbound["tag"].removeprefix("proxy-") in kept_tags
+        ],
+        "route": {
+            "rules": [
+                rule
+                for rule in config["route"]["rules"]
+                if rule["inbound"][0].removeprefix("in-") in kept_tags
+            ],
+            "final": config["route"]["final"],
+        },
+    }, limited, {**stats, "input": len(limited)}
+
+
 async def main() -> int:
     worker_url = os.environ.get("WORKER_URL", "").rstrip("/")
     worker_token = os.environ.get("WORKER_TOKEN", "")
@@ -623,9 +658,7 @@ async def main() -> int:
     print(f"Fetched {len(uris)} raw configs")
 
     config, records, stats = build_sing_box_config(uris)
-    if VERIFY_LIMIT:
-        uris = uris[:VERIFY_LIMIT]
-        config, records, stats = build_sing_box_config(uris)
+    config, records, stats = limit_verification(config, records, stats, VERIFY_LIMIT)
     if not records:
         print("No supported configs", file=sys.stderr)
         return 1

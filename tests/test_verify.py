@@ -27,6 +27,40 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertEqual(records[0]["port"], 30000)
         self.assertEqual(config["inbounds"][0]["listen_port"], records[0]["port"])
 
+    def test_limit_verification_keeps_config_and_records_in_sync(self):
+        config, records, stats = verify.build_sing_box_config(
+            [
+                "socks5://one.example:1080",
+                "socks5://two.example:1081",
+                "socks5://three.example:1082",
+            ]
+        )
+
+        limited_config, limited_records, limited_stats = verify.limit_verification(
+            config, records, stats, 2
+        )
+
+        kept_ids = {record["id"] for record in limited_records}
+        self.assertEqual(len(limited_records), 2)
+        self.assertEqual(limited_stats["input"], 2)
+        self.assertEqual(
+            {inbound["tag"].removeprefix("in-") for inbound in limited_config["inbounds"]},
+            kept_ids,
+        )
+        self.assertEqual(
+            {
+                outbound["tag"].removeprefix("proxy-")
+                for outbound in limited_config["outbounds"]
+                if outbound["tag"] != "direct"
+            },
+            kept_ids,
+        )
+        self.assertEqual(
+            {rule["inbound"][0].removeprefix("in-") for rule in limited_config["route"]["rules"]},
+            kept_ids,
+        )
+        self.assertEqual(limited_config["outbounds"][-1]["tag"], "direct")
+
     def test_all_tiers_use_local_sing_box_inbound(self):
         tcp_calls = []
         packet_calls = []
