@@ -6,7 +6,8 @@ import struct
 import unittest
 from unittest import mock
 
-from tools.verify import _read_socks5_greeting, _socks5_connect
+import tools.verify as verify
+from tools.verify import _packet_test, _read_socks5_greeting, _socks5_connect
 
 
 class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
@@ -29,6 +30,58 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await _read_socks5_greeting(reader, writer), b"\x05\x00")
         writer.write.assert_called_once_with(b"\x05\x01\x00")
+
+    async def test_packet_test_runs_20_socks_and_20_https_requests(self):
+        socks_calls = 0
+        https_calls = 0
+
+        async def fake_socks_connect(*_args):
+            nonlocal socks_calls
+            socks_calls += 1
+            return True, b"\x05\x00"
+
+        async def fake_https_request(*_args):
+            nonlocal https_calls
+            https_calls += 1
+            return True, 1.0
+
+        with (
+            mock.patch.object(verify, "PACKET_TEST_DURATION", 0),
+            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+            mock.patch.object(verify, "_https_request", fake_https_request, create=True),
+        ):
+            result = await verify._packet_test({"port": 30000})
+
+        self.assertEqual(socks_calls, 20)
+        self.assertEqual(https_calls, 20)
+        self.assertEqual(result["tcp"]["success_count"], 20)
+        self.assertEqual(result["https"]["success_count"], 20)
+        self.assertTrue(result["passed"])
+
+    async def test_packet_test_requires_both_tcp_and_https_threshold(self):
+        async def fake_socks_connect(*_args):
+            return True, b"\x05\x00"
+
+        async def fake_https_request(*_args):
+            return (https_calls["count"] < 17, 1.0)
+
+        https_calls = {"count": 0}
+
+        async def counted_https_request(*_args):
+            result = await fake_https_request()
+            https_calls["count"] += 1
+            return result
+
+        with (
+            mock.patch.object(verify, "PACKET_TEST_DURATION", 0),
+            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+            mock.patch.object(verify, "_https_request", counted_https_request, create=True),
+        ):
+            result = await verify._packet_test({"port": 30000})
+
+        self.assertEqual(result["tcp"]["success_count"], 20)
+        self.assertEqual(result["https"]["success_count"], 17)
+        self.assertFalse(result["passed"])
 
     async def test_socks5_connect_rejects_non_success_reply(self):
         reader = asyncio.StreamReader()

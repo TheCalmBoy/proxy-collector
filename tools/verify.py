@@ -16,6 +16,7 @@ import json
 import os
 import random
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -335,11 +336,101 @@ async def _udp_ping(host: str, port: int, timeout: float) -> tuple[bool, float |
         return False, None
 
 
+async def _https_request(proxy_port: int, url: str, timeout: float) -> tuple[bool, float | None]:
+    """Make one real HTTPS GET through a sing-box SOCKS inbound."""
+    start = time.perf_counter()
+    if os.getenv("VERIFY_DEBUG_HTTPS"):
+        try:
+            return await _https_request_inner(proxy_port, url, timeout, start)
+        except Exception as exc:
+            print(f"HTTPS_DEBUG {url} -> {type(exc).__name__}: {exc}", file=sys.stderr)
+            return False, None
+    return await _https_request_inner(proxy_port, url, timeout, start)
+
+
+async def _https_request_inner(
+    proxy_port: int,
+    url: str,
+    timeout: float,
+    start: float,
+) -> tuple[bool, float | None]:
+    reader: asyncio.StreamReader | None = None
+    writer: asyncio.StreamWriter | None = None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        port = parsed.port or 443
+        host = parsed.hostname
+        if not host or parsed.scheme != "https":
+            return False, None
+
+        async def exchange() -> None:
+            nonlocal reader, writer
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+            await _read_socks5_greeting(reader, writer)
+            encoded_host = host.encode("idna")
+            writer.write(
+                b"\x05\x01\x00\x03"
+                + bytes([len(encoded_host)])
+                + encoded_host
+                + struct.pack("!H", port)
+            )
+            await writer.drain()
+            version, reply, _reserved, address_type = await asyncio.wait_for(
+                reader.readexactly(4), timeout=1.5
+            )
+            if version != 5 or reply != 0:
+                raise OSError(f"socks5_reply_{reply}")
+            if address_type == 1:
+                await reader.readexactly(4)
+            elif address_type == 4:
+                await reader.readexactly(16)
+            elif address_type == 3:
+                length = (await reader.readexactly(1))[0]
+                await reader.readexactly(length)
+            else:
+                raise OSError("socks5_invalid_bound_address")
+            await reader.readexactly(2)
+
+            ssl_context = ssl.create_default_context()
+            await writer.start_tls(
+                ssl_context,
+                server_hostname=host,
+                ssl_handshake_timeout=timeout,
+            )
+            path = parsed.path or "/"
+            if parsed.query:
+                path += "?" + parsed.query
+            writer.write(
+                f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
+                "User-Agent: proxy-collector/1.0\r\nConnection: close\r\n\r\n".encode()
+            )
+            await writer.drain()
+            status_line = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            if not status_line.startswith(b"HTTP/1.1 2") and not status_line.startswith(b"HTTP/1.0 2"):
+                raise OSError("https_non_2xx")
+
+        await asyncio.wait_for(exchange(), timeout=timeout)
+        return True, (time.perf_counter() - start) * 1000
+    except Exception as exc:
+        if os.getenv("VERIFY_DEBUG_HTTPS"):
+            print(f"HTTPS_DEBUG {url} -> {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False, None
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
 async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
-    """Run 20 real SOCKS5 CONNECT tests over 40 seconds through sing-box."""
+    """Run 20 SOCKS CONNECT + 20 HTTPS requests over 40 seconds."""
     interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
     tcp_latencies = []
+    https_latencies = []
     tcp_success = 0
+    https_success = 0
 
     for _ in range(PACKET_TEST_COUNT):
         start = time.perf_counter()
@@ -352,9 +443,19 @@ async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
         if ok:
             tcp_success += 1
             tcp_latencies.append((time.perf_counter() - start) * 1000)
+
+        ok, latency_ms = await _https_request(
+            record["port"],
+            "https://cloudflare.com/cdn-cgi/trace",
+            TCP_TIMEOUT,
+        )
+        if ok and latency_ms is not None:
+            https_success += 1
+            https_latencies.append(latency_ms)
         await asyncio.sleep(interval)
 
     tcp_rate = tcp_success / PACKET_TEST_COUNT
+    https_rate = https_success / PACKET_TEST_COUNT
 
     def stats(latencies: list[float]) -> dict[str, float]:
         if not latencies:
@@ -375,7 +476,15 @@ async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
             "success_count": tcp_success,
             **stats(tcp_latencies),
         },
-        "passed": tcp_rate >= PACKET_TEST_MIN_SUCCESS_RATE,
+        "https": {
+            "success_rate": https_rate,
+            "success_count": https_success,
+            **stats(https_latencies),
+        },
+        "passed": (
+            tcp_rate >= PACKET_TEST_MIN_SUCCESS_RATE
+            and https_rate >= PACKET_TEST_MIN_SUCCESS_RATE
+        ),
     }
 
 
