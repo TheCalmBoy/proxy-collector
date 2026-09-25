@@ -13,6 +13,10 @@ on:
         description: "Print HTTPS handshake failures"
         type: boolean
         default: false
+      https_url:
+        description: "HTTPS test URL"
+        required: false
+        default: "https://cloudflare.com/cdn-cgi/trace"
 
 permissions:
   contents: write
@@ -101,6 +105,7 @@ jobs:
           VERIFY_CONCURRENCY: "750"
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
+          VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://cloudflare.com/cdn-cgi/trace' }}
         run: python tools/verify.py
 
       - name: Preserve latest egress health index

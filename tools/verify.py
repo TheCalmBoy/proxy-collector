@@ -44,6 +44,9 @@ TCP_TIMEOUT = 1.5
 PACKET_TEST_COUNT = 20
 PACKET_TEST_DURATION = 40  # seconds
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
+HTTPS_TEST_URL = os.getenv(
+    "VERIFY_HTTPS_URL", "https://cloudflare.com/cdn-cgi/trace"
+)
 
 
 class UnsupportedConfig(ValueError):
@@ -422,7 +425,7 @@ async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
             _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT),
             _https_request(
                 record["port"],
-                "https://cloudflare.com/cdn-cgi/trace",
+                HTTPS_TEST_URL,
                 TCP_TIMEOUT,
             ),
         )
