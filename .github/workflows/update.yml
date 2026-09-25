@@ -48,8 +48,9 @@ jobs:
 
       - name: Verify sing-box works
         run: |
-          echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' | sing-box check -c -
-          echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' | timeout 3 sing-box run -c - 2>/dev/null || true
+          echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > /tmp/test-config.json
+          sing-box check -c /tmp/test-config.json
+          timeout 3 sing-box run -c /tmp/test-config.json 2>/dev/null || true
           echo "sing-box test passed"
 
       - name: Download DB-IP Lite country database
