@@ -70,7 +70,7 @@ class VerifyPortRoutingTests(unittest.TestCase):
             tcp_calls.append((proxy_port, host, port, timeout))
             return True, b"\x05\x00"
 
-        async def fake_packet(record):
+        async def fake_packet(record, _tcp_sem=None, _https_sem=None):
             packet_calls.append(record["port"])
             return {
                 "tcp": {"success_rate": 1.0, "success_count": 20},
@@ -126,28 +126,33 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertEqual(packet_calls, [30000])
         self.assertEqual(speed_calls, [30000])
 
-    def test_tiers_respect_configured_concurrency(self):
-        active = 0
-        peak = {"tier1": 0, "tier2": 0}
+    def test_tcp_and_https_use_independent_concurrency_limits(self):
+        active = {"tcp": 0, "https": 0}
+        peak = {"tcp": 0, "https": 0}
 
         async def fake_socks_connect(*_args):
-            nonlocal active
-            active += 1
-            peak["tier1"] = max(peak["tier1"], active)
+            active["tcp"] += 1
+            peak["tcp"] = max(peak["tcp"], active["tcp"])
             await asyncio.sleep(0)
-            active -= 1
+            active["tcp"] -= 1
             return True, b"\x05\x00"
 
-        async def fake_packet(_record):
-            nonlocal active
-            active += 1
-            peak["tier2"] = max(peak["tier2"], active)
-            await asyncio.sleep(0)
-            active -= 1
-            return {
-                "tcp": {"success_rate": 1.0, "success_count": 20},
-                "passed": True,
-            }
+        async def fake_packet(_record, tcp_sem=None, https_sem=None):
+            async def run():
+                active["https"] += 1
+                peak["https"] = max(peak["https"], active["https"])
+                await asyncio.sleep(0)
+                active["https"] -= 1
+                return {
+                    "tcp": {"success_rate": 1.0, "success_count": 20},
+                    "https": {"success_rate": 1.0, "success_count": 20},
+                    "passed": True,
+                }
+
+            if https_sem is None:
+                return await run()
+            async with https_sem:
+                return await run()
 
         async def fake_speed(*_args):
             return {
@@ -187,7 +192,8 @@ class VerifyPortRoutingTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(verify, "OUTPUT", Path(output_dir)),
-                mock.patch.object(verify, "CONCURRENCY", 3),
+                mock.patch.object(verify, "TCP_CONCURRENCY", 750),
+                mock.patch.object(verify, "HTTPS_CONCURRENCY", 2),
                 mock.patch.object(verify, "VERIFY_LIMIT", 0),
                 mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
                 mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
@@ -198,14 +204,15 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 result = asyncio.run(verify.main())
 
         self.assertEqual(result, 0)
-        self.assertLessEqual(peak["tier1"], 3)
-        self.assertLessEqual(peak["tier2"], 3)
+        # TCP is cheap and unthrottled; HTTPS honours its own lower limit.
+        self.assertEqual(peak["tcp"], 12)
+        self.assertLessEqual(peak["https"], 2)
 
     def test_slow_configs_are_not_written_to_enriched_output(self):
         async def fake_socks_connect(*_args):
             return True, b"\x05\x00"
 
-        async def fake_packet(_record):
+        async def fake_packet(_record, _tcp_sem=None, _https_sem=None):
             return {
                 "tcp": {"success_rate": 1.0, "success_count": 20},
                 "passed": True,

@@ -36,7 +36,8 @@ WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
-CONCURRENCY = max(1, int(os.getenv("VERIFY_CONCURRENCY", "100")))
+TCP_CONCURRENCY = max(1, int(os.getenv("VERIFY_TCP_CONCURRENCY", "750")))
+HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "100")))
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
@@ -410,7 +411,11 @@ async def _https_request_inner(
             writer.close()
 
 
-async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
+async def _packet_test(
+    record: dict[str, Any],
+    tcp_semaphore: asyncio.Semaphore | None = None,
+    https_semaphore: asyncio.Semaphore | None = None,
+) -> dict[str, Any]:
     """Run 20 concurrent SOCKS CONNECT + HTTPS GET pairs spaced 2s apart."""
     interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
     tcp_latencies: list[float] = []
@@ -421,14 +426,20 @@ async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
     async def run_round() -> None:
         nonlocal tcp_success, https_success
         started_at = time.perf_counter()
-        tcp_result, https_result = await asyncio.gather(
-            _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT),
-            _https_request(
-                record["port"],
-                HTTPS_TEST_URL,
-                TCP_TIMEOUT,
-            ),
-        )
+
+        async def tcp_check() -> tuple[bool, Any]:
+            if tcp_semaphore is None:
+                return await _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT)
+            async with tcp_semaphore:
+                return await _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT)
+
+        async def https_check() -> tuple[bool, float | None]:
+            if https_semaphore is None:
+                return await _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT)
+            async with https_semaphore:
+                return await _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT)
+
+        tcp_result, https_result = await asyncio.gather(tcp_check(), https_check())
         if tcp_result[0]:
             tcp_success += 1
             tcp_latencies.append((time.perf_counter() - started_at) * 1000)
@@ -670,27 +681,24 @@ async def main() -> int:
     sing_box_proc = await _run_sing_box(config)
 
     try:
-        semaphore = asyncio.Semaphore(CONCURRENCY)
+        # TCP is cheap (one CONNECT). HTTPS costs a full TLS handshake, so it
+        # gets its own independent limit instead of sharing one with TCP.
+        tcp_semaphore = asyncio.Semaphore(TCP_CONCURRENCY)
+        https_semaphore = asyncio.Semaphore(HTTPS_CONCURRENCY)
         enriched = []
-
-        async def bounded(coroutine_factory):
-            """Apply CONCURRENCY to a tier; previously tiers ran fully unthrottled."""
-            async with semaphore:
-                return await coroutine_factory()
 
         # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            bounded(lambda r=r: _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT))
-            for r in records
+            _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT) for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
 
-        # Tier 2: Packet loss test (real SOCKS5 CONNECT through sing-box)
+        # Tier 2: Packet loss test (real SOCKS5 CONNECT + HTTPS through sing-box)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            bounded(lambda r=r: _packet_test(r)) for r in tier1_survivors
+            _packet_test(r, tcp_semaphore, https_semaphore) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         def _rate(result: dict[str, Any], key: str) -> float:
@@ -707,7 +715,7 @@ async def main() -> int:
         # Tier 3: Speed test
         print(f"Tier 3: Speed test ({len(tier2_survivors)} configs)...")
         tier3_results = await asyncio.gather(*[
-            _speed_test(r, worker_url, worker_token, semaphore) for r in tier2_survivors
+            _speed_test(r, worker_url, worker_token, tcp_semaphore) for r in tier2_survivors
         ])
 
         # Build enriched output from Tier 3 survivors only.
