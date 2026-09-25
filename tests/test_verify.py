@@ -31,12 +31,12 @@ class VerifyPortRoutingTests(unittest.TestCase):
         packet_calls = []
         speed_calls = []
 
-        async def fake_tcp(host, port, timeout):
-            tcp_calls.append((host, port, timeout))
-            return True, 1.0
+        async def fake_socks_connect(proxy_port, host, port, timeout):
+            tcp_calls.append((proxy_port, host, port, timeout))
+            return True, b"\x05\x00"
 
-        async def fake_packet(host, port, scheme):
-            packet_calls.append((host, port, scheme))
+        async def fake_packet(record):
+            packet_calls.append(record["port"])
             return {
                 "tcp": {"success_rate": 1.0, "success_count": 20},
                 "passed": True,
@@ -68,8 +68,7 @@ class VerifyPortRoutingTests(unittest.TestCase):
             return FakeProcess()
 
         response = io.BytesIO(b"socks5://user:pass@example.com:1080\n")
-        response.__enter__ = lambda: response  # type: ignore[attr-defined]
-        response.__exit__ = lambda *args: None  # type: ignore[attr-defined]
+        response.read = lambda: b"socks5://user:pass@example.com:1080\n"
 
         with tempfile.TemporaryDirectory() as output_dir:
             env = {
@@ -80,7 +79,7 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(verify, "OUTPUT", Path(output_dir)),
                 mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
-                mock.patch.object(verify, "_tcp_connect", fake_tcp),
+                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
                 mock.patch.object(verify, "_packet_test", fake_packet),
                 mock.patch.object(verify, "_speed_test", fake_speed),
                 mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
@@ -88,8 +87,8 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 result = asyncio.run(verify.main())
 
         self.assertEqual(result, 0)
-        self.assertEqual(tcp_calls, [("127.0.0.1", 30000, verify.TCP_TIMEOUT)])
-        self.assertEqual(packet_calls, [("127.0.0.1", 30000, "socks")])
+        self.assertEqual(tcp_calls, [(30000, "1.1.1.1", 443, verify.TCP_TIMEOUT)])
+        self.assertEqual(packet_calls, [30000])
         self.assertEqual(speed_calls, [30000])
 
 

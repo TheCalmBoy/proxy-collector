@@ -16,6 +16,7 @@ import json
 import os
 import random
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -240,6 +241,68 @@ def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
     return None
 
 
+async def _read_socks5_greeting(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+) -> bytes:
+    """Negotiate no-auth SOCKS5 with a sing-box inbound."""
+    writer.write(b"\x05\x01\x00")
+    await writer.drain()
+    version, method_count = await asyncio.wait_for(reader.readexactly(2), timeout=1.5)
+    if version != 5 or method_count < 1:
+        raise OSError("invalid_socks5_greeting")
+    methods = await asyncio.wait_for(reader.readexactly(method_count), timeout=1.5)
+    if 0 not in methods:
+        raise OSError("socks5_no_auth_not_offered")
+    writer.write(b"\x05\x00")
+    await writer.drain()
+    return b"\x05\x00"
+
+
+async def _socks5_connect(
+    proxy_port: int,
+    destination_host: str,
+    destination_port: int,
+    timeout: float,
+) -> tuple[bool, bytes | None]:
+    """Require a real SOCKS5 CONNECT response, not only a listening socket."""
+    writer: asyncio.StreamWriter | None = None
+    try:
+        async def exchange() -> bytes:
+            nonlocal writer
+            reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+            await _read_socks5_greeting(reader, writer)
+            host = destination_host.encode("idna")
+            request = b"\x05\x01\x00\x03" + bytes([len(host)]) + host + struct.pack("!H", destination_port)
+            writer.write(request)
+            await writer.drain()
+            version, reply, _reserved, address_type = await asyncio.wait_for(reader.readexactly(4), timeout=1.5)
+            if version != 5 or reply != 0:
+                raise OSError(f"socks5_reply_{reply}")
+            if address_type == 1:
+                await reader.readexactly(4)
+            elif address_type == 4:
+                await reader.readexactly(16)
+            elif address_type == 3:
+                length = (await reader.readexactly(1))[0]
+                await reader.readexactly(length)
+            else:
+                raise OSError("socks5_invalid_bound_address")
+            await reader.readexactly(2)
+            return b"\x05\x00"
+
+        return True, await asyncio.wait_for(exchange(), timeout=timeout)
+    except Exception:
+        return False, None
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
 async def _tcp_connect(host: str, port: int, timeout: float) -> tuple[bool, float | None]:
     """Try TCP connect, return (success, latency_ms)"""
     start = time.perf_counter()
@@ -275,19 +338,23 @@ async def _udp_ping(host: str, port: int, timeout: float) -> tuple[bool, float |
         return False, None
 
 
-async def _packet_test(host: str, port: int, scheme: str) -> dict[str, Any]:
-    """Run 20 TCP tests over 40 seconds through proxy"""
+async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
+    """Run 20 real SOCKS5 CONNECT tests over 40 seconds through sing-box."""
     interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
     tcp_latencies = []
     tcp_success = 0
 
-    for i in range(PACKET_TEST_COUNT):
-        # TCP test through proxy
-        ok, lat = await _tcp_connect(host, port, TCP_TIMEOUT)
+    for _ in range(PACKET_TEST_COUNT):
+        start = time.perf_counter()
+        ok, _reply = await _socks5_connect(
+            record["port"],
+            "1.1.1.1",
+            443,
+            TCP_TIMEOUT,
+        )
         if ok:
             tcp_success += 1
-            tcp_latencies.append(lat)
-
+            tcp_latencies.append((time.perf_counter() - start) * 1000)
         await asyncio.sleep(interval)
 
     tcp_rate = tcp_success / PACKET_TEST_COUNT
@@ -481,15 +548,15 @@ async def main() -> int:
         # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            _tcp_connect("127.0.0.1", r["port"], TCP_TIMEOUT) for r in records
+            _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT) for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
 
-        # Tier 2: Packet loss test (through sing-box inbounds)
+        # Tier 2: Packet loss test (real SOCKS5 CONNECT through sing-box)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            _packet_test("127.0.0.1", r["port"], r["scheme"]) for r in tier1_survivors
+            _packet_test(r) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")
