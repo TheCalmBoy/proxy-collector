@@ -129,16 +129,27 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         if parsed.scheme == "vless":
             outbound["uuid"] = uuid
             outbound["flow"] = _first(params, "flow") or ""
-            outbound["tls"] = _first(params, "security", "tls") in ("tls", "reality")
-            if outbound["tls"]:
-                outbound["server_name"] = _first(params, "sni", "host") or host
+            if _first(params, "security", "tls") in ("tls", "reality"):
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": _first(params, "sni", "host") or host,
+                }
                 if _first(params, "fp") == "chrome":
-                    outbound["utls"] = {"enabled": True, "fingerprint": "chrome"}
+                    outbound["tls"]["utls"] = {"enabled": True, "fingerprint": "chrome"}
+                if _first(params, "security", "tls") == "reality":
+                    pbk = _first(params, "pbk", "public_key")
+                    sid = _first(params, "sid", "short_id")
+                    if pbk:
+                        outbound["tls"]["reality"] = {"public_key": pbk}
+                    if sid:
+                        outbound["tls"]["reality"]["short_id"] = sid
         else:
             outbound["password"] = uuid
-            outbound["tls"] = _first(params, "security", "tls") == "tls"
-            if outbound["tls"]:
-                outbound["server_name"] = _first(params, "sni", "host") or host
+            if _first(params, "security", "tls") == "tls":
+                outbound["tls"] = {
+                    "enabled": True,
+                    "server_name": _first(params, "sni", "host") or host,
+                }
         transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
