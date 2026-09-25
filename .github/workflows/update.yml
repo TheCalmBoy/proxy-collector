@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: "0,30 * * * *"
   workflow_dispatch:
+    inputs:
+      verify_limit:
+        description: "Maximum configs to verify (0 = all)"
+        required: false
+        default: "0"
+      debug_https:
+        description: "Print HTTPS handshake failures"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -90,6 +99,8 @@ jobs:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
           VERIFY_CONCURRENCY: "750"
+          VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
+          VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
         run: python tools/verify.py
 
       - name: Preserve latest egress health index

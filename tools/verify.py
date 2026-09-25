@@ -37,6 +37,7 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
 CONCURRENCY = max(1, int(os.getenv("VERIFY_CONCURRENCY", "750")))
+VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
 TCP_TIMEOUT = 1.5
@@ -622,6 +623,9 @@ async def main() -> int:
     print(f"Fetched {len(uris)} raw configs")
 
     config, records, stats = build_sing_box_config(uris)
+    if VERIFY_LIMIT:
+        uris = uris[:VERIFY_LIMIT]
+        config, records, stats = build_sing_box_config(uris)
     if not records:
         print("No supported configs", file=sys.stderr)
         return 1
