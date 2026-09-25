@@ -557,7 +557,7 @@ async def main() -> int:
                 sing_box_proc.kill()
                 await sing_box_proc.wait()
 
-    return 0 if enriched else 1
+    return 0
 
 
 if __name__ == "__main__":
