@@ -2,7 +2,7 @@
 """
 Phase 1 Verification: Tiered proxy validation
 - Tier 1: TCP sanity check (1.5s)
-- Tier 2: 20 TCP + 20 UDP over 40s (>=90% pass)
+- Tier 2: 20 SOCKS CONNECT + 20 HTTPS GET requests (>=90% pass each)
 - Tier 3: 5 MB speed test via Worker (>=75 KB/s)
 Outputs: enriched-configs.json
 """
@@ -43,13 +43,6 @@ TCP_TIMEOUT = 1.5
 PACKET_TEST_COUNT = 20
 PACKET_TEST_DURATION = 40  # seconds
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
-
-# UDP test targets (public DNS servers)
-UDP_TARGETS = [
-    ("1.1.1.1", 53),
-    ("8.8.8.8", 53),
-    ("9.9.9.9", 53),
-]
 
 
 class UnsupportedConfig(ValueError):
