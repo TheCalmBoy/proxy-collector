@@ -115,6 +115,24 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
         writer.close.assert_called_once()
         writer.wait_closed.assert_not_awaited()
 
+    async def test_socks5_connect_closes_stream_without_waiting(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
+        reader.feed_eof()
+        writer = mock.Mock()
+        writer.drain = mock.AsyncMock()
+        writer.wait_closed = mock.AsyncMock()
+
+        with (
+            mock.patch("tools.verify._read_socks5_greeting", return_value=b"\x05\x00"),
+            mock.patch("tools.verify.asyncio.open_connection", return_value=(reader, writer)),
+        ):
+            ok, _reply = await _socks5_connect(30000, "1.1.1.1", 443, 1.5)
+
+        self.assertTrue(ok)
+        writer.close.assert_called_once()
+        writer.wait_closed.assert_not_awaited()
+
     async def test_socks5_connect_rejects_non_success_reply(self):
         reader = asyncio.StreamReader()
         reader.feed_data(b"\x05\x05\x00\x01")

@@ -288,10 +288,6 @@ async def _socks5_connect(
     finally:
         if writer is not None:
             writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
 
 
 async def _tcp_connect(host: str, port: int, timeout: float) -> tuple[bool, float | None]:
