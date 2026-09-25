@@ -125,10 +125,9 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             "type": parsed.scheme,
             "server": host,
             "server_port": port,
-            "uuid": uuid if parsed.scheme == "vless" else None,
-            "password": uuid if parsed.scheme == "trojan" else None,
         }
         if parsed.scheme == "vless":
+            outbound["uuid"] = uuid
             outbound["flow"] = _first(params, "flow") or ""
             outbound["tls"] = _first(params, "security", "tls") in ("tls", "reality")
             if outbound["tls"]:
@@ -136,6 +135,7 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
                 if _first(params, "fp") == "chrome":
                     outbound["utls"] = {"enabled": True, "fingerprint": "chrome"}
         else:
+            outbound["password"] = uuid
             outbound["tls"] = _first(params, "security", "tls") == "tls"
             if outbound["tls"]:
                 outbound["server_name"] = _first(params, "sni", "host") or host
