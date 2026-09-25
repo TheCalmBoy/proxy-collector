@@ -341,7 +341,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
     if not body_path.exists() or process.returncode != 0:
-        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+        return {"ok": False, "error": f"curl_exit_{process.returncode}", "curl_code": process.returncode}
 
     response_body = body_path.read_bytes()
     body_path.unlink(missing_ok=True)
@@ -374,6 +374,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "latency_ms": latency_ms,
         "download_mb_s": download_mb_s,
         "speed_ok": ok,
+        "error": None if ok else "speed_below_threshold" if download_mb_s is not None else "no_speed_data",
     }
 
 
@@ -500,23 +501,23 @@ async def main() -> int:
 
         # Build enriched output
         for r, p2, p3 in zip(tier2_survivors, tier2_results, tier3_results):
-            if p3.get("ok"):
-                enriched.append({
-                    "id": r["id"],
-                    "scheme": r["scheme"],
-                    "server": r["server"],
-                    "server_port": r["server_port"],
-                    "uri": r["uri"],
-                    "country": p3.get("country"),
-                    "tier1": {"tcp_ok": True, "latency_ms": p3.get("latency_ms")},
-                    "tier2": p2,
-                    "tier3": {
-                        "speed_mb_s": p3.get("download_mb_s"),
-                        "latency_ms": p3.get("latency_ms"),
-                        "passed": p3.get("speed_ok"),
-                    },
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                })
+            enriched.append({
+                "id": r["id"],
+                "scheme": r["scheme"],
+                "server": r["server"],
+                "server_port": r["server_port"],
+                "uri": r["uri"],
+                "country": p3.get("country"),
+                "tier1": {"tcp_ok": True, "latency_ms": p3.get("latency_ms")},
+                "tier2": p2,
+                "tier3": {
+                    "speed_mb_s": p3.get("download_mb_s"),
+                    "latency_ms": p3.get("latency_ms"),
+                    "passed": p3.get("speed_ok"),
+                    "error": p3.get("error"),
+                },
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         output_path = OUTPUT / "enriched-configs.json"
@@ -527,7 +528,8 @@ async def main() -> int:
                 "input": stats["input"],
                 "tier1_passed": len(tier1_survivors),
                 "tier2_passed": len(tier2_survivors),
-                "tier3_passed": len(enriched),
+                "tier3_attempted": len(tier2_survivors),
+                "tier3_passed": sum(1 for c in enriched if c["tier3"]["passed"]),
             }
         }, indent=2))
         print(f"Done. Enriched configs: {len(enriched)}")
