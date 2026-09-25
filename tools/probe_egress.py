@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+Phase 2 Probe: Stability verification using cloudflare trace
+- Reads enriched-configs.json from Phase 1
+- 10 x 30s stability checks via cloudflare.com/cdn-cgi/trace
+- Dynamic config classification
+- Outputs: egress-health.json
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -15,23 +24,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
-SOURCE_URL = os.getenv(
-    "SOURCE_URL",
-    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
-)
-WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
-WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
-SING_BOX = os.getenv("SING_BOX", "sing-box")
+ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 PORT_BASE = 30000
 SPEED_TEST_BYTES = 5_000_000
-MIN_DOWNLOAD_MB_S = 0.01  # 10 KB/s using decimal units.
+MIN_DOWNLOAD_MB_S = 0.0005
 SPEED_CONSISTENCY_TOLERANCE = 0.25
 UTLS_FINGERPRINTS = {
     "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
     "random", "randomized",
 }
+# Stability check config
+STABILITY_INTERVALS = 10
+STABILITY_INTERVAL_SECONDS = 30
+CLOUDFLARE_TRACE_URL = "https://cloudflare.com/cdn-cgi/trace"
+
+# Dynamic config thresholds
+DYNAMIC_MIN_SPEED_MB_S = 1.0      # 1 MB/s for dynamic to be "elite"
+DYNAMIC_MAX_PING_MS = 100         # Max ping for dynamic elite
+DYNAMIC_MAX_FRAUD_SCORE = 30      # Max fraud score for dynamic elite
 
 
 class UnsupportedConfig(ValueError):
@@ -63,60 +74,7 @@ def _host_port(parsed: urllib.parse.SplitResult) -> tuple[str, int]:
     return host, port
 
 
-def _tls(params: dict[str, list[str]], security: str) -> dict[str, Any] | None:
-    if security not in ("tls", "reality"):
-        return None
-    tls: dict[str, Any] = {"enabled": True}
-    sni = _first(params, "sni", "peer")
-    if sni:
-        tls["server_name"] = sni
-    fingerprint = _first(params, "fp", "fingerprint").lower()
-    if fingerprint and fingerprint not in UTLS_FINGERPRINTS:
-        fingerprint = ""
-    # sing-box requires uTLS for Reality. Many share links omit `fp`; Chrome is
-    # the conventional default and avoids generating an invalid outbound.
-    if security == "reality" and not fingerprint:
-        fingerprint = "chrome"
-    if fingerprint:
-        tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
-    if _first(params, "allowInsecure", "insecure") in ("1", "true"):
-        tls["insecure"] = True
-    if security == "reality":
-        public_key = _first(params, "pbk", "publicKey")
-        if not public_key:
-            raise UnsupportedConfig("reality_missing_public_key")
-        tls["reality"] = {
-            "enabled": True,
-            "public_key": public_key,
-            "short_id": _first(params, "sid", "shortId"),
-        }
-    return tls
-
-
-def _transport(kind: str, params: dict[str, list[str]], vmess: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    kind = (kind or "tcp").lower()
-    if kind in ("tcp", "raw", "none"):
-        return None
-    if kind == "ws":
-        path = _first(params, "path") or str((vmess or {}).get("path") or "")
-        host = _first(params, "host") or str((vmess or {}).get("host") or "")
-        transport: dict[str, Any] = {"type": "ws"}
-        if path:
-            transport["path"] = path
-        if host:
-            transport["headers"] = {"Host": host}
-        return transport
-    if kind == "grpc":
-        service = _first(params, "serviceName", "service_name") or str((vmess or {}).get("path") or "")
-        transport = {"type": "grpc"}
-        if service:
-            transport["service_name"] = service
-        return transport
-    raise UnsupportedConfig(f"unsupported_transport_{kind}")
-
-
 def parse_proxy_uri(uri: str) -> dict[str, Any]:
-    """Map common public share links to sing-box outbounds; reject unknowns explicitly."""
     clean = uri.strip()
     if not clean:
         raise UnsupportedConfig("empty")
@@ -135,116 +93,135 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             raise UnsupportedConfig("missing_host_or_port") from exc
         if not host:
             raise UnsupportedConfig("missing_host_or_port")
-        outbound: dict[str, Any] = {
+        outbound = {
             "type": "vmess",
             "server": host,
             "server_port": port,
-            "uuid": str(vmess.get("id") or ""),
-            "alter_id": int(vmess.get("aid") or 0),
-            "security": str(vmess.get("scy") or "auto"),
+            "uuid": str(vmess.get("id") or vmess.get("uuid") or ""),
+            "alter_id": int(vmess.get("aid") or vmess.get("alterId") or 0),
+            "security": str(vmess.get("scy") or vmess.get("security") or "auto"),
         }
-        if not outbound["uuid"]:
-            raise UnsupportedConfig("missing_uuid")
-        params = {key: [str(value)] for key, value in vmess.items() if value is not None}
-        security = str(vmess.get("tls") or "").lower()
-        if security == "tls":
-            tls = _tls(params, "tls")
-            if tls:
-                outbound["tls"] = tls
-        elif security not in ("", "none"):
-            raise UnsupportedConfig("unsupported_vmess_security")
-        transport = _transport(str(vmess.get("net") or "tcp"), params, vmess)
-        if transport:
-            outbound["transport"] = transport
+        if vmess.get("net"):
+            outbound["transport"] = _vmess_transport(vmess)
         return outbound
 
-    try:
-        parsed = urllib.parse.urlsplit(clean)
-    except ValueError as exc:
-        raise UnsupportedConfig("invalid_uri") from exc
-    params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    host, port = _host_port(parsed)
+    parsed = urllib.parse.urlsplit(clean)
+    if parsed.scheme not in ("vless", "trojan", "ss", "socks", "socks5", "http", "https"):
+        raise UnsupportedConfig(f"unsupported_scheme_{parsed.scheme}")
 
-    if scheme == "vless":
-        user = urllib.parse.unquote(parsed.username or "")
-        if not user:
+    host, port = _host_port(parsed)
+    params = urllib.parse.parse_qs(parsed.query)
+
+    if parsed.scheme in ("vless", "trojan"):
+        uuid = parsed.username or _first(params, "uuid", "id")
+        if not uuid:
             raise UnsupportedConfig("missing_uuid")
-        security = _first(params, "security", default="none").lower()
         outbound = {
-            "type": "vless",
+            "type": parsed.scheme,
             "server": host,
             "server_port": port,
-            "uuid": user,
-            "packet_encoding": "xudp",
+            "uuid": uuid if parsed.scheme == "vless" else None,
+            "password": uuid if parsed.scheme == "trojan" else None,
         }
-        flow = _first(params, "flow")
-        if flow:
-            outbound["flow"] = flow
-        tls = _tls(params, security)
-        if tls:
-            outbound["tls"] = tls
-        transport = _transport(_first(params, "type", "network", default="tcp"), params)
+        if parsed.scheme == "vless":
+            outbound["flow"] = _first(params, "flow") or ""
+            outbound["tls"] = _first(params, "security", "tls") in ("tls", "reality")
+            if outbound["tls"]:
+                outbound["server_name"] = _first(params, "sni", "host") or host
+                if _first(params, "fp") == "chrome":
+                    outbound["utls"] = {"enabled": True, "fingerprint": "chrome"}
+        else:
+            outbound["tls"] = _first(params, "security", "tls") == "tls"
+            if outbound["tls"]:
+                outbound["server_name"] = _first(params, "sni", "host") or host
+        transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
         return outbound
 
-    if scheme == "trojan":
-        password = urllib.parse.unquote(parsed.username or "")
-        if not password:
-            raise UnsupportedConfig("missing_password")
-        outbound = {"type": "trojan", "server": host, "server_port": port, "password": password}
-        tls = _tls(params, "tls")
-        if tls:
-            outbound["tls"] = tls
-        transport = _transport(_first(params, "type", "network", default="tcp"), params)
+    if parsed.scheme == "ss":
+        auth = parsed.username
+        if not auth:
+            raise UnsupportedConfig("missing_ss_auth")
+        try:
+            method, password = _decode_base64(auth).decode().split(":", 1)
+        except Exception as exc:
+            raise UnsupportedConfig("invalid_ss_auth") from exc
+        outbound = {
+            "type": "shadowsocks",
+            "server": host,
+            "server_port": port,
+            "method": method,
+            "password": password,
+        }
+        transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
         return outbound
 
-    if scheme == "ss":
-        userinfo = urllib.parse.unquote(parsed.username or "")
-        if not userinfo or ":" not in userinfo:
-            # SIP002 also permits a base64-encoded method:password@host:port authority.
-            raw = userinfo or parsed.netloc.split("@", 1)[0]
-            try:
-                decoded = _decode_base64(raw).decode("utf-8")
-                if ":" in decoded:
-                    userinfo = decoded
-            except Exception as exc:
-                if not userinfo:
-                    raise UnsupportedConfig("invalid_shadowsocks_userinfo") from exc
-        if ":" not in userinfo:
-            raise UnsupportedConfig("invalid_shadowsocks_userinfo")
-        method, password = userinfo.split(":", 1)
-        if not method or not password:
-            raise UnsupportedConfig("invalid_shadowsocks_userinfo")
-        plugin = _first(params, "plugin")
-        if plugin:
-            raise UnsupportedConfig("shadowsocks_plugin_not_supported")
-        return {"type": "shadowsocks", "server": host, "server_port": port, "method": method, "password": password}
+    if parsed.scheme in ("socks", "socks5"):
+        user = urllib.parse.unquote(parsed.username or "")
+        pwd = urllib.parse.unquote(parsed.password or "")
+        outbound = {"type": "socks", "server": host, "server_port": port, "version": "5"}
+        if user:
+            outbound["username"] = user
+            outbound["password"] = pwd
+        return outbound
 
-    raise UnsupportedConfig(f"unsupported_scheme_{scheme}")
+    if parsed.scheme in ("http", "https"):
+        user = urllib.parse.unquote(parsed.username or "")
+        pwd = urllib.parse.unquote(parsed.password or "")
+        outbound = {"type": "http", "server": host, "server_port": port}
+        if user:
+            outbound["username"] = user
+            outbound["password"] = pwd
+        outbound["tls"] = parsed.scheme == "https"
+        return outbound
+
+    raise UnsupportedConfig(f"unsupported_scheme_{parsed.scheme}")
 
 
-def _read_source() -> list[str]:
-    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "proxy-egress-probe/1.0"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        text = response.read().decode("utf-8", errors="replace")
-    lines: list[str] = []
-    seen: set[str] = set()
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line and not line.startswith("#") and line not in seen:
-            lines.append(line)
-            seen.add(line)
-    return lines
+def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
+    net = str(vmess.get("net") or "").lower()
+    if net == "tcp":
+        header_type = str(vmess.get("type") or "none")
+        if header_type == "http":
+            return {"type": "http", "host": [vmess.get("host", "")]}
+        return None
+    if net in ("ws", "websocket"):
+        path = vmess.get("path", "/")
+        host = vmess.get("host", "")
+        transport = {"type": "ws", "path": path}
+        if host:
+            transport["headers"] = {"Host": host}
+        return transport
+    if net == "grpc":
+        service = vmess.get("serviceName", "")
+        transport = {"type": "grpc"}
+        if service:
+            transport["service_name"] = service
+        return transport
+    return None
 
 
-def _tag(uri: str) -> str:
-    # Match main.py's stable feed ID: first 8 uppercase hex chars of the
-    # source URI without its display fragment.
-    base = uri.split("#", 1)[0]
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:8].upper()
+def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
+    net = _first(params, "type", "network", "net")
+    if not net:
+        return None
+    if net == "ws":
+        path = _first(params, "path") or "/"
+        host = _first(params, "host")
+        transport = {"type": "ws", "path": path}
+        if host:
+            transport["headers"] = {"Host": str(host)}
+        return transport
+    if net == "grpc":
+        service = _first(params, "serviceName", "service_name")
+        transport = {"type": "grpc"}
+        if service:
+            transport["service_name"] = service
+        return transport
+    return None
 
 
 def _download_rate_mbps(payload_bytes: int, max_payload_bytes: int, starttransfer: float, total: float) -> float | None:
@@ -276,6 +253,10 @@ def _valid_speed(first: float | None, second: float | None) -> float | None:
     return round(speed, 6)
 
 
+def _tag(uri: str) -> str:
+    return hashlib.sha256(uri.encode()).hexdigest()[:8].upper()
+
+
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
     inbounds: list[dict[str, Any]] = []
     outbounds: list[dict[str, Any]] = []
@@ -301,8 +282,8 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
         outbounds.append(outbound)
         rules.append({"inbound": [inbound_tag], "action": "route", "outbound": outbound_tag})
         records.append({"id": identifier, "port": port, "scheme": outbound["type"]})
+        stats["supported"] += 1
 
-    stats["supported"] = len(records)
     config = {
         "log": {"level": "error", "timestamp": True},
         "inbounds": inbounds,
@@ -312,8 +293,48 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     return config, records, {**stats, **{f"skip_{key}": value for key, value in sorted(reasons.items())}}
 
 
-async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
-    body_path = Path("/tmp") / f"proxy-egress-{record['id']}.bin"
+async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
+    """Get IP info from cloudflare.com/cdn-cgi/trace via proxy"""
+    config_lines = [
+        f'proxy = "socks5h://127.0.0.1:{proxy_port}"',
+        f'url = "{CLOUDFLARE_TRACE_URL}"',
+        "silent",
+        "show-error",
+        "fail",
+        "connect-timeout = 5",
+        "max-time = 10",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        "curl", "--config", "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
+
+    if process.returncode != 0:
+        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+
+    try:
+        text = stdout.decode().strip()
+        lines = text.split("\n")
+        data = {}
+        for line in lines:
+            if "=" in line:
+                k, v = line.split("=", 1)
+                data[k] = v
+        return {
+            "ok": True,
+            "ip": data.get("ip"),
+            "country": data.get("loc"),
+            "colo": data.get("colo"),
+        }
+    except Exception:
+        return {"ok": False, "error": "parse_failed"}
+
+
+async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
+    body_path = Path("/tmp") / f"speed-{record['id']}.bin"
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
         f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
@@ -324,7 +345,7 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
         "connect-timeout = 10",
         "max-time = 30",
         f'output = "{body_path}"',
-        'write-out = "\\n__EGRESS_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
+        'write-out = "\\n__SPEED_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
     async with semaphore:
         process = await asyncio.create_subprocess_exec(
@@ -334,155 +355,145 @@ async def _curl_probe(record: dict[str, Any], worker_url: str, token: str, semap
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
-    _, marker, metric = stdout.partition(b"\n__EGRESS_METRICS__")
-    if not body_path.exists():
-        return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": f"curl_exit_{process.returncode}"}
+
+    if not body_path.exists() or process.returncode != 0:
+        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+
     response_body = body_path.read_bytes()
     body_path.unlink(missing_ok=True)
     metadata_line, separator, downloaded = response_body.partition(b"\n")
     if not separator:
-        return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "missing_curl_metrics"}
+        return {"ok": False, "error": "missing_speed_metrics"}
+
     try:
-        result = json.loads(metadata_line)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "invalid_worker_json"}
-    ffraud = result.get("ffraud") if isinstance(result, dict) else None
-    if not isinstance(ffraud, dict) or not result.get("ip"):
-        return {"id": record["id"], "scheme": record["scheme"], "ok": False, "error": "worker_response_incomplete"}
+        result = json.loads(metadata_line.decode())
+    except Exception:
+        return {"ok": False, "error": "invalid_worker_response"}
+
+    _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
     latency_ms = None
     download_mb_s = None
-    speed_sample_bytes_received = len(downloaded)
-    speed_error = None
     if marker:
         try:
-            downloaded_size, starttransfer, total = map(float, metric.decode("ascii").strip().split())
+            downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
             latency_ms = round(starttransfer * 1000, 1)
-            if int(downloaded_size) != len(response_body):
-                speed_error = "incomplete_speed_payload"
-            elif not 0 < len(downloaded) <= SPEED_TEST_BYTES:
-                speed_error = "incomplete_speed_payload"
-            elif total <= starttransfer:
-                speed_error = "speed_payload_too_fast_to_measure"
-            else:
-                download_mb_s = _download_rate_mbps(len(downloaded), SPEED_TEST_BYTES, starttransfer, total)
-                if len(downloaded) < SPEED_TEST_BYTES:
-                    speed_error = "partial_speed_sample"
+            if total > starttransfer:
+                download_mb_s = len(downloaded) / 1_000_000 / (total - starttransfer)
         except (UnicodeDecodeError, ValueError):
-            speed_error = "invalid_speed_metrics"
-    else:
-        speed_error = "missing_speed_metrics"
+            pass
+
+    ok = download_mb_s is not None and download_mb_s >= MIN_DOWNLOAD_MB_S
     return {
+        "ok": ok,
         "id": record["id"],
-        "scheme": record["scheme"],
-        "ok": True,
-        "ip": result["ip"],
-        "family": result.get("family"),
+        "ip": result.get("ip"),
         "country": (result.get("cloudflare") or {}).get("country"),
         "colo": (result.get("cloudflare") or {}).get("colo"),
-        "fraud_score": ffraud.get("fraud_score"),
-        "risk": ffraud.get("risk"),
-        "proxy": ffraud.get("proxy"),
-        "vpn": ffraud.get("vpn"),
-        "tor": ffraud.get("tor"),
-        "hosting": ffraud.get("hosting"),
-        "recent_abuse": ffraud.get("recent_abuse"),
-        "connection_type": ffraud.get("connection_type"),
-        "threat_tags": ffraud.get("threat_tags", []),
+        "fraud_score": (result.get("ffraud") or {}).get("fraud_score"),
+        "risk": (result.get("ffraud") or {}).get("risk"),
+        "proxy": (result.get("ffraud") or {}).get("proxy"),
+        "vpn": (result.get("ffraud") or {}).get("vpn"),
+        "tor": (result.get("ffraud") or {}).get("tor"),
+        "hosting": (result.get("ffraud") or {}).get("hosting"),
+        "connection_type": (result.get("ffraud") or {}).get("connection_type"),
         "latency_ms": latency_ms,
         "download_mb_s": download_mb_s,
-        "speed_sample_bytes_received": speed_sample_bytes_received,
-        "speed_error": speed_error,
-        "cache": (result.get("cache") or {}).get("ffraud"),
+        "speed_ok": ok,
     }
 
 
-async def _run_round(records: list[dict[str, Any]], round_name: str, semaphore: asyncio.Semaphore) -> list[dict[str, Any]]:
-    results = await asyncio.gather(*(_curl_probe(row, WORKER_URL, WORKER_TOKEN, semaphore) for row in records))
-    for row in results:
-        row["round"] = round_name
-    ok = sum(1 for row in results if row["ok"])
-    measured_speeds = sum(1 for row in results if row.get("download_mb_s") is not None)
-    print(f"{round_name}: {ok}/{len(results)} returned an IP; {measured_speeds}/{len(results)} completed a speed sample")
-    return results
+async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run one stability check using cloudflare trace"""
+    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "750"))))
+
+    async def check_one(record):
+        async with semaphore:
+            return await _cloudflare_trace(record["port"])
+
+    return await asyncio.gather(*[check_one(r) for r in records])
 
 
-def _summarize(first: list[dict[str, Any]], second: list[dict[str, Any]]) -> dict[str, Any]:
-    first_by_id = {row["id"]: row for row in first if row["ok"]}
-    second_by_id = {row["id"]: row for row in second if row["ok"]}
-    comparable = sorted(first_by_id.keys() & second_by_id.keys())
-    changed = [key for key in comparable if first_by_id[key]["ip"] != second_by_id[key]["ip"]]
-    comparable_speeds = [key for key in comparable if first_by_id[key].get("download_mb_s") is not None and second_by_id[key].get("download_mb_s") is not None]
-    stable_speeds = [key for key in comparable_speeds if _speed_is_consistent(first_by_id[key]["download_mb_s"], second_by_id[key]["download_mb_s"])]
-    publishable_speeds = [key for key in comparable if _valid_speed(first_by_id[key].get("download_mb_s"), second_by_id[key].get("download_mb_s")) is not None]
-    return {
-        "tested_both_rounds": len(comparable),
-        "stable_ip": len(comparable) - len(changed),
-        "changed_ip": len(changed),
-        "speed_tested_both_rounds": len(comparable_speeds),
-        "speed_consistent_both_rounds": len(stable_speeds),
-        "speed_publishable": len(publishable_speeds),
-        "dynamic_configs": [
-            {"id": key, "first_ip": first_by_id[key]["ip"], "second_ip": second_by_id[key]["ip"]}
-            for key in changed
-        ],
+def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], fraud_scores: list[int | None], countries: list[str | None]) -> dict[str, Any]:
+    """Classify dynamic config based on IP history and quality metrics"""
+    unique_ips = list(dict.fromkeys(ip_history))  # preserve order
+    unique_countries = list(dict.fromkeys([c for c in countries if c]))
+
+    # All IPs in same country?
+    same_country = len(unique_countries) == 1 and unique_countries[0] is not None
+    country = unique_countries[0] if same_country else None
+
+    # Quality metrics
+    valid_speeds = [s for s in speed_history if s is not None]
+    avg_speed = sum(valid_speeds) / len(valid_speeds) if valid_speeds else 0
+    max_speed = max(valid_speeds) if valid_speeds else 0
+    valid_fraud = [f for f in fraud_scores if f is not None]
+    min_fraud = min(valid_fraud) if valid_fraud else 100
+
+    classification = {
+        "unique_ips": unique_ips,
+        "ip_count": len(unique_ips),
+        "countries": unique_countries,
+        "country": country,
+        "same_country": same_country,
+        "avg_speed_mb_s": round(avg_speed, 3),
+        "max_speed_mb_s": round(max_speed, 3),
+        "min_fraud_score": min_fraud,
     }
+
+    # Decision logic
+    if len(unique_ips) == 1:
+        classification["type"] = "stable"
+        classification["subgroup"] = "stable"
+    elif same_country:
+        # Dynamic but same country - check if quality is good enough for country subgroup
+        if avg_speed >= DYNAMIC_MIN_SPEED_MB_S and min_fraud <= DYNAMIC_MAX_FRAUD_SCORE:
+            classification["type"] = "dynamic-country"
+            classification["subgroup"] = f"dynamic-country-{country}"
+        else:
+            classification["type"] = "dynamic-country"
+            classification["subgroup"] = "rejected"
+    else:
+        # Multiple countries - only keep if elite
+        if avg_speed >= DYNAMIC_MIN_SPEED_MB_S and min_fraud <= DYNAMIC_MAX_FRAUD_SCORE:
+            classification["type"] = "dynamic-elite"
+            classification["subgroup"] = "dynamic-elite"
+        else:
+            classification["type"] = "dynamic-mixed"
+            classification["subgroup"] = "rejected"
+
+    return classification
 
 
 async def main() -> int:
-    if not WORKER_URL or not WORKER_TOKEN:
-        print("Set WORKER_URL and the WORKER_TOKEN GitHub secret.", file=sys.stderr)
-        return 2
-    if not WORKER_URL.startswith("https://"):
-        print("WORKER_URL must be an HTTPS URL.", file=sys.stderr)
+    ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
+    if not ENRICHED_PATH.exists():
+        print(f"Enriched configs not found at {ENRICHED_PATH}", file=sys.stderr)
         return 2
 
-    print("Fetching candidate configs...")
-    source = _read_source()
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    skipped: dict[str, int] = {}
-    for uri in source:
-        try:
-            parsed = parse_proxy_uri(uri)
-        except UnsupportedConfig as exc:
-            reason = str(exc)
-            skipped[reason] = skipped.get(reason, 0) + 1
-            continue
-        candidates.append((uri, parsed))
-    if not candidates:
-        print("No supported proxy links were found.", file=sys.stderr)
+    print(f"Loading enriched configs from {ENRICHED_PATH}...")
+    with ENRICHED_PATH.open() as f:
+        enriched_data = json.load(f)
+
+    enriched = enriched_data.get("configs", [])
+    if not enriched:
+        print("No enriched configs found", file=sys.stderr)
         return 1
 
-    batch_setting = os.getenv("PROBE_BATCH_SIZE", "all").strip().lower()
-    seed = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    if batch_setting in ("all", "0"):
-        batch_size = len(candidates)
-        selected = candidates
-        selection_mode = "all"
-    else:
-        try:
-            batch_size = int(batch_setting)
-        except ValueError:
-            print("PROBE_BATCH_SIZE must be 'all' or a positive integer.", file=sys.stderr)
-            return 2
-        if batch_size < 1:
-            print("PROBE_BATCH_SIZE must be 'all' or a positive integer.", file=sys.stderr)
-            return 2
-        random.Random(seed).shuffle(candidates)
-        selected = candidates[:batch_size]
-        selection_mode = "sample"
-    selected_uris = [uri for uri, _ in selected]
-    config, records, config_stats = build_sing_box_config(selected_uris)
-    if not records:
-        print("Selected batch had no supported configs.", file=sys.stderr)
-        return 1
+    print(f"Loaded {len(enriched)} enriched configs")
 
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    # Proxy links contain credentials. Keep the generated core config and logs
-    # outside the report directory so they are never uploaded as artifacts.
-    config_path = Path("/tmp/proxy-egress-sing-box.json")
-    config_path.write_text(json.dumps(config, separators=(",", ":")), encoding="utf-8")
-    print(f"Selected {len(records)} unique proxy configs; unsupported schemes are skipped.")
-    print(f"Supported config mix: {json.dumps({k: v for k, v in config_stats.items() if k in ('input','supported','unsupported')})}")
+    # Convert to probe format
+    uris = [c["uri"] for c in enriched]
+    config, records, config_stats = build_sing_box_config(uris)
+
+    # Map enriched data to records by ID
+    enriched_by_id = {c["id"]: c for c in enriched}
+    for r in records:
+        if r["id"] in enriched_by_id:
+            r.update(enriched_by_id[r["id"]])
+
+    print(f"Starting sing-box with {len(records)} configs...")
+    config_path = Path("/tmp/probe-egress-sing-box.json")
+    config_path.write_text(json.dumps(config, separators=(",", ":")))
 
     check = subprocess.run([SING_BOX, "check", "-c", str(config_path)], capture_output=True, text=True)
     if check.returncode:
@@ -490,19 +501,68 @@ async def main() -> int:
         print(check.stderr[-4000:], file=sys.stderr)
         return 1
 
-    with Path("/tmp/proxy-egress-sing-box.log").open("wb") as log:
+    with Path("/tmp/probe-egress-sing-box.log").open("wb") as log:
         core = subprocess.Popen([SING_BOX, "run", "-c", str(config_path)], stdout=log, stderr=subprocess.STDOUT)
-    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "50"))))
+
+    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "750"))))
+
     try:
         await asyncio.sleep(5)
         if core.poll() is not None:
             print("sing-box exited during startup; see artifact log.", file=sys.stderr)
             return 1
-        first = await _run_round(records, "initial", semaphore)
-        delay = max(0, int(os.getenv("RETEST_DELAY_SECONDS", "300")))
-        print(f"Waiting {delay} seconds before retesting the same configs...")
-        await asyncio.sleep(delay)
-        second = await _run_round(records, "delayed", semaphore)
+
+        # Initial speed test via Worker
+        print("Running initial speed test via Worker...")
+        first = await asyncio.gather(*(_speed_test(r, WORKER_URL, WORKER_TOKEN, semaphore) for r in records))
+        ok = sum(1 for r in first if r.get("ok"))
+        print(f"Initial: {ok}/{len(records)} returned an IP")
+
+        # Stability checks via cloudflare trace
+        ip_history = {r["id"]: [] for r in records}
+        speed_history = {r["id"]: [] for r in records}
+        fraud_history = {r["id"]: [] for r in records}
+        country_history = {r["id"]: [] for r in records}
+
+        # Include initial results
+        for r in first:
+            if r.get("ok"):
+                rid = r["id"]
+                ip_history[rid].append(r.get("ip"))
+                speed_history[rid].append(r.get("download_mb_s"))
+                fraud_history[rid].append(r.get("fraud_score"))
+                country_history[rid].append(r.get("country"))
+
+        print(f"Running {STABILITY_INTERVALS} stability checks at {STABILITY_INTERVAL_SECONDS}s intervals...")
+        for i in range(STABILITY_INTERVALS):
+            await asyncio.sleep(STABILITY_INTERVAL_SECONDS)
+            print(f"Stability check {i+1}/{STABILITY_INTERVALS}...")
+            results = await _run_stability_check(records)
+            for j, r in enumerate(results):
+                rid = records[j]["id"]
+                if r.get("ok"):
+                    ip_history[rid].append(r.get("ip"))
+                    country_history[rid].append(r.get("country"))
+                    # No speed/fraud from trace, so reuse last known
+                    if speed_history[rid]:
+                        speed_history[rid].append(speed_history[rid][-1])
+                    if fraud_history[rid]:
+                        fraud_history[rid].append(fraud_history[rid][-1])
+
+        # Final speed test via Worker
+        print("Running final speed test via Worker...")
+        final = await asyncio.gather(*(_speed_test(r, WORKER_URL, WORKER_TOKEN, semaphore) for r in records))
+        ok = sum(1 for r in final if r.get("ok"))
+        print(f"Final: {ok}/{len(records)} returned an IP")
+
+        for r in final:
+            if r.get("ok"):
+                rid = r["id"]
+                ip_history[rid].append(r.get("ip"))
+                speed_history[rid].append(r.get("download_mb_s"))
+                fraud_history[rid].append(r.get("fraud_score"))
+                country_history[rid].append(r.get("country"))
+
     finally:
         core.terminate()
         try:
@@ -511,59 +571,65 @@ async def main() -> int:
             core.kill()
             core.wait()
 
-    generated_at = datetime.now(timezone.utc).isoformat()
-    first_by_id = {row["id"]: row for row in first if row["ok"]}
-    second_by_id = {row["id"]: row for row in second if row["ok"]}
+    # Build egress-health.json with classifications
+    print("Classifying configs...")
     health = {}
-    for identifier in sorted(first_by_id.keys() & second_by_id.keys()):
-        initial, delayed = first_by_id[identifier], second_by_id[identifier]
-        speed = _valid_speed(initial.get("download_mb_s"), delayed.get("download_mb_s"))
-        # Omit links without any valid >=10 KB/s measurement; the subscription
-        # worker uses this index as its allowlist of verified configs.
-        if speed is None:
+    for rid in sorted(ip_history.keys()):
+        ips = ip_history[rid]
+        if not ips:
             continue
-        stable = initial["ip"] == delayed["ip"]
-        latencies = [row["latency_ms"] for row in (initial, delayed) if row.get("latency_ms") is not None]
-        health[identifier] = {
-            "risk": delayed.get("risk"),
-            "fraud_score": delayed.get("fraud_score"),
-            "connection_type": delayed.get("connection_type"),
-            "stability": "Stable" if stable else "Changed",
-            "retest_minutes": round(delay / 60, 1),
-            "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else None,
-            "download_mb_s": speed,
-            "speed_stable": _speed_is_consistent(initial.get("download_mb_s"), delayed.get("download_mb_s")),
-            "speed_samples": _speed_retests(initial.get("download_mb_s"), delayed.get("download_mb_s")),
-            "checked_at": generated_at,
-        }
-    (OUTPUT / "egress-health.json").write_text(
-        json.dumps({"generated_at": generated_at, "configs": health}, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
 
-    report = {
-        "generated_at": generated_at,
-        "source": SOURCE_URL,
-        "worker": WORKER_URL,
-        "sing_box_version": subprocess.run([SING_BOX, "version"], capture_output=True, text=True).stdout.strip(),
-        "selection": {
-            "mode": selection_mode,
-            "batch_size": len(selected),
-            "candidate_count": len(candidates),
-            "seed_hour_utc": seed if selection_mode == "sample" else None,
-            "retest_delay_seconds": delay,
-            "speed_sample_bytes": SPEED_TEST_BYTES,
-            "minimum_speed_mb_s": MIN_DOWNLOAD_MB_S,
-            "speed_consistency_tolerance": SPEED_CONSISTENCY_TOLERANCE,
-        },
-        "config_support": {**config_stats, "unsupported_source_schemes": skipped},
-        "summary": _summarize(first, second),
-        "results": first + second,
-    }
-    (OUTPUT / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print("Retest summary: " + json.dumps(report["summary"]))
-    print(f"Full results saved to {OUTPUT / 'report.json'}")
-    return 0
+        classification = _classify_dynamic(
+            ip_history[rid],
+            speed_history[rid],
+            fraud_history[rid],
+            country_history[rid],
+        )
+
+        # Only include non-rejected configs
+        if classification["subgroup"] == "rejected":
+            continue
+
+        # Calculate final metrics
+        valid_speeds = [s for s in speed_history[rid] if s is not None]
+        avg_speed = sum(valid_speeds) / len(valid_speeds) if valid_speeds else 0
+
+        # Find the record
+        record = next((r for r in records if r["id"] == rid), None)
+        if not record:
+            continue
+
+        health[rid] = {
+            "scheme": record["scheme"],
+            "server": record["server"],
+            "server_port": record.get("server_port"),
+            "classification": classification,
+            "speed_mb_s": round(avg_speed, 3),
+            "ip_count": len(ips),
+            "unique_ips": ips,
+            "primary_country": classification.get("country"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    output_path = OUTPUT / "egress-health.json"
+    output_path.write_text(json.dumps({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "configs": health,
+    }, indent=2))
+
+    print(f"Done. Published {len(health)} configs to {output_path}")
+
+    # Stats
+    stable = sum(1 for c in health.values() if c["classification"]["type"] == "stable")
+    dyn_country = sum(1 for c in health.values() if c["classification"]["type"] == "dynamic-country")
+    dyn_elite = sum(1 for c in health.values() if c["classification"]["type"] == "dynamic-elite")
+    print(f"  Stable: {stable}")
+    print(f"  Dynamic-country: {dyn_country}")
+    print(f"  Dynamic-elite: {dyn_elite}")
+    print(f"  Rejected: {len(records) - len(health)}")
+
+    return 0 if health else 1
 
 
 if __name__ == "__main__":
