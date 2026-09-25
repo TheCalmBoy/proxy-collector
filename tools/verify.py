@@ -693,8 +693,11 @@ async def main() -> int:
             bounded(lambda r=r: _packet_test(r)) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
-        tcp_ok = sum(1 for res in tier2_results if res["tcp"]["success_rate"] >= PACKET_TEST_MIN_SUCCESS_RATE)
-        https_ok = sum(1 for res in tier2_results if res["https"]["success_rate"] >= PACKET_TEST_MIN_SUCCESS_RATE)
+        def _rate(result: dict[str, Any], key: str) -> float:
+            return float((result.get(key) or {}).get("success_rate", 0.0))
+
+        tcp_ok = sum(1 for res in tier2_results if _rate(res, "tcp") >= PACKET_TEST_MIN_SUCCESS_RATE)
+        https_ok = sum(1 for res in tier2_results if _rate(res, "https") >= PACKET_TEST_MIN_SUCCESS_RATE)
         print(
             f"Tier 2 detail: TCP>=90%: {tcp_ok}/{len(tier1_survivors)}, "
             f"HTTPS>=90%: {https_ok}/{len(tier1_survivors)}, both: {len(tier2_survivors)}"
