@@ -14,9 +14,9 @@ on:
         required: false
         default: "750"
       verify_https_concurrency:
-        description: "Concurrent HTTPS checks (each is a full TLS handshake)"
+        description: "Concurrent HTTPS checks (each is a full TLS handshake; >25 fails)"
         required: false
-        default: "100"
+        default: "25"
       debug_https:
         description: "Print HTTPS handshake failures"
         type: boolean
@@ -112,7 +112,7 @@ jobs:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
           VERIFY_TCP_CONCURRENCY: ${{ inputs.verify_tcp_concurrency || '750' }}
-          VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
+          VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '25' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
           VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
