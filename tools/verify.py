@@ -564,8 +564,10 @@ async def main() -> int:
             _speed_test(r, worker_url, worker_token, semaphore) for r in tier2_survivors
         ])
 
-        # Build enriched output
+        # Build enriched output from Tier 3 survivors only.
         for r, p2, p3 in zip(tier2_survivors, tier2_results, tier3_results):
+            if not p3.get("speed_ok"):
+                continue
             enriched.append({
                 "id": r["id"],
                 "scheme": r["scheme"],

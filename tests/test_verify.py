@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -90,6 +91,72 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertEqual(tcp_calls, [(30000, "1.1.1.1", 443, verify.TCP_TIMEOUT)])
         self.assertEqual(packet_calls, [30000])
         self.assertEqual(speed_calls, [30000])
+
+    def test_slow_configs_are_not_written_to_enriched_output(self):
+        async def fake_socks_connect(*_args):
+            return True, b"\x05\x00"
+
+        async def fake_packet(_record):
+            return {
+                "tcp": {"success_rate": 1.0, "success_count": 20},
+                "passed": True,
+            }
+
+        async def fake_speed(record, _worker_url, _token, _semaphore):
+            passed = record["port"] == 30000
+            return {
+                "ok": passed,
+                "country": "NL",
+                "fraud_score": 0,
+                "risk": "low",
+                "latency_ms": 10.0,
+                "download_mb_s": 1.0 if passed else 0.01,
+                "speed_ok": passed,
+                "error": None if passed else "speed_below_threshold",
+            }
+
+        class FakeProcess:
+            returncode = None
+
+            def terminate(self):
+                self.returncode = 0
+
+            async def wait(self):
+                return self.returncode
+
+        async def fake_run_sing_box(_config):
+            return FakeProcess()
+
+        source = (
+            b"socks5://one:pass@example.com:1080\n"
+            b"socks5://two:pass@example.net:1081\n"
+        )
+        response = io.BytesIO(source)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            env = {
+                "WORKER_URL": "https://worker.example",
+                "WORKER_TOKEN": "test-token",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(verify, "OUTPUT", Path(output_dir)),
+                mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
+                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+                mock.patch.object(verify, "_packet_test", fake_packet),
+                mock.patch.object(verify, "_speed_test", fake_speed),
+                mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
+            ):
+                result = asyncio.run(verify.main())
+
+            self.assertEqual(result, 0)
+            output = json.loads(
+                (Path(output_dir) / "enriched-configs.json").read_text()
+            )
+
+        self.assertEqual(len(output["configs"]), 1)
+        self.assertEqual(output["configs"][0]["server"], "example.com")
+        self.assertEqual(output["stats"]["tier3_passed"], 1)
 
 
 if __name__ == "__main__":
