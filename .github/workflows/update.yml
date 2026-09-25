@@ -103,6 +103,7 @@ jobs:
         run: python main.py
 
       - name: Run verification (Tier 1/2/3)
+        shell: bash
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
@@ -110,7 +111,11 @@ jobs:
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
           VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
-        run: python tools/verify.py
+        run: |
+          # This job opens thousands of sockets; the default soft limit is ~1024.
+          ulimit -n 65535 || echo "warning: could not raise fd limit"
+          ulimit -n
+          python tools/verify.py
 
       - name: Preserve latest egress health index
         shell: bash
