@@ -9,6 +9,10 @@ on:
         description: "Maximum configs to verify (0 = all)"
         required: false
         default: "0"
+      verify_concurrency:
+        description: "Concurrent configs per tier"
+        required: false
+        default: "750"
       debug_https:
         description: "Print HTTPS handshake failures"
         type: boolean
@@ -102,10 +106,10 @@ jobs:
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
-          VERIFY_CONCURRENCY: "750"
+          VERIFY_CONCURRENCY: ${{ inputs.verify_concurrency || '750' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
-          VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://cloudflare.com/cdn-cgi/trace' }}
+          VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
         run: python tools/verify.py
 
       - name: Preserve latest egress health index
