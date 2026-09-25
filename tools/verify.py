@@ -248,14 +248,11 @@ async def _read_socks5_greeting(
     """Negotiate no-auth SOCKS5 with a sing-box inbound."""
     writer.write(b"\x05\x01\x00")
     await writer.drain()
-    version, method_count = await asyncio.wait_for(reader.readexactly(2), timeout=1.5)
-    if version != 5 or method_count < 1:
+    version, method = await asyncio.wait_for(reader.readexactly(2), timeout=1.5)
+    if version != 5:
         raise OSError("invalid_socks5_greeting")
-    methods = await asyncio.wait_for(reader.readexactly(method_count), timeout=1.5)
-    if 0 not in methods:
-        raise OSError("socks5_no_auth_not_offered")
-    writer.write(b"\x05\x00")
-    await writer.drain()
+    if method != 0:
+        raise OSError("socks5_no_auth_not_selected")
     return b"\x05\x00"
 
 

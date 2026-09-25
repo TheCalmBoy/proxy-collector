@@ -14,7 +14,7 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
         writer = mock.Mock()
         writer.drain = mock.AsyncMock()
         reader = asyncio.StreamReader()
-        reader.feed_data(b"\x05\x01\x02")  # no-auth and username/password only
+        reader.feed_data(b"\x05\x02")  # server requires username/password
         reader.feed_eof()
 
         with self.assertRaises(OSError):
@@ -24,10 +24,11 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
         writer = mock.Mock()
         writer.drain = mock.AsyncMock()
         reader = asyncio.StreamReader()
-        reader.feed_data(b"\x05\x01\x00")
+        reader.feed_data(b"\x05\x00")  # server selects no authentication
         reader.feed_eof()
 
         self.assertEqual(await _read_socks5_greeting(reader, writer), b"\x05\x00")
+        writer.write.assert_called_once_with(b"\x05\x01\x00")
 
     async def test_socks5_connect_rejects_non_success_reply(self):
         reader = asyncio.StreamReader()
