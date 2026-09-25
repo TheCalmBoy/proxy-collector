@@ -26,6 +26,8 @@ IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
 MMDB_PATH = os.getenv("MMDB_PATH", "GeoLite2-Country.mmdb")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 IP_API_BATCH_SIZE = 100
+# Free-tier fields only; see fetch_ip_metadata for why Pro-only fields break it.
+DEFAULT_IP_API_FIELDS = "status,countryCode,isp,org,as,asname"
 HTTP_TIMEOUT = 30
 USER_AGENT = "proxy-collector/1.0 (+https://github.com/your-repo)"
 
@@ -185,7 +187,11 @@ def query_ip_api(
     """Batch query ip-api, respecting its published 100-IP / 15-requests-minute limits."""
     results: dict[str, dict[str, Any]] = {}
 
-    fields = "status,countryCode,hosting,isp,org,as,asname,proxy"
+    # ip-api's free tier rejects a batch that asks for Pro-only fields
+    # ("hosting", "proxy"): every entry comes back status=fail, so asking for
+    # them silently classified the whole corpus as UNKNOWN. We request only free
+    # fields and infer hosting from the provider strings instead.
+    fields = os.getenv("IP_API_FIELDS", DEFAULT_IP_API_FIELDS)
 
     for start in range(0, len(ips), IP_API_BATCH_SIZE):
         chunk = ips[start : start + IP_API_BATCH_SIZE]
@@ -288,13 +294,31 @@ def as_label(result: dict[str, Any]) -> str:
     return sanitize_label(isp, max_len=16)
 
 
+HOSTING_HINTS = (
+    "amazon", "aws", "google", "microsoft", "azure", "digitalocean", "linode",
+    "vultr", "ovh", "hetzner", "cloudflare", "contabo", "leaseweb", "hosting",
+    "datacenter", "data center", "server", "cloud", "colocation", "hetzner",
+    "scaleway", "oracle", "alibaba", "tencent", "equinix", "leaseweb",
+)
+
+
 def classify(result: dict[str, Any]) -> str:
     if result.get("status") != "success":
         return "UNKNOWN"
+    # Preferred signal when a Pro key supplies the real boolean.
     hosting = result.get("hosting")
     if hosting is True:
         return "DC"
     if hosting is False:
+        return "RES"
+    # Free tier has no "hosting" field, so infer it from provider metadata.
+    blob = " ".join(
+        str(result.get(k) or "")
+        for k in ("isp", "org", "asname", "as")
+    ).lower()
+    if any(hint in blob for hint in HOSTING_HINTS):
+        return "DC"
+    if blob.strip():
         return "RES"
     return "UNKNOWN"
 
