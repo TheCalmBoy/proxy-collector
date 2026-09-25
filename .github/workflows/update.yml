@@ -46,6 +46,15 @@ jobs:
           sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
           sing-box version
 
+      - name: Verify sing-box works
+        run: |
+          echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' | sing-box check -c -
+          sing-box run -c - <<<'{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' &
+          PID=$!
+          sleep 2
+          kill $PID 2>/dev/null || true
+          echo "sing-box test passed"
+
       - name: Download DB-IP Lite country database
         shell: bash
         run: |

@@ -435,10 +435,15 @@ async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     config_path.write_text(json.dumps(config, separators=(",", ":")))
     proc = await asyncio.create_subprocess_exec(
         SING_BOX, "run", "-c", str(config_path),
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await asyncio.sleep(2)  # startup time
+    await asyncio.sleep(3)  # startup time
+    if proc.returncode is not None:
+        stdout, stderr = await proc.communicate()
+        print(f"sing-box failed to start (exit {proc.returncode}):", file=sys.stderr)
+        print(stderr.decode()[-2000:], file=sys.stderr)
+        raise RuntimeError(f"sing-box exited with code {proc.returncode}")
     return proc
 
 
@@ -533,12 +538,13 @@ async def main() -> int:
         print(f"Saved to {output_path}")
 
     finally:
-        sing_box_proc.terminate()
-        try:
-            await asyncio.wait_for(sing_box_proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            sing_box_proc.kill()
-            await sing_box_proc.wait()
+        if sing_box_proc.returncode is None:
+            sing_box_proc.terminate()
+            try:
+                await asyncio.wait_for(sing_box_proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                sing_box_proc.kill()
+                await sing_box_proc.wait()
 
     return 0 if enriched else 1
 
