@@ -2,7 +2,7 @@ name: Probe proxy egress IPs
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "5,35 * * * *"
   workflow_dispatch:
 
 permissions:
