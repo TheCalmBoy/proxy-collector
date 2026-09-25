@@ -673,10 +673,16 @@ async def main() -> int:
         semaphore = asyncio.Semaphore(CONCURRENCY)
         enriched = []
 
+        async def bounded(coroutine_factory):
+            """Apply CONCURRENCY to a tier; previously tiers ran fully unthrottled."""
+            async with semaphore:
+                return await coroutine_factory()
+
         # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT) for r in records
+            bounded(lambda r=r: _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT))
+            for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
@@ -684,7 +690,7 @@ async def main() -> int:
         # Tier 2: Packet loss test (real SOCKS5 CONNECT through sing-box)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            _packet_test(r) for r in tier1_survivors
+            bounded(lambda r=r: _packet_test(r)) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")

@@ -126,6 +126,81 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertEqual(packet_calls, [30000])
         self.assertEqual(speed_calls, [30000])
 
+    def test_tiers_respect_configured_concurrency(self):
+        active = 0
+        peak = {"tier1": 0, "tier2": 0}
+
+        async def fake_socks_connect(*_args):
+            nonlocal active
+            active += 1
+            peak["tier1"] = max(peak["tier1"], active)
+            await asyncio.sleep(0)
+            active -= 1
+            return True, b"\x05\x00"
+
+        async def fake_packet(_record):
+            nonlocal active
+            active += 1
+            peak["tier2"] = max(peak["tier2"], active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {
+                "tcp": {"success_rate": 1.0, "success_count": 20},
+                "passed": True,
+            }
+
+        async def fake_speed(*_args):
+            return {
+                "ok": True,
+                "country": "NL",
+                "fraud_score": 0,
+                "risk": "low",
+                "latency_ms": 10.0,
+                "download_mb_s": 1.0,
+                "speed_ok": True,
+                "speed_error": None,
+            }
+
+        class FakeProcess:
+            returncode = None
+
+            def terminate(self):
+                self.returncode = 0
+
+            async def wait(self):
+                return self.returncode
+
+        async def fake_run_sing_box(_config):
+            return FakeProcess()
+
+        uris = "\n".join(
+            f"socks5://user{i}:pass@host{i}.example:1080" for i in range(12)
+        )
+        response = io.BytesIO(uris.encode())
+        response.read = lambda: uris.encode()
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            env = {
+                "WORKER_URL": "https://worker.example",
+                "WORKER_TOKEN": "test-token",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(verify, "OUTPUT", Path(output_dir)),
+                mock.patch.object(verify, "CONCURRENCY", 3),
+                mock.patch.object(verify, "VERIFY_LIMIT", 0),
+                mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
+                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+                mock.patch.object(verify, "_packet_test", fake_packet),
+                mock.patch.object(verify, "_speed_test", fake_speed),
+                mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
+            ):
+                result = asyncio.run(verify.main())
+
+        self.assertEqual(result, 0)
+        self.assertLessEqual(peak["tier1"], 3)
+        self.assertLessEqual(peak["tier2"], 3)
+
     def test_slow_configs_are_not_written_to_enriched_output(self):
         async def fake_socks_connect(*_args):
             return True, b"\x05\x00"
