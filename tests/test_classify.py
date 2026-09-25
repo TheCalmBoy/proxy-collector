@@ -54,6 +54,21 @@ class TestClassify(unittest.TestCase):
                 f"{pro_only} is Pro-only and fails the whole free-tier batch",
             )
 
+    def test_batch_request_echoes_the_query_field(self):
+        """Without "query" the response cannot be matched back to the IP.
+
+        ip-api omits "query" unless it is listed in fields, so every entry came
+        back unmatchable and the whole corpus counted as failed.
+        """
+        self.assertIn(
+            "query",
+            main.default_ip_api_fields().split(","),
+            "ip-api drops the query field unless requested",
+        )
+
+    def test_default_fields_have_no_spaces(self):
+        self.assertNotIn(" ", main.default_ip_api_fields())
+
 
 if __name__ == "__main__":
     unittest.main()

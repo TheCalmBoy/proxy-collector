@@ -191,7 +191,10 @@ def query_ip_api(
     # ("hosting", "proxy"): every entry comes back status=fail, so asking for
     # them silently classified the whole corpus as UNKNOWN. We request only free
     # fields and infer hosting from the provider strings instead.
-    fields = os.getenv("IP_API_FIELDS", DEFAULT_IP_API_FIELDS)
+    # "query" is an implicit echo field, not a data field: unless it is listed
+    # the batch response omits it entirely, so the response cannot be matched
+    # back to the requested IP and every lookup looks like a miss.
+    fields = default_ip_api_fields()
 
     for start in range(0, len(ips), IP_API_BATCH_SIZE):
         chunk = ips[start : start + IP_API_BATCH_SIZE]
@@ -319,6 +322,15 @@ HOSTING_HINTS = (
     "datacenter", "data center", "server", "cloud", "colocation", "hetzner",
     "scaleway", "oracle", "alibaba", "tencent", "equinix", "leaseweb",
 )
+
+
+def default_ip_api_fields() -> str:
+    """Fields requested from ip-api: free tier only, plus the query echo.
+
+    "query" must be listed or the batch response omits it, which makes entries
+    impossible to match back to the requested IP.
+    """
+    return os.getenv("IP_API_FIELDS", f"query,{DEFAULT_IP_API_FIELDS}")
 
 
 def classify(result: dict[str, Any]) -> str:
