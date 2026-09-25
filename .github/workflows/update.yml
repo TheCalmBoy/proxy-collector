@@ -16,7 +16,7 @@ on:
       https_url:
         description: "HTTPS test URL"
         required: false
-        default: "https://cloudflare.com/cdn-cgi/trace"
+        default: "https://www.gstatic.com/generate_204"
 
 permissions:
   contents: write

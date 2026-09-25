@@ -45,7 +45,7 @@ PACKET_TEST_COUNT = 20
 PACKET_TEST_DURATION = 40  # seconds
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
 HTTPS_TEST_URL = os.getenv(
-    "VERIFY_HTTPS_URL", "https://cloudflare.com/cdn-cgi/trace"
+    "VERIFY_HTTPS_URL", "https://www.gstatic.com/generate_204"
 )
 
 
