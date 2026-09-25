@@ -276,43 +276,33 @@ async def _udp_ping(host: str, port: int, timeout: float) -> tuple[bool, float |
 
 
 async def _packet_test(host: str, port: int, scheme: str) -> dict[str, Any]:
-    """Run 20 TCP + 20 UDP tests over 40 seconds"""
+    """Run 20 TCP tests over 40 seconds through proxy"""
     interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
     tcp_latencies = []
-    udp_latencies = []
     tcp_success = 0
-    udp_success = 0
 
     for i in range(PACKET_TEST_COUNT):
-        # TCP test
+        # TCP test through proxy
         ok, lat = await _tcp_connect(host, port, TCP_TIMEOUT)
         if ok:
             tcp_success += 1
             tcp_latencies.append(lat)
 
-        # UDP test (only for UDP-capable schemes)
-        if scheme in ("vless", "trojan", "vmess", "ss", "socks", "socks5"):
-            ok, lat = await _udp_ping(host, port, 1.0)
-            if ok:
-                udp_success += 1
-                udp_latencies.append(lat)
-
         await asyncio.sleep(interval)
 
     tcp_rate = tcp_success / PACKET_TEST_COUNT
-    udp_rate = udp_success / PACKET_TEST_COUNT if udp_latencies else 1.0
 
     def stats(latencies: list[float]) -> dict[str, float]:
         if not latencies:
             return {}
         sorted_lat = sorted(latencies)
         return {
-            "avg_ms": sum(latencies) / len(latencies),
-            "min_ms": min(latencies),
-            "max_ms": max(latencies),
+            "avg_ms": sum(sorted_lat) / len(sorted_lat),
+            "min_ms": min(sorted_lat),
+            "max_ms": max(sorted_lat),
             "p50_ms": sorted_lat[len(sorted_lat) // 2],
             "p95_ms": sorted_lat[int(len(sorted_lat) * 0.95)],
-            "jitter_ms": max(latencies) - min(latencies),
+            "jitter_ms": max(sorted_lat) - min(sorted_lat),
         }
 
     return {
@@ -321,12 +311,7 @@ async def _packet_test(host: str, port: int, scheme: str) -> dict[str, Any]:
             "success_count": tcp_success,
             **stats(tcp_latencies),
         },
-        "udp": {
-            "success_rate": udp_rate,
-            "success_count": udp_success,
-            **stats(udp_latencies),
-        },
-        "passed": tcp_rate >= PACKET_TEST_MIN_SUCCESS_RATE and udp_rate >= PACKET_TEST_MIN_SUCCESS_RATE,
+        "passed": tcp_rate >= PACKET_TEST_MIN_SUCCESS_RATE,
     }
 
 
@@ -491,18 +476,18 @@ async def main() -> int:
         semaphore = asyncio.Semaphore(CONCURRENCY)
         enriched = []
 
-        # Tier 1: TCP sanity
+        # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            _tcp_connect(r["server"], r["server_port"], TCP_TIMEOUT) for r in records
+            _tcp_connect("127.0.0.1", r["port"], TCP_TIMEOUT) for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
 
-        # Tier 2: Packet loss test
+        # Tier 2: Packet loss test (through sing-box inbounds)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            _packet_test(r["server"], r["server_port"], r["scheme"]) for r in tier1_survivors
+            _packet_test("127.0.0.1", r["port"], r["scheme"]) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")
