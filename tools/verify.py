@@ -479,7 +479,7 @@ async def main() -> int:
         # Tier 1: TCP sanity (through sing-box inbounds)
         print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
         tier1_results = await asyncio.gather(*[
-            _tcp_connect("127.0.0.1", r["port"], TCP_TIMEOUT) for r in records
+            _tcp_connect("127.0.0.1", r["server_port"], TCP_TIMEOUT) for r in records
         ])
         tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
         print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
@@ -487,7 +487,7 @@ async def main() -> int:
         # Tier 2: Packet loss test (through sing-box inbounds)
         print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
         tier2_results = await asyncio.gather(*[
-            _packet_test("127.0.0.1", r["port"], r["scheme"]) for r in tier1_survivors
+            _packet_test("127.0.0.1", r["server_port"], r["scheme"]) for r in tier1_survivors
         ])
         tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
         print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")
