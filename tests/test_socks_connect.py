@@ -152,6 +152,40 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
             ok, _ = await _socks5_connect(30000, "1.1.1.1", 443, 1.0)
         self.assertFalse(ok)
 
+    async def test_packet_test_runs_exactly_twenty_rounds(self):
+        socks_calls = 0
+        https_calls = 0
+        sleeps = 0
+
+        async def fake_socks_connect(*_args, **_kwargs):
+            nonlocal socks_calls
+            socks_calls += 1
+            return True, 1.0
+
+        async def fake_https_request(*_args, **_kwargs):
+            nonlocal https_calls
+            https_calls += 1
+            return True, 1.0
+
+        async def counting_sleep(_seconds):
+            nonlocal sleeps
+            sleeps += 1
+
+        with (
+            mock.patch.object(verify, "PACKET_TEST_COUNT", 20),
+            mock.patch.object(verify.asyncio, "sleep", new=counting_sleep),
+            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+            mock.patch.object(verify, "_https_request", fake_https_request, create=True),
+        ):
+            result = await verify._packet_test({"port": 30000})
+
+        self.assertEqual(socks_calls, 20)
+        self.assertEqual(https_calls, 20)
+        self.assertEqual(sleeps, 20)
+        self.assertEqual(result["tcp"]["success_count"], 20)
+        self.assertEqual(result["https"]["success_count"], 20)
+        self.assertTrue(result["passed"])
+
     async def test_socks5_connect_accepts_successful_reply(self):
         reader = asyncio.StreamReader()
         reader.feed_data(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")

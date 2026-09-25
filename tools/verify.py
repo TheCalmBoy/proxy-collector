@@ -300,7 +300,6 @@ async def _tcp_connect(host: str, port: int, timeout: float) -> tuple[bool, floa
         )
         latency_ms = (time.perf_counter() - start) * 1000
         writer.close()
-        await writer.wait_closed()
         return True, latency_ms
     except Exception:
         return False, None
@@ -408,15 +407,16 @@ async def _https_request_inner(
 
 
 async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
-    """Run 20 concurrent SOCKS CONNECT + HTTPS GET pairs over 40 seconds."""
+    """Run 20 concurrent SOCKS CONNECT + HTTPS GET pairs spaced 2s apart."""
+    interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
     tcp_latencies: list[float] = []
     https_latencies: list[float] = []
     tcp_success = 0
     https_success = 0
-    started_at = time.perf_counter()
 
     async def run_round() -> None:
         nonlocal tcp_success, https_success
+        started_at = time.perf_counter()
         tcp_result, https_result = await asyncio.gather(
             _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT),
             _https_request(
@@ -434,10 +434,7 @@ async def _packet_test(record: dict[str, Any]) -> dict[str, Any]:
 
     for _ in range(PACKET_TEST_COUNT):
         await run_round()
-        remaining = PACKET_TEST_DURATION - (time.perf_counter() - started_at)
-        if remaining <= 0:
-            break
-        await asyncio.sleep(min(PACKET_TEST_DURATION / PACKET_TEST_COUNT, remaining))
+        await asyncio.sleep(interval)
 
     tcp_rate = tcp_success / PACKET_TEST_COUNT
     https_rate = https_success / PACKET_TEST_COUNT
