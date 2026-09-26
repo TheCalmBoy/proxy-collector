@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable
 
 # Config
 # Config. One curated upstream: it already aggregates ~19 sources and applies
@@ -199,6 +199,19 @@ def https_failure_summary(results: list[float], threshold: float) -> str:
 UDP_TEST_HOST = os.getenv("VERIFY_UDP_TEST_HOST", "1.1.1.1")
 UDP_TEST_PORT = int(os.getenv("VERIFY_UDP_TEST_PORT", "53"))
 
+class _ProbeTimeout(Exception):
+    """A labelled timeout, so the failing step is identifiable in logs.
+
+    A bare TimeoutError cannot distinguish the greeting, the ASSOCIATE
+    reply, and the datagram round trip, which is why a whole stage once
+    reported 11240 failures under one indistinguishable reason.
+    """
+
+    def __init__(self, label: str) -> None:
+        super().__init__(label)
+        self.label = label
+
+
 # Why UDP probes failed, tallied across Stage 2. A bare 0/N cannot tell a
 # broken probe from a TCP-only fleet; this can. Reset per run so a
 # long-lived process does not accumulate across runs.
@@ -224,20 +237,32 @@ async def _udp_associate_probe(
     string on failure. A refused command yields the REP code, which is the
     expected answer for a TCP-only proxy and is distinguishable from a
     relay that accepted the request and then went silent.
+
+    Every await is labelled. A single catch-all TimeoutError made the
+    greeting, the ASSOCIATE reply, and the datagram round trip all look
+    alike in the stage tally, so 11240 failures with one reason could not
+    be told apart - which is what hid the real cause. The label names the
+    step that ran out of time.
     """
+    async def step(label: str, awaitable: Awaitable[Any]) -> Any:
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise _ProbeTimeout(label) from None
+
     start = time.perf_counter()
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection("127.0.0.1", proxy_port), timeout=timeout
+        reader, writer = await step(
+            "connect", asyncio.open_connection("127.0.0.1", proxy_port)
         )
-    except (OSError, asyncio.TimeoutError) as exc:
-        return False, f"no SOCKS inbound on 127.0.0.1:{proxy_port} ({exc.__class__.__name__})"
+    except (OSError, _ProbeTimeout) as exc:
+        return False, f"no SOCKS inbound on 127.0.0.1:{proxy_port} ({type(exc).__name__})"
 
     sock: socket.socket | None = None
     try:
         writer.write(b"\x05\x01\x00")
         await writer.drain()
-        version, method = await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+        version, method = await step("greeting", reader.readexactly(2))
         if version != 5 or method != 0:
             return False, f"not SOCKS5 (VER={version} METHOD={method})"
 
@@ -249,29 +274,27 @@ async def _udp_associate_probe(
             + b"\x00\x00"
         )
         await writer.drain()
-        header = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
+        header = await step("associate reply", reader.readexactly(4))
         if header[0] != 5 or header[1] != 0:
             # 0x07 is "command not supported": the proxy is TCP-only.
             return False, f"UDP ASSOCIATE refused (REP={header[1]})"
         atyp = header[3]
         if atyp == 1:
             relay_host = socket.inet_ntoa(
-                await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
+                await step("relay address", reader.readexactly(4))
             )
         elif atyp == 4:
-            raw = await asyncio.wait_for(reader.readexactly(16), timeout=timeout)
+            raw = await step("relay address", reader.readexactly(16))
             relay_host = socket.inet_ntop(socket.AF_INET6, raw)
         else:
-            length = (await asyncio.wait_for(
-                reader.readexactly(1), timeout=timeout
-            ))[0]
+            length = (await step("relay length", reader.readexactly(1)))[0]
             relay_host = (
-                await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
+                await step("relay address", reader.readexactly(length))
             ).decode(errors="replace")
         relay_port = struct.unpack(
-            "!H", await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+            "!H", await step("relay port", reader.readexactly(2))
         )[0]
-        await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+        await step("associate trailer", reader.readexactly(2))
 
         if not relay_host or relay_host == "0.0.0.0":
             relay_host = "127.0.0.1"
@@ -295,8 +318,10 @@ async def _udp_associate_probe(
             request, (relay_host, relay_port), timeout
         )
         if not ok:
-            return False, reason
+            return False, f"datagram: {reason}"
         return True, (time.perf_counter() - start) * 1000
+    except _ProbeTimeout as exc:
+        return False, f"timed out during {exc.label}"
     except (OSError, asyncio.TimeoutError, struct.error, IndexError) as exc:
         return False, f"probe aborted: {exc.__class__.__name__}"
     finally:
@@ -332,15 +357,21 @@ async def _datagram_round_trip(
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setblocking(False)
     try:
-        await asyncio.wait_for(
-            loop.sock_sendto(sock, request, addr), timeout=timeout
-        )
-        await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=timeout)
+        try:
+            await asyncio.wait_for(
+                loop.sock_sendto(sock, request, addr), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            return False, "send to relay timed out"
+        except OSError as exc:
+            return False, f"relay send failed: {exc.__class__.__name__}"
+        try:
+            await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False, f"relay accepted the datagram, no reply in {timeout}s"
+        except OSError as exc:
+            return False, f"relay receive failed: {exc.__class__.__name__}"
         return True, "reply received"
-    except asyncio.TimeoutError:
-        return False, f"no reply from {addr[0]}:{addr[1]} in {timeout}s"
-    except OSError as exc:
-        return False, f"relay send failed: {exc.__class__.__name__}"
     finally:
         sock.close()
 
