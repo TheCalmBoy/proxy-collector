@@ -98,8 +98,15 @@ async def _under(semaphore: asyncio.Semaphore | None, probe: Any) -> Any:
 
 
 async def _tcp_reliability(record: dict[str, Any], semaphore: asyncio.Semaphore | None) -> float:
-    """Run PACKET_TEST_COUNT SOCKS CONNECTs and return the success rate."""
+    """Run PACKET_TEST_COUNT SOCKS CONNECTs and return the success rate.
+
+    Stops once a perfect run of the remaining rounds cannot reach the
+    entry gate. At 95% over 20 rounds a config needs 19 successes, so one
+    that loses 2 early is already lost; the remaining probes bought nothing
+    and Stage 1 is the largest stage in the funnel.
+    """
     successes = 0
+    required = int(math.ceil(TCP_MIN_SUCCESS_RATE * PACKET_TEST_COUNT))
     for index in range(PACKET_TEST_COUNT):
         if index:
             await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
@@ -111,6 +118,8 @@ async def _tcp_reliability(record: dict[str, Any], semaphore: asyncio.Semaphore 
         except Exception:
             ok = False
         successes += 1 if ok else 0
+        if successes + (PACKET_TEST_COUNT - index - 1) < required:
+            break
     return successes / PACKET_TEST_COUNT
 
 
@@ -658,6 +667,13 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     if marker and process.returncode == 0:
         try:
             downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
+            # This is NOT proxy latency. It is time-to-first-byte on a 5 MB
+            # transfer issued under SPEED_CONCURRENCY-way contention, so it
+            # is dominated by queueing on this runner: medians land near 9s
+            # with 84% of records within 1s of the ceiling. The key keeps
+            # its published name because consumers read it, but the only
+            # trustworthy quality signal here is download_mb_s. Real
+            # responsiveness is Stage 1's TCP success_rate.
             result["latency_ms"] = round(starttransfer * 1000, 1)
             if total > starttransfer:
                 # The CDN response is pure payload, so its size is the

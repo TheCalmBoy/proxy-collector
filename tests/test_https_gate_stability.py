@@ -165,5 +165,77 @@ class EarlyExit(unittest.TestCase):
         self.assertAlmostEqual(rate, 0.90, places=3)
 
 
+class TcpEarlyExit(unittest.TestCase):
+    """Stage 1 is the largest stage, so it gets the same early exit as
+    Stage 4. The reported rate must be unchanged."""
+
+    def _record(self):
+        return {"id": "abc123", "port": 30000, "server": "1.2.3.4", "server_port": 443}
+
+    def _run(self, outcomes):
+        self.calls = {"n": 0}
+
+        async def fake_connect(_port, _host, _p, _timeout):
+            idx = min(self.calls["n"], len(outcomes) - 1)
+            self.calls["n"] += 1
+            return outcomes[idx], 1.0
+
+        async def fake_sleep(_):
+            return None
+
+        async def scenario():
+            from unittest import mock
+
+            with mock.patch.object(verify, "_socks5_connect", fake_connect), \
+                 mock.patch.object(verify.asyncio, "sleep", fake_sleep):
+                return await verify._tcp_reliability(self._record(), None)
+
+        return asyncio.run(scenario())
+
+    def test_tcp_gate_needs_nineteen_of_twenty(self):
+        self.assertEqual(
+            int(__import__("math").ceil(verify.TCP_MIN_SUCCESS_RATE * 20)), 19
+        )
+
+    def test_dead_tcp_config_stops_at_the_failure_budget(self):
+        # 19 of 20 needed, so the 2nd failure ends it.
+        rate = self._run([False, False])
+        self.assertEqual(rate, 0.0)
+        self.assertEqual(self.calls["n"], 2)
+
+    def test_working_tcp_config_runs_all_rounds(self):
+        rate = self._run([True] * 20)
+        self.assertEqual(rate, 1.0)
+        self.assertEqual(self.calls["n"], verify.PACKET_TEST_COUNT)
+
+    def test_exactly_meeting_the_tcp_gate_survives(self):
+        # 19 of 20 = 0.95 clears the gate and must not be cut short.
+        rate = self._run([True] * 19 + [False])
+        self.assertAlmostEqual(rate, 0.95, places=3)
+        self.assertEqual(self.calls["n"], verify.PACKET_TEST_COUNT)
+
+    def test_tcp_early_exit_preserves_the_rate(self):
+        # 18 successes then a failure: 18 < 19 required, so it stops at
+        # 18/20 = 0.9, which is exactly what a full pass would report.
+        rate = self._run([True] * 18 + [False] * 2)
+        self.assertAlmostEqual(rate, 0.9, places=3)
+
+
+class UdpMustRunEveryRound(unittest.TestCase):
+    """UDP is a flag, never a filter, so it cannot exit early: exiting on a
+    partial pass would understate support and corrupt the published flag."""
+
+    def test_udp_reliability_has_no_early_exit(self):
+        import inspect
+
+        source = inspect.getsource(verify._udp_reliability)
+        self.assertNotIn(
+            "break",
+            source,
+            "UDP never rejects, so an early exit would report a rate that "
+            "was not measured over all rounds",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
