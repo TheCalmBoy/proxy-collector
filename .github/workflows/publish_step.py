@@ -12,6 +12,7 @@ Kept as a script rather than inline in the workflow so it can be tested.
 """
 import base64
 import json
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -63,10 +64,18 @@ def main() -> int:
     for record in records:
         by_country[country_of(record)].append(record["uri"])
 
-    (OUTPUT / "countries").mkdir(parents=True, exist_ok=True)
+    # main.py already wrote a countries/ dir covering every config it
+    # scraped, so that dir holds files for countries that verification just
+    # eliminated. Publish from a clean directory, or those stale files ship
+    # alongside the verified ones and clients read dead configs as live.
+    countries_dir = OUTPUT / "countries"
+    if countries_dir.exists():
+        shutil.rmtree(countries_dir)
+    countries_dir.mkdir(parents=True, exist_ok=True)
+
     write_list(str(OUTPUT / "all.txt"), [r["uri"] for r in records])
     for country, uris in sorted(by_country.items()):
-        write_list(str(OUTPUT / "countries" / f"{country}.txt"), uris)
+        write_list(str(countries_dir / f"{country}.txt"), uris)
 
     manifest_path = OUTPUT / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}

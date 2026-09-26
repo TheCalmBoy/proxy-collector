@@ -144,6 +144,49 @@ class TestPublishStep(unittest.TestCase):
             "stale", (self.root / "output" / "all.txt").read_text()
         )
 
+    def test_stale_country_files_from_the_collector_are_removed(self):
+        """main.py publishes a file per scraped country; verification
+        eliminates most of them, and a leftover file would ship dead configs
+        as if they were live."""
+        # The collector wrote these before verification ran. FR has no
+        # verified survivors, and IT was never verified at all.
+        (self.root / "output" / "countries" / "FR.txt").write_text(
+            "vless://dead0001@fr.example.com:443#dead\n"
+            "vless://dead0002@fr.example.com:443#dead2\n"
+        )
+        (self.root / "output" / "countries" / "FR.base64.txt").write_text(
+            "dmxlc3M6Ly9kZWFkMDAwMQ==\n"
+        )
+        (self.root / "output" / "countries" / "IT.txt").write_text(
+            "vless://dead0003@it.example.com:443#dead3\n"
+        )
+
+        self.assertEqual(self._run_publish().returncode, 0)
+
+        self.assertFalse(
+            (self.root / "output" / "countries" / "FR.txt").exists(),
+            "FR has zero verified survivors but its file was published",
+        )
+        self.assertFalse(
+            (self.root / "output" / "countries" / "FR.base64.txt").exists(),
+        )
+        self.assertFalse(
+            (self.root / "output" / "countries" / "IT.txt").exists(),
+        )
+        # The countries that do have survivors are still published.
+        self.assertTrue((self.root / "output" / "countries" / "US.txt").exists())
+
+    def test_published_country_files_sum_to_the_verified_count(self):
+        enriched = realistic_enriched()
+        expected = sum(1 for r in enriched["configs"] if r["stages"]["https"]["passed"])
+        self.assertEqual(self._run_publish().returncode, 0)
+        total = 0
+        for path in (self.root / "output" / "countries").glob("*.txt"):
+            if path.name.endswith(".base64.txt"):
+                continue
+            total += len(path.read_text().splitlines())
+        self.assertEqual(total, expected)
+
     def test_missing_verified_file_fails_without_wiping_output(self):
         (self.root / "verify-output" / "enriched-configs.json").unlink()
         proc = self._run_publish()
