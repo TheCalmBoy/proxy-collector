@@ -63,6 +63,12 @@ VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.100  # 100 KB/s
 TCP_TIMEOUT = 1.5
+# Stage 4 does a full TLS handshake plus an HTTP round trip through the
+# proxy, which is far more work than the bare TCP connect Stage 1 performs.
+# Reusing the 1.5s connect budget for it made the exit gate depend on proxy
+# latency rather than proxy quality, and the gate swung from 137 survivors
+# to 0 across runs with identical code.
+HTTPS_TIMEOUT = float(os.getenv("VERIFY_HTTPS_TIMEOUT", "8.0"))
 PACKET_TEST_COUNT = 20
 PACKET_TEST_ROUND_DELAY = float(os.getenv("VERIFY_ROUND_DELAY", "0.5"))
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
@@ -110,7 +116,26 @@ async def _tcp_reliability(record: dict[str, Any], semaphore: asyncio.Semaphore 
 async def _https_reliability(
     record: dict[str, Any], semaphore: asyncio.Semaphore | None
 ) -> float:
-    """Run PACKET_TEST_COUNT proxied HTTPS GETs and return the success rate."""
+    """Run PACKET_TEST_COUNT proxied HTTPS GETs and return the success rate.
+
+    A config that lands just under the gate is retried once. With 20 rounds
+    and a 90% bar a config may afford only 2 failures, so a single timeout
+    rejects a proxy that would otherwise be fine. One retry costs a second
+    of runner time and removes that coin flip, which is what made the gate
+    swing from 137 survivors to 0 between runs of identical code.
+    """
+    rate = await _https_rounds(record, semaphore)
+    if rate < HTTPS_MIN_SUCCESS_RATE and rate > 0:
+        retried = await _https_rounds(record, semaphore)
+        if retried > rate:
+            return retried
+    return rate
+
+
+async def _https_rounds(
+    record: dict[str, Any], semaphore: asyncio.Semaphore | None
+) -> float:
+    """One full pass of PACKET_TEST_COUNT proxied HTTPS GETs."""
     successes = 0
     for index in range(PACKET_TEST_COUNT):
         if index:
@@ -118,12 +143,26 @@ async def _https_reliability(
         try:
             ok, _ = await _under(
                 semaphore,
-                lambda: _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT),
+                lambda: _https_request(record["port"], HTTPS_TEST_URL, HTTPS_TIMEOUT),
             )
         except Exception:
             ok = False
         successes += 1 if ok else 0
     return successes / PACKET_TEST_COUNT
+
+
+def https_failure_summary(results: list[float], threshold: float) -> str:
+    """Describe why a stage produced no survivors, so a 0/N run is
+    diagnosable from the log instead of looking like a mystery."""
+    if not results:
+        return "no results"
+    if any(rate >= threshold for rate in results):
+        return "some passed"
+    return (
+        f"all {len(results)} below {threshold:.0%}; "
+        f"best={max(results):.2f} mean={sum(results) / len(results):.2f} "
+        f"zeros={sum(1 for r in results if r == 0)}"
+    )
 
 
 async def _udp_reliability(
@@ -540,7 +579,10 @@ async def _https_request_inner(
             await writer.drain()
             status_line = await reader.readline()
             if not status_line.startswith(b"HTTP/1.1 2") and not status_line.startswith(b"HTTP/1.0 2"):
-                raise OSError("https_non_2xx")
+                # Include the status: 429 from a rate limit and 403 from a
+                # block are completely different failures, and the bare
+                # https_non_2xx hid which one happened.
+                raise OSError(f"https_non_2xx:{status_line.decode(errors='replace').strip()}")
 
         await asyncio.wait_for(exchange(), timeout=timeout)
         return True, (time.perf_counter() - start) * 1000
@@ -976,6 +1018,14 @@ async def main() -> int:
             f"Stage 4 passed: {len(survivors)}/{len(speed_survivors)} "
             f"(>={HTTPS_MIN_SUCCESS_RATE:.0%})"
         )
+        if not survivors:
+            # A 0/N run has to be diagnosable. Without this line there is no
+            # way to tell a dead target from proxies that cannot reach it.
+            print(
+                f"HTTPS stage produced no survivors: "
+                f"{https_failure_summary(https_results, HTTPS_MIN_SUCCESS_RATE)}",
+                file=sys.stderr,
+            )
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         output_path = OUTPUT / "enriched-configs.json"
