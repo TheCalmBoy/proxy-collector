@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import socket
 import ssl
 import struct
@@ -248,7 +249,7 @@ def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
             return {"type": "http", "host": [vmess.get("host", "")]}
         return None
     if net in ("ws", "websocket"):
-        path = vmess.get("path", "/")
+        path = _safe_ws_path(vmess.get("path"))
         host = vmess.get("host", "")
         transport = {"type": "ws", "path": path}
         if host:
@@ -263,12 +264,31 @@ def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
     return None
 
 
+def _safe_ws_path(raw: Any) -> str:
+    """Normalise a websocket path, or raise if it is not usable.
+
+    sing-box fails to parse paths containing a bare or invalid percent escape
+    (e.g. "/100%"), and a single bad transport aborts the whole process.
+    """
+    path = str(raw or "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    try:
+        # A lone "%" is not a valid escape sequence.
+        urllib.parse.unquote(path, errors="strict")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UnsupportedConfig("invalid_ws_path") from exc
+    if "%" in path and not re.search(r"%[0-9A-Fa-f]{2}", path):
+        raise UnsupportedConfig("invalid_ws_path")
+    return path
+
+
 def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
     net = _first(params, "type", "network", "net")
     if not net:
         return None
     if net == "ws":
-        path = _first(params, "path") or "/"
+        path = _safe_ws_path(_first(params, "path"))
         host = _first(params, "host")
         transport = {"type": "ws", "path": path}
         if host:
@@ -592,7 +612,10 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
 
 
 def _tag(uri: str) -> str:
-    return hashlib.sha256(uri.encode()).hexdigest()[:8].upper()
+    # 8 hex chars (32 bits) collides across a few thousand configs, and a
+    # duplicate inbound tag makes sing-box refuse to start at all. Use a wider
+    # digest; tags are cheap and uniqueness is required.
+    return hashlib.sha256(uri.encode()).hexdigest()[:24].upper()
 
 
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
@@ -651,6 +674,20 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
 async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     config_path = Path("/tmp/verify-sing-box.json")
     config_path.write_text(json.dumps(config, separators=(",", ":")))
+
+    # Validate first: `check` reports the exact offending field, whereas a
+    # failed `run` only exits 1 and hides the cause in a startup race.
+    checked = await asyncio.create_subprocess_exec(
+        SING_BOX, "check", "-c", str(config_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, check_err = await checked.communicate()
+    if checked.returncode != 0:
+        print("sing-box rejected the config:", file=sys.stderr)
+        print(check_err.decode()[-2000:], file=sys.stderr)
+        raise RuntimeError("sing-box check failed")
+
     proc = await asyncio.create_subprocess_exec(
         SING_BOX, "run", "-c", str(config_path),
         stdout=asyncio.subprocess.PIPE,

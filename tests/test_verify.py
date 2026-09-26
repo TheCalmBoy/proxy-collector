@@ -239,6 +239,35 @@ class VerifyPortRoutingTests(unittest.TestCase):
         outbound = verify.parse_proxy_uri(uri)
         self.assertEqual(outbound.get("flow", ""), "")
 
+    def test_ws_path_with_bare_percent_is_rejected(self):
+        """A bare "%" path makes sing-box abort the shared process."""
+        uri = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?type=ws&path=/100%25bad&security=tls#badpath"
+        )
+        with self.assertRaises(verify.UnsupportedConfig):
+            verify.parse_proxy_uri(uri)
+
+    def test_valid_ws_path_is_preserved(self):
+        uri = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?type=ws&path=/ray&security=tls#goodpath"
+        )
+        outbound = verify.parse_proxy_uri(uri)
+        self.assertEqual(outbound["transport"]["path"], "/ray")
+
+    def test_inbound_tags_are_unique_across_many_configs(self):
+        """8-hex tags collided at scale, and duplicate tags abort sing-box."""
+        uris = [
+            f"vless://00000000-0000-0000-0000-00000000000{index}@example.com:443"
+            f"?security=tls#cfg{index}"
+            for index in range(1500)
+        ]
+        config, records, _ = verify.build_sing_box_config(uris)
+        tags = [inbound["tag"] for inbound in config["inbounds"]]
+        self.assertEqual(len(tags), len(set(tags)))
+        self.assertEqual(len(records), 1500)
+
     def test_ss_config_with_unknown_cipher_is_rejected(self):
         """An unknown shadowsocks cipher must not reach sing-box.
 
