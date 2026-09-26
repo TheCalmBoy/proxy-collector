@@ -188,6 +188,121 @@ def https_failure_summary(results: list[float], threshold: float) -> str:
     )
 
 
+UDP_TEST_HOST = os.getenv("VERIFY_UDP_TEST_HOST", "1.1.1.1")
+UDP_TEST_PORT = int(os.getenv("VERIFY_UDP_TEST_PORT", "53"))
+
+
+async def _udp_associate_probe(
+    proxy_port: int, timeout: float
+) -> tuple[bool, float | None]:
+    """Ask a SOCKS5 server to relay one datagram, per RFC 1928.
+
+    This replaces a raw datagram aimed at the endpoint's own TCP port. That
+    earlier probe was guaranteed to score 0: a SOCKS5 server listens for
+    TCP on that port and has no UDP listener there by design, so every
+    config read as UDP-incapable no matter what it could actually relay.
+    Verified directly against a SOCKS5 server that does implement UDP
+    ASSOCIATE - the raw ping returned False against it.
+
+    UDP ASSOCIATE is the only correct question: it asks the proxy itself
+    to open a relay path, which is what "this proxy carries UDP" means.
+    Returns (False, None) when the server refuses the command, which is
+    the expected answer for a TCP-only proxy.
+    """
+    start = time.perf_counter()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", proxy_port), timeout=timeout
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False, None
+
+    sock: socket.socket | None = None
+    try:
+        writer.write(b"\x05\x01\x00")
+        await writer.drain()
+        version, method = await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+        if version != 5 or method != 0:
+            return False, None
+
+        # UDP ASSOCIATE, asking the server for any reachable relay endpoint.
+        writer.write(
+            b"\x05\x03\x00\x01"
+            + socket.inet_aton("0.0.0.0")
+            + struct.pack("!H", 0)
+            + b"\x00\x00"
+        )
+        await writer.drain()
+        header = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
+        if header[0] != 5 or header[1] != 0:
+            return False, None  # Server refused: TCP-only proxy.
+        atyp = header[3]
+        if atyp == 1:
+            relay_host = socket.inet_ntoa(
+                await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
+            )
+        elif atyp == 4:
+            raw = await asyncio.wait_for(reader.readexactly(16), timeout=timeout)
+            relay_host = socket.inet_ntop(socket.AF_INET6, raw)
+        else:
+            length = (await asyncio.wait_for(
+                reader.readexactly(1), timeout=timeout
+            ))[0]
+            relay_host = (
+                await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
+            ).decode(errors="replace")
+        relay_port = struct.unpack(
+            "!H", await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+        )[0]
+        await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+
+        if not relay_host or relay_host == "0.0.0.0":
+            relay_host = "127.0.0.1"
+        if relay_port == 0:
+            return False, None
+
+        # SOCKS5 UDP request header, per RFC 1928:
+        #   RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT DATA
+        # ATYP 1 is IPv4, so the address is 4 bytes. Getting this wrong
+        # shifts every following field and sends the datagram to 1.1.1.0
+        # instead of 1.1.1.1, which no proxy would ever answer.
+        request = (
+            b"\x00\x00"          # RSV, must be zero
+            + b"\x00"            # FRAG, 0 = first fragment
+            + b"\x01"            # ATYP, 1 = IPv4
+            + socket.inet_aton(UDP_TEST_HOST)
+            + struct.pack("!H", UDP_TEST_PORT)
+            + b"\x00"            # a one-byte payload to prompt a reply
+        )
+        ok = await _datagram_round_trip(request, (relay_host, relay_port), timeout)
+        if not ok:
+            return False, None
+        return True, (time.perf_counter() - start) * 1000
+    except (OSError, asyncio.TimeoutError, struct.error, IndexError):
+        return False, None
+    finally:
+        writer.close()
+
+
+async def _datagram_round_trip(
+    request: bytes, addr: tuple[str, int], timeout: float
+) -> bool:
+    """Send one datagram through a relay endpoint and wait for a reply."""
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    try:
+        await asyncio.wait_for(
+            loop.sock_sendto(sock, request, addr), timeout=timeout
+        )
+        await asyncio.wait_for(loop.sock_recvfrom(sock, 1024), timeout=timeout)
+        return True
+    except (OSError, asyncio.TimeoutError):
+        return False
+    finally:
+        sock.close()
+
+
 async def _udp_reliability(
     record: dict[str, Any], semaphore: asyncio.Semaphore | None
 ) -> float:
@@ -196,12 +311,15 @@ async def _udp_reliability(
     This is metadata only: the caller flags the result and never rejects on
     it, because many working configs simply do not carry UDP.
 
-    The probe sends a datagram to the endpoint's own port, so it measures
-    whether that port has a UDP listener. It is verified working against a
-    live responder, and 0/457 means these endpoints have no UDP listener,
-    which is normal for TCP-only proxy servers. Note that like the other
-    probes it uses TCP_TIMEOUT, so a silent endpoint costs the full
-    timeout per round.
+    The probe asks the proxy to relay a datagram via SOCKS5 UDP ASSOCIATE.
+    It previously sent a raw datagram to the endpoint's own server_port and
+    waited for a reply, which can never succeed: SOCKS5 listens for TCP on
+    that port and has no UDP listener there. That produced a 0/N reading on
+    every run across every config, publishing a false "no UDP" claim for
+    proxies that relay UDP perfectly.
+
+    No early exit here, unlike Stages 1 and 4: this is a flag, not a filter,
+    so a partial pass would report a rate that was not measured.
     """
     successes = 0
     for index in range(PACKET_TEST_COUNT):
@@ -210,7 +328,7 @@ async def _udp_reliability(
         try:
             ok, _ = await _under(
                 semaphore,
-                lambda: _udp_ping(record["server"], record["server_port"], TCP_TIMEOUT),
+                lambda: _udp_associate_probe(record["port"], TCP_TIMEOUT),
             )
         except Exception:
             ok = False
