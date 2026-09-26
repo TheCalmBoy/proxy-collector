@@ -110,7 +110,7 @@ jobs:
       - name: Run collector
         run: python main.py
 
-      - name: Run verification (Tier 1/2/3)
+      - name: Run verification (TCP/UDP/download/HTTPS)
         shell: bash
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
