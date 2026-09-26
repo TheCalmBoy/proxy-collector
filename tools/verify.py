@@ -560,10 +560,16 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "latency_ms": None,
         "download_mb_s": None,
         "speed_ok": False,
+        # The verdict key, defaulting to a rejection. It is read back below,
+        # so it has to exist before any early path runs.
+        "ok": False,
     }
 
     ip_task = asyncio.create_task(_egress_ip(record, worker_url, token))
-    body_path = Path("/tmp") / f"speed-{record['id']}.bin"
+    # The byte count comes from curl's %{size_download}, which is identical
+    # whether the body is written to disk or discarded. Writing 5 MB per
+    # config to /tmp was pure overhead: 458 configs x 5 MB of tmpfs traffic
+    # to learn a number curl already reports.
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
         f'url = "https://speed.cloudflare.com/__down?bytes={SPEED_TEST_BYTES}"',
@@ -572,7 +578,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "fail",
         "connect-timeout = 10",
         "max-time = 50",
-        f'output = "{body_path}"',
+        'output = "/dev/null"',
         'write-out = "\\n__SPEED_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
 
@@ -586,7 +592,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
     _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
-    if marker and body_path.exists() and process.returncode == 0:
+    if marker and process.returncode == 0:
         try:
             downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
             result["latency_ms"] = round(starttransfer * 1000, 1)
@@ -596,7 +602,6 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
                 result["download_mb_s"] = downloaded_size / 1_000_000 / (total - starttransfer)
         except (UnicodeDecodeError, ValueError):
             pass
-    body_path.unlink(missing_ok=True)
 
     egress = await ip_task
     if egress.get("error"):
