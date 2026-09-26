@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import tools.verify as verify
-from tools.verify import _packet_test, _read_socks5_greeting, _socks5_connect
+from tools.verify import _read_socks5_greeting, _socks5_connect
 
 
 class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
@@ -31,14 +31,26 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await _read_socks5_greeting(reader, writer), b"\x05\x00")
         writer.write.assert_called_once_with(b"\x05\x01\x00")
 
-    async def test_packet_test_runs_20_socks_and_20_https_requests(self):
+    async def test_tcp_reliability_runs_20_socks_requests(self):
         socks_calls = 0
-        https_calls = 0
 
         async def fake_socks_connect(*_args):
             nonlocal socks_calls
             socks_calls += 1
             return True, b"\x05\x00"
+
+        with (
+            mock.patch.object(verify, "PACKET_TEST_ROUND_DELAY", 0),
+            mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
+            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
+        ):
+            rate = await verify._tcp_reliability({"port": 30000}, None)
+
+        self.assertEqual(socks_calls, 20)
+        self.assertEqual(rate, 1.0)
+
+    async def test_https_reliability_runs_20_https_requests(self):
+        https_calls = 0
 
         async def fake_https_request(*_args):
             nonlocal https_calls
@@ -46,44 +58,46 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
             return True, 1.0
 
         with (
-            mock.patch.object(verify, "PACKET_TEST_DURATION", 40),
+            mock.patch.object(verify, "PACKET_TEST_ROUND_DELAY", 0),
             mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
-            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
             mock.patch.object(verify, "_https_request", fake_https_request, create=True),
         ):
-            result = await verify._packet_test({"port": 30000})
+            rate = await verify._https_reliability({"port": 30000}, None)
 
-        self.assertEqual(socks_calls, 20)
         self.assertEqual(https_calls, 20)
-        self.assertEqual(result["tcp"]["success_count"], 20)
-        self.assertEqual(result["https"]["success_count"], 20)
-        self.assertTrue(result["passed"])
+        self.assertEqual(rate, 1.0)
 
-    async def test_packet_test_requires_both_tcp_and_https_threshold(self):
-        async def fake_socks_connect(*_args):
-            return True, b"\x05\x00"
-
-        async def fake_https_request(*_args):
-            return (https_calls["count"] < 17, 1.0)
-
+    async def test_https_reliability_reports_below_threshold_rate(self):
         https_calls = {"count": 0}
 
         async def counted_https_request(*_args):
-            result = await fake_https_request()
             https_calls["count"] += 1
-            return result
+            return (https_calls["count"] <= 17, 1.0)
 
         with (
-            mock.patch.object(verify, "PACKET_TEST_DURATION", 40),
+            mock.patch.object(verify, "PACKET_TEST_ROUND_DELAY", 0),
             mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
-            mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
             mock.patch.object(verify, "_https_request", counted_https_request, create=True),
         ):
-            result = await verify._packet_test({"port": 30000})
+            rate = await verify._https_reliability({"port": 30000}, None)
 
-        self.assertEqual(result["tcp"]["success_count"], 20)
-        self.assertEqual(result["https"]["success_count"], 17)
-        self.assertFalse(result["passed"])
+        self.assertAlmostEqual(rate, 17 / 20)
+        self.assertLess(rate, verify.HTTPS_MIN_SUCCESS_RATE)
+
+    async def test_udp_reliability_never_raises_on_timeout(self):
+        async def fake_udp_ping(*_args):
+            raise asyncio.TimeoutError
+
+        with (
+            mock.patch.object(verify, "PACKET_TEST_ROUND_DELAY", 0),
+            mock.patch.object(verify.asyncio, "sleep", new=mock.AsyncMock()),
+            mock.patch.object(verify, "_udp_ping", fake_udp_ping, create=True),
+        ):
+            rate = await verify._udp_reliability(
+                {"server": "example.com", "server_port": 443}, None
+            )
+
+        self.assertEqual(rate, 0.0)
 
     async def test_https_request_closes_stream_without_waiting(self):
         writer = mock.Mock()
@@ -152,7 +166,7 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
             ok, _ = await _socks5_connect(30000, "1.1.1.1", 443, 1.0)
         self.assertFalse(ok)
 
-    async def test_packet_test_runs_exactly_twenty_rounds(self):
+    async def test_reliability_runs_exactly_twenty_rounds(self):
         socks_calls = 0
         https_calls = 0
         sleeps = 0
@@ -173,18 +187,21 @@ class Socks5HelpersTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             mock.patch.object(verify, "PACKET_TEST_COUNT", 20),
+            mock.patch.object(verify, "PACKET_TEST_ROUND_DELAY", 2.0),
             mock.patch.object(verify.asyncio, "sleep", new=counting_sleep),
             mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
             mock.patch.object(verify, "_https_request", fake_https_request, create=True),
         ):
-            result = await verify._packet_test({"port": 30000})
+            tcp_rate = await verify._tcp_reliability({"port": 30000}, None)
+            https_rate = await verify._https_reliability({"port": 30000}, None)
 
+        # Each stage runs 20 probes and sleeps 19 times (no sleep before the
+        # first round), and the stages are sequential, never concurrent.
         self.assertEqual(socks_calls, 20)
         self.assertEqual(https_calls, 20)
-        self.assertEqual(sleeps, 20)
-        self.assertEqual(result["tcp"]["success_count"], 20)
-        self.assertEqual(result["https"]["success_count"], 20)
-        self.assertTrue(result["passed"])
+        self.assertEqual(sleeps, 38)
+        self.assertEqual(tcp_rate, 1.0)
+        self.assertEqual(https_rate, 1.0)
 
     async def test_socks5_connect_accepts_successful_reply(self):
         reader = asyncio.StreamReader()

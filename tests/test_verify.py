@@ -62,23 +62,30 @@ class VerifyPortRoutingTests(unittest.TestCase):
         )
         self.assertEqual(limited_config["outbounds"][-1]["tag"], "direct")
 
-    def test_all_tiers_use_local_sing_box_inbound(self):
+    def test_all_stages_use_local_sing_box_inbound(self):
         tcp_calls = []
-        packet_calls = []
+        udp_calls = []
+        https_calls = []
         speed_calls = []
+        stage_order = []
 
-        async def fake_socks_connect(proxy_port, host, port, timeout):
-            tcp_calls.append((proxy_port, host, port, timeout))
-            return True, b"\x05\x00"
+        async def fake_tcp_reliability(record, _sem=None):
+            stage_order.append("tcp")
+            tcp_calls.append((record["port"], "1.1.1.1", 443, verify.TCP_TIMEOUT))
+            return 1.0
 
-        async def fake_packet(record, _tcp_sem=None, _https_sem=None):
-            packet_calls.append(record["port"])
-            return {
-                "tcp": {"success_rate": 1.0, "success_count": 20},
-                "passed": True,
-            }
+        async def fake_udp_reliability(record, _sem=None):
+            stage_order.append("udp")
+            udp_calls.append(record["server_port"])
+            return 1.0
+
+        async def fake_https_reliability(record, _sem=None):
+            stage_order.append("https")
+            https_calls.append(record["port"])
+            return 1.0
 
         async def fake_speed(record, worker_url, token, semaphore):
+            stage_order.append("download")
             speed_calls.append(record["port"])
             return {
                 "ok": True,
@@ -115,8 +122,9 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(verify, "OUTPUT", Path(output_dir)),
                 mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
-                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
-                mock.patch.object(verify, "_packet_test", fake_packet),
+                mock.patch.object(verify, "_tcp_reliability", fake_tcp_reliability),
+                mock.patch.object(verify, "_udp_reliability", fake_udp_reliability),
+                mock.patch.object(verify, "_https_reliability", fake_https_reliability),
                 mock.patch.object(verify, "_speed_test", fake_speed),
                 mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
             ):
@@ -124,35 +132,43 @@ class VerifyPortRoutingTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(tcp_calls, [(30000, "1.1.1.1", 443, verify.TCP_TIMEOUT)])
-        self.assertEqual(packet_calls, [30000])
+        self.assertEqual(udp_calls, [1080])
+        self.assertEqual(https_calls, [30000])
         self.assertEqual(speed_calls, [30000])
+        # The agreed order: TCP, then UDP, then download, then HTTPS.
+        self.assertEqual(stage_order, ["tcp", "udp", "download", "https"])
 
     def test_tcp_and_https_use_independent_concurrency_limits(self):
         active = {"tcp": 0, "https": 0}
         peak = {"tcp": 0, "https": 0}
 
-        async def fake_socks_connect(*_args):
-            active["tcp"] += 1
-            peak["tcp"] = max(peak["tcp"], active["tcp"])
-            await asyncio.sleep(0)
-            active["tcp"] -= 1
-            return True, b"\x05\x00"
+        async def fake_tcp_reliability(_record, sem=None):
+            async def run():
+                active["tcp"] += 1
+                peak["tcp"] = max(peak["tcp"], active["tcp"])
+                await asyncio.sleep(0)
+                active["tcp"] -= 1
+                return 1.0
 
-        async def fake_packet(_record, tcp_sem=None, https_sem=None):
+            if sem is None:
+                return await run()
+            async with sem:
+                return await run()
+
+        async def fake_udp_reliability(_record, sem=None):
+            return 1.0
+
+        async def fake_https_reliability(_record, sem=None):
             async def run():
                 active["https"] += 1
                 peak["https"] = max(peak["https"], active["https"])
                 await asyncio.sleep(0)
                 active["https"] -= 1
-                return {
-                    "tcp": {"success_rate": 1.0, "success_count": 20},
-                    "https": {"success_rate": 1.0, "success_count": 20},
-                    "passed": True,
-                }
+                return 1.0
 
-            if https_sem is None:
+            if sem is None:
                 return await run()
-            async with https_sem:
+            async with sem:
                 return await run()
 
         async def fake_speed(*_args):
@@ -197,8 +213,9 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 mock.patch.object(verify, "HTTPS_CONCURRENCY", 2),
                 mock.patch.object(verify, "VERIFY_LIMIT", 0),
                 mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
-                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
-                mock.patch.object(verify, "_packet_test", fake_packet),
+                mock.patch.object(verify, "_tcp_reliability", fake_tcp_reliability),
+                mock.patch.object(verify, "_udp_reliability", fake_udp_reliability),
+                mock.patch.object(verify, "_https_reliability", fake_https_reliability),
                 mock.patch.object(verify, "_speed_test", fake_speed),
                 mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
             ):
@@ -208,6 +225,39 @@ class VerifyPortRoutingTests(unittest.TestCase):
         # TCP is cheap and unthrottled; HTTPS honours its own lower limit.
         self.assertEqual(peak["tcp"], 12)
         self.assertLessEqual(peak["https"], 2)
+
+    def test_duplicate_endpoints_are_deduped_before_testing(self):
+        """Same server:port under different UUIDs must be tested once."""
+        uris = [
+            f"vless://00000000-0000-0000-0000-00000000000{i}@example.com:443"
+            f"?security=tls#dup{i}"
+            for i in range(4)
+        ] + [
+            "vless://00000000-0000-0000-0000-0000000000ff@other.example:443"
+            "?security=tls#other"
+        ]
+        config, records, _ = verify.build_sing_box_config(uris)
+        self.assertEqual(len(records), 5, "build must not silently drop configs")
+
+        deduped_config, kept = verify.dedupe_endpoints(config, records)
+
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(len(deduped_config["inbounds"]), 2)
+        self.assertEqual(
+            {ib["tag"].removeprefix("in-") for ib in deduped_config["inbounds"]},
+            {record["id"] for record in kept},
+        )
+        # Outbounds and route rules must be pruned with the inbounds, or
+        # sing-box refuses to start on dangling references.
+        self.assertEqual(len(deduped_config["outbounds"]), 3)  # 2 proxies + direct
+        self.assertEqual(len(deduped_config["route"]["rules"]), 2)
+        self.assertEqual(
+            {rule["inbound"][0].removeprefix("in-") for rule in deduped_config["route"]["rules"]},
+            {record["id"] for record in kept},
+        )
+        # The original config must not be mutated.
+        self.assertEqual(len(config["inbounds"]), 5)
+        self.assertEqual(len(config["route"]["rules"]), 5)
 
     def test_vless_config_with_unsupported_flow_is_rejected(self):
         """A bad flow must not reach sing-box.
@@ -317,14 +367,14 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertTrue(config["outbounds"])
 
     def test_slow_configs_are_not_written_to_enriched_output(self):
-        async def fake_socks_connect(*_args):
-            return True, b"\x05\x00"
+        async def fake_tcp_reliability(_record, _sem=None):
+            return 1.0
 
-        async def fake_packet(_record, _tcp_sem=None, _https_sem=None):
-            return {
-                "tcp": {"success_rate": 1.0, "success_count": 20},
-                "passed": True,
-            }
+        async def fake_udp_reliability(_record, _sem=None):
+            return 1.0
+
+        async def fake_https_reliability(_record, _sem=None):
+            return 1.0
 
         async def fake_speed(record, _worker_url, _token, _semaphore):
             passed = record["port"] == 30000
@@ -366,8 +416,9 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 mock.patch.dict(os.environ, env),
                 mock.patch.object(verify, "OUTPUT", Path(output_dir)),
                 mock.patch.object(verify, "_run_sing_box", fake_run_sing_box),
-                mock.patch.object(verify, "_socks5_connect", fake_socks_connect),
-                mock.patch.object(verify, "_packet_test", fake_packet),
+                mock.patch.object(verify, "_tcp_reliability", fake_tcp_reliability),
+                mock.patch.object(verify, "_udp_reliability", fake_udp_reliability),
+                mock.patch.object(verify, "_https_reliability", fake_https_reliability),
                 mock.patch.object(verify, "_speed_test", fake_speed),
                 mock.patch.object(verify.urllib.request, "urlopen", return_value=response),
             ):
@@ -380,7 +431,9 @@ class VerifyPortRoutingTests(unittest.TestCase):
 
         self.assertEqual(len(output["configs"]), 1)
         self.assertEqual(output["configs"][0]["server"], "example.com")
-        self.assertEqual(output["stats"]["tier3_passed"], 1)
+        self.assertTrue(output["configs"][0]["stages"]["download"]["passed"])
+        self.assertEqual(output["stats"]["stage3_download_passed"], 1)
+        self.assertEqual(output["stats"]["stage4_https_passed"], 1)
 
 
 if __name__ == "__main__":

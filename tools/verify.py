@@ -64,8 +64,16 @@ SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
 TCP_TIMEOUT = 1.5
 PACKET_TEST_COUNT = 20
+PACKET_TEST_ROUND_DELAY = 2.0
 PACKET_TEST_DURATION = 40  # seconds
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
+# Stage thresholds: TCP is the entry gate at 95%, HTTPS is the exit gate at
+# the long-standing 90%.
+TCP_MIN_SUCCESS_RATE = 0.95
+HTTPS_MIN_SUCCESS_RATE = 0.90
+# UDP never rejects; it only sets the supports_udp flag at this rate.
+UDP_MIN_SUCCESS_RATE = 0.50
+SPEED_CONCURRENCY = max(1, int(os.getenv("VERIFY_SPEED_CONCURRENCY", "25")))
 HTTPS_TEST_URL = os.getenv(
     "VERIFY_HTTPS_URL", "https://www.gstatic.com/generate_204"
 )
@@ -73,6 +81,73 @@ HTTPS_TEST_URL = os.getenv(
 
 class UnsupportedConfig(ValueError):
     pass
+
+
+async def _under(semaphore: asyncio.Semaphore | None, probe: Any) -> Any:
+    """Await probe(), optionally under a concurrency semaphore."""
+    if semaphore is None:
+        return await probe()
+    async with semaphore:
+        return await probe()
+
+
+async def _tcp_reliability(record: dict[str, Any], semaphore: asyncio.Semaphore | None) -> float:
+    """Run PACKET_TEST_COUNT SOCKS CONNECTs and return the success rate."""
+    successes = 0
+    for index in range(PACKET_TEST_COUNT):
+        if index:
+            await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
+        try:
+            ok, _ = await _under(
+                semaphore,
+                lambda: _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT),
+            )
+        except Exception:
+            ok = False
+        successes += 1 if ok else 0
+    return successes / PACKET_TEST_COUNT
+
+
+async def _https_reliability(
+    record: dict[str, Any], semaphore: asyncio.Semaphore | None
+) -> float:
+    """Run PACKET_TEST_COUNT proxied HTTPS GETs and return the success rate."""
+    successes = 0
+    for index in range(PACKET_TEST_COUNT):
+        if index:
+            await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
+        try:
+            ok, _ = await _under(
+                semaphore,
+                lambda: _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT),
+            )
+        except Exception:
+            ok = False
+        successes += 1 if ok else 0
+    return successes / PACKET_TEST_COUNT
+
+
+async def _udp_reliability(
+    record: dict[str, Any], semaphore: asyncio.Semaphore | None
+) -> float:
+    """Run PACKET_TEST_COUNT UDP probes and return the success rate.
+
+    This is metadata only: the caller flags the result and never rejects on
+    it, because many working configs simply do not carry UDP.
+    """
+    successes = 0
+    for index in range(PACKET_TEST_COUNT):
+        if index:
+            await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
+        try:
+            ok, _ = await _under(
+                semaphore,
+                lambda: _udp_ping(record["server"], record["server_port"], TCP_TIMEOUT),
+            )
+        except Exception:
+            ok = False
+        successes += 1 if ok else 0
+    return successes / PACKET_TEST_COUNT
 
 
 def _first(params: dict[str, list[str]], *keys: str, default: str = "") -> str:
@@ -469,80 +544,6 @@ async def _https_request_inner(
             writer.close()
 
 
-async def _packet_test(
-    record: dict[str, Any],
-    tcp_semaphore: asyncio.Semaphore | None = None,
-    https_semaphore: asyncio.Semaphore | None = None,
-) -> dict[str, Any]:
-    """Run 20 concurrent SOCKS CONNECT + HTTPS GET pairs spaced 2s apart."""
-    interval = PACKET_TEST_DURATION / PACKET_TEST_COUNT
-    tcp_latencies: list[float] = []
-    https_latencies: list[float] = []
-    tcp_success = 0
-    https_success = 0
-
-    async def run_round() -> None:
-        nonlocal tcp_success, https_success
-        started_at = time.perf_counter()
-
-        async def tcp_check() -> tuple[bool, Any]:
-            if tcp_semaphore is None:
-                return await _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT)
-            async with tcp_semaphore:
-                return await _socks5_connect(record["port"], "1.1.1.1", 443, TCP_TIMEOUT)
-
-        async def https_check() -> tuple[bool, float | None]:
-            if https_semaphore is None:
-                return await _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT)
-            async with https_semaphore:
-                return await _https_request(record["port"], HTTPS_TEST_URL, TCP_TIMEOUT)
-
-        tcp_result, https_result = await asyncio.gather(tcp_check(), https_check())
-        if tcp_result[0]:
-            tcp_success += 1
-            tcp_latencies.append((time.perf_counter() - started_at) * 1000)
-        if https_result[0] and https_result[1] is not None:
-            https_success += 1
-            https_latencies.append(https_result[1])
-
-    for _ in range(PACKET_TEST_COUNT):
-        await run_round()
-        await asyncio.sleep(interval)
-
-    tcp_rate = tcp_success / PACKET_TEST_COUNT
-    https_rate = https_success / PACKET_TEST_COUNT
-
-    def stats(latencies: list[float]) -> dict[str, float]:
-        if not latencies:
-            return {}
-        sorted_lat = sorted(latencies)
-        return {
-            "avg_ms": sum(sorted_lat) / len(sorted_lat),
-            "min_ms": min(sorted_lat),
-            "max_ms": max(sorted_lat),
-            "p50_ms": sorted_lat[len(sorted_lat) // 2],
-            "p95_ms": sorted_lat[int(len(sorted_lat) * 0.95)],
-            "jitter_ms": max(sorted_lat) - min(sorted_lat),
-        }
-
-    return {
-        "tcp": {
-            "success_rate": tcp_rate,
-            "success_count": tcp_success,
-            **stats(tcp_latencies),
-        },
-        "https": {
-            "success_rate": https_rate,
-            "success_count": https_success,
-            **stats(https_latencies),
-        },
-        "passed": (
-            tcp_rate >= PACKET_TEST_MIN_SUCCESS_RATE
-            and https_rate >= PACKET_TEST_MIN_SUCCESS_RATE
-        ),
-    }
-
-
 async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
     """Run 5 MB download speed test via Worker"""
     body_path = Path("/tmp") / f"speed-{record['id']}.bin"
@@ -666,6 +667,46 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     return config, records, {**stats, **{f"skip_{k}": v for k, v in sorted(reasons.items())}}
 
 
+def dedupe_endpoints(
+    config: dict[str, Any], records: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Keep one record per (server, server_port), dropping duplicate inbounds.
+
+    Distinct URIs frequently point at the same endpoint with different UUIDs.
+    Testing each one repeats identical socket work, so collapse them first.
+    """
+    seen: set[tuple[str, int]] = set()
+    kept: list[dict[str, Any]] = []
+    for record in records:
+        key = (record["server"], record["server_port"])
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(record)
+
+    if len(kept) < len(records):
+        print(f"Dedup: {len(records)} configs -> {len(kept)} unique endpoints")
+        kept_ids = {record["id"] for record in kept}
+        config = dict(config)
+        # Prune inbounds, outbounds, and route rules together: a route rule
+        # pointing at a removed inbound makes sing-box refuse to start.
+        config["inbounds"] = [
+            ib for ib in config["inbounds"]
+            if ib["tag"].removeprefix("in-") in kept_ids
+        ]
+        config["outbounds"] = [
+            ob for ob in config["outbounds"]
+            if ob["tag"] == config["route"]["final"]
+            or ob["tag"].removeprefix("proxy-") in kept_ids
+        ]
+        config["route"] = dict(config["route"])
+        config["route"]["rules"] = [
+            rule for rule in config["route"]["rules"]
+            if rule["inbound"][0].removeprefix("in-") in kept_ids
+        ]
+    return config, kept
+
+
 async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     config_path = Path("/tmp/verify-sing-box.json")
     config_path.write_text(json.dumps(config, separators=(",", ":")))
@@ -769,6 +810,11 @@ async def main() -> int:
         print("No supported configs", file=sys.stderr)
         return 1
 
+    # Deduplicate by endpoint before any network testing: many URIs point at
+    # the same server:port with different UUIDs, and testing each one repeats
+    # the same socket work.
+    config, records = dedupe_endpoints(config, records)
+
     print(f"Starting sing-box with {len(records)} configs...")
     sing_box_proc = await _run_sing_box(config)
 
@@ -777,75 +823,114 @@ async def main() -> int:
         # gets its own independent limit instead of sharing one with TCP.
         tcp_semaphore = asyncio.Semaphore(TCP_CONCURRENCY)
         https_semaphore = asyncio.Semaphore(HTTPS_CONCURRENCY)
-        enriched = []
+        # ── Stage 1: 20 TCP requests, keep >=95% ──────────────────────────
+        print(f"Stage 1: TCP x{PACKET_TEST_COUNT} ({len(records)} configs)...")
+        tcp_semaphore = asyncio.Semaphore(TCP_CONCURRENCY)
+        https_semaphore = asyncio.Semaphore(HTTPS_CONCURRENCY)
+        speed_semaphore = asyncio.Semaphore(SPEED_CONCURRENCY)
 
-        # Tier 1: TCP sanity (through sing-box inbounds)
-        print(f"Tier 1: TCP sanity check ({len(records)} configs)...")
-        tier1_results = await asyncio.gather(*[
-            _socks5_connect(r["port"], "1.1.1.1", 443, TCP_TIMEOUT) for r in records
+        tcp_results = await asyncio.gather(*[
+            _tcp_reliability(r, tcp_semaphore) for r in records
         ])
-        tier1_survivors = [r for r, (ok, _) in zip(records, tier1_results) if ok]
-        print(f"Tier 1 passed: {len(tier1_survivors)}/{len(records)}")
-
-        # Tier 2: Packet loss test (real SOCKS5 CONNECT + HTTPS through sing-box)
-        print(f"Tier 2: Packet loss test ({len(tier1_survivors)} configs)...")
-        tier2_results = await asyncio.gather(*[
-            _packet_test(r, tcp_semaphore, https_semaphore) for r in tier1_survivors
-        ])
-        tier2_survivors = [r for r, res in zip(tier1_survivors, tier2_results) if res["passed"]]
-        def _rate(result: dict[str, Any], key: str) -> float:
-            return float((result.get(key) or {}).get("success_rate", 0.0))
-
-        tcp_ok = sum(1 for res in tier2_results if _rate(res, "tcp") >= PACKET_TEST_MIN_SUCCESS_RATE)
-        https_ok = sum(1 for res in tier2_results if _rate(res, "https") >= PACKET_TEST_MIN_SUCCESS_RATE)
+        tcp_survivors = [
+            r for r, rate in zip(records, tcp_results)
+            if rate >= TCP_MIN_SUCCESS_RATE
+        ]
         print(
-            f"Tier 2 detail: TCP>=90%: {tcp_ok}/{len(tier1_survivors)}, "
-            f"HTTPS>=90%: {https_ok}/{len(tier1_survivors)}, both: {len(tier2_survivors)}"
+            f"Stage 1 passed: {len(tcp_survivors)}/{len(records)} "
+            f"(>={TCP_MIN_SUCCESS_RATE:.0%})"
         )
-        print(f"Tier 2 passed: {len(tier2_survivors)}/{len(tier1_survivors)}")
+        if not tcp_survivors:
+            print("No configs passed TCP", file=sys.stderr)
+            return 1
 
-        # Tier 3: Speed test
-        print(f"Tier 3: Speed test ({len(tier2_survivors)} configs)...")
-        tier3_results = await asyncio.gather(*[
-            _speed_test(r, worker_url, worker_token, tcp_semaphore) for r in tier2_survivors
+        # ── Stage 2: 20 UDP requests, flag only (never rejects) ───────────
+        print(f"Stage 2: UDP x{PACKET_TEST_COUNT} ({len(tcp_survivors)} configs)...")
+        udp_results = await asyncio.gather(*[
+            _udp_reliability(r, tcp_semaphore) for r in tcp_survivors
         ])
+        udp_flags = dict(zip((r["id"] for r in tcp_survivors), udp_results))
+        udp_yes = sum(1 for v in udp_flags.values() if v >= UDP_MIN_SUCCESS_RATE)
+        print(f"Stage 2: UDP capable: {udp_yes}/{len(tcp_survivors)} (not a filter)")
 
-        # Build enriched output from Tier 3 survivors only.
-        for r, p2, p3 in zip(tier2_survivors, tier2_results, tier3_results):
-            if not p3.get("speed_ok"):
-                continue
+        # ── Stage 3: 5 MB download + speed, before the costly HTTPS stage ─
+        print(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
+        speed_results = await asyncio.gather(*[
+            _speed_test(r, worker_url, worker_token, speed_semaphore) for r in tcp_survivors
+        ])
+        speed_by_id = {r["id"]: res for r, res in zip(tcp_survivors, speed_results)}
+        speed_survivors = [r for r in tcp_survivors if speed_by_id[r["id"]].get("speed_ok")]
+        print(
+            f"Stage 3 passed: {len(speed_survivors)}/{len(tcp_survivors)} "
+            f"(>={MIN_SPEED_MB_S * 1000:.0f} KB/s)"
+        )
+        if not speed_survivors:
+            print("No configs passed the download test", file=sys.stderr)
+            return 1
+
+        # ── Stage 4: 20 HTTPS requests, >=90% ─────────────────────────────
+        print(f"Stage 4: HTTPS x{PACKET_TEST_COUNT} ({len(speed_survivors)} configs)...")
+        https_results = await asyncio.gather(*[
+            _https_reliability(r, https_semaphore) for r in speed_survivors
+        ])
+        tcp_rate_by_id = dict(zip((r["id"] for r in tcp_survivors), tcp_results))
+        udp_by_id = udp_flags
+        enriched = []
+        for r, https_rate in zip(speed_survivors, https_results):
+            speed = speed_by_id[r["id"]]
             enriched.append({
                 "id": r["id"],
                 "scheme": r["scheme"],
                 "server": r["server"],
                 "server_port": r["server_port"],
                 "uri": r["uri"],
-                "country": p3.get("country"),
-                "tier1": {"tcp_ok": True, "latency_ms": p3.get("latency_ms")},
-                "tier2": p2,
-                "tier3": {
-                    "speed_mb_s": p3.get("download_mb_s"),
-                    "latency_ms": p3.get("latency_ms"),
-                    "passed": p3.get("speed_ok"),
-                    "error": p3.get("error"),
+                "country": speed.get("country"),
+                "stages": {
+                    "tcp": {
+                        "attempts": PACKET_TEST_COUNT,
+                        "success_rate": round(tcp_rate_by_id[r["id"]], 3),
+                        "passed": tcp_rate_by_id[r["id"]] >= TCP_MIN_SUCCESS_RATE,
+                    },
+                    "udp": {
+                        "attempts": PACKET_TEST_COUNT,
+                        "success_rate": round(udp_by_id[r["id"]], 3),
+                        "supports_udp": udp_by_id[r["id"]] >= UDP_MIN_SUCCESS_RATE,
+                    },
+                    "download": {
+                        "speed_mb_s": speed.get("download_mb_s"),
+                        "latency_ms": speed.get("latency_ms"),
+                        "passed": speed.get("speed_ok"),
+                    },
+                    "https": {
+                        "attempts": PACKET_TEST_COUNT,
+                        "success_rate": round(https_rate, 3),
+                        "passed": https_rate >= HTTPS_MIN_SUCCESS_RATE,
+                    },
                 },
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
+
+        survivors = [c for c in enriched if c["stages"]["https"]["passed"]]
+        print(
+            f"Stage 4 passed: {len(survivors)}/{len(speed_survivors)} "
+            f"(>={HTTPS_MIN_SUCCESS_RATE:.0%})"
+        )
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         output_path = OUTPUT / "enriched-configs.json"
         output_path.write_text(json.dumps({
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "configs": enriched,
+            "configs": survivors,
             "stats": {
                 "input": stats["input"],
-                "tier1_passed": len(tier1_survivors),
-                "tier2_passed": len(tier2_survivors),
-                "tier3_attempted": len(tier2_survivors),
-                "tier3_passed": sum(1 for c in enriched if c["tier3"]["passed"]),
+                "supported": stats["supported"],
+                "stage1_tcp_passed": len(tcp_survivors),
+                "udp_capable": udp_yes,
+                "stage3_download_passed": len(speed_survivors),
+                "stage4_https_passed": len(survivors),
             }
         }, indent=2))
-        print(f"Done. Enriched configs: {len(enriched)}")
+        print(f"Done. Enriched configs: {len(survivors)}")
         print(f"Saved to {output_path}")
 
     finally:
