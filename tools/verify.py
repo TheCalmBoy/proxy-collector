@@ -28,16 +28,26 @@ from pathlib import Path
 from typing import Any
 
 # Config
-SOURCE_URL = os.getenv(
-    "SOURCE_URL",
-    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
-)
+# Config. Multiple independent upstreams give us more diversity and a
+# fallback: any one source being down or stale no longer empties the pool.
+SOURCE_URLS = [
+    url.strip()
+    for url in os.getenv(
+        "SOURCE_URLS",
+        "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt,"
+        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+    ).split(",")
+    if url.strip()
+]
 WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
 TCP_CONCURRENCY = max(1, int(os.getenv("VERIFY_TCP_CONCURRENCY", "750")))
 HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "25")))
+# sing-box 1.14 rejects any other value, and the whole process refuses to
+# start, so unknown flows must be filtered out during parsing.
+SUPPORTED_VLESS_FLOWS = frozenset({"xtls-rprx-vision"})
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
@@ -128,7 +138,13 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         }
         if parsed.scheme == "vless":
             outbound["uuid"] = uuid
-            outbound["flow"] = _first(params, "flow") or ""
+            flow = _first(params, "flow") or ""
+            # Every config shares one sing-box process: an outbound with an
+            # unrecognised flow makes sing-box abort at startup, zeroing the
+            # entire run. Only pass through flows sing-box 1.14 accepts.
+            if flow and flow not in SUPPORTED_VLESS_FLOWS:
+                raise UnsupportedConfig(f"unsupported_flow:{flow}")
+            outbound["flow"] = flow
             if _first(params, "security", "tls") in ("tls", "reality"):
                 outbound["tls"] = {
                     "enabled": True,
@@ -660,16 +676,32 @@ async def main() -> int:
         print("WORKER_URL must be an HTTPS URL.", file=sys.stderr)
         return 2
 
-    print("Fetching candidate configs...")
-    try:
-        req = urllib.request.Request(SOURCE_URL, headers={"accept": "text/plain"})
-        source_text = urllib.request.urlopen(req, timeout=30).read().decode()
-    except Exception as exc:
-        print(f"Failed to fetch source: {exc}", file=sys.stderr)
+    print(f"Fetching candidate configs from {len(SOURCE_URLS)} source(s)...")
+    uris: list[str] = []
+    seen: set[str] = set()
+    failed_sources = 0
+    for source_url in SOURCE_URLS:
+        try:
+            req = urllib.request.Request(source_url, headers={"accept": "text/plain"})
+            body = urllib.request.urlopen(req, timeout=30).read().decode()
+        except Exception as exc:
+            failed_sources += 1
+            print(f"Source failed ({source_url}): {exc}", file=sys.stderr)
+            continue
+        added = 0
+        for line in body.splitlines():
+            uri = line.strip()
+            if uri and uri not in seen:
+                seen.add(uri)
+                uris.append(uri)
+                added += 1
+        print(f"  {added} new from {source_url}")
+    if not uris:
+        print("No configs from any source", file=sys.stderr)
         return 1
-
-    uris = [line.strip() for line in source_text.splitlines() if line.strip()]
-    print(f"Fetched {len(uris)} raw configs")
+    if failed_sources:
+        print(f"Warning: {failed_sources}/{len(SOURCE_URLS)} sources failed")
+    print(f"Fetched {len(uris)} unique configs")
 
     config, records, stats = build_sing_box_config(uris)
     config, records, stats = limit_verification(config, records, stats, VERIFY_LIMIT)

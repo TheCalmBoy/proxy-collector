@@ -1,12 +1,4 @@
-# Local GeoIP database
-aGeoLite2-Country.mmdb
-GeoLite2-Country.mmdb.gz
-
-# Generated local output
-/output/
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
+.wrangler/
+sing-box-1.14.0-linux-amd64/
+sing-box-1.14.0-linux-amd64.tar.gz
+probe-output/

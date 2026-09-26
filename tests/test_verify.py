@@ -208,6 +208,36 @@ class VerifyPortRoutingTests(unittest.TestCase):
         self.assertEqual(peak["tcp"], 12)
         self.assertLessEqual(peak["https"], 2)
 
+    def test_vless_config_with_unsupported_flow_is_rejected(self):
+        """A bad flow must not reach sing-box.
+
+        All configs share one sing-box process, so a single outbound with an
+        unrecognised flow (e.g. "xtls-rprx-vision-udp443") aborts startup and
+        the whole run yields zero configs.
+        """
+        uri = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?flow=xtls-rprx-vision-udp443&security=tls&sni=example.com#bad"
+        )
+        with self.assertRaises(verify.UnsupportedConfig):
+            verify.parse_proxy_uri(uri)
+
+    def test_vless_config_with_supported_flow_is_accepted(self):
+        uri = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?flow=xtls-rprx-vision&security=tls&sni=example.com#good"
+        )
+        outbound = verify.parse_proxy_uri(uri)
+        self.assertEqual(outbound["flow"], "xtls-rprx-vision")
+
+    def test_vless_config_without_flow_is_accepted(self):
+        uri = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?security=tls&sni=example.com#noflow"
+        )
+        outbound = verify.parse_proxy_uri(uri)
+        self.assertEqual(outbound.get("flow", ""), "")
+
     def test_slow_configs_are_not_written_to_enriched_output(self):
         async def fake_socks_connect(*_args):
             return True, b"\x05\x00"
