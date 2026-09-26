@@ -56,7 +56,14 @@ def main() -> int:
         print(f"SKIP {note}", file=sys.stderr)
     if not wanted:
         print(f"running {len(files) - len(skipped)} test modules")
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+
+    # buffer=True routes everything a passing test writes - including
+    # verify.main()'s Stage 1-4 progress lines, which several tests drive
+    # against a one-config fixture - into unittest's own capture instead of
+    # the log. A failing test still dumps it, so nothing is hidden when it
+    # matters. Without this the CI log carries a second, fake-looking
+    # pipeline run that reads like the real one.
+    result = unittest.TextTestRunner(verbosity=2, buffer=True).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 
