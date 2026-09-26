@@ -40,7 +40,7 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
 TCP_CONCURRENCY = max(1, int(os.getenv("VERIFY_TCP_CONCURRENCY", "750")))
-HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "25")))
+HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "100")))
 # sing-box 1.14 rejects any other value, and the whole process refuses to
 # start, so unknown flows must be filtered out during parsing.
 SUPPORTED_VLESS_FLOWS = frozenset({"xtls-rprx-vision"})
@@ -64,8 +64,7 @@ SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
 TCP_TIMEOUT = 1.5
 PACKET_TEST_COUNT = 20
-PACKET_TEST_ROUND_DELAY = 2.0
-PACKET_TEST_DURATION = 40  # seconds
+PACKET_TEST_ROUND_DELAY = float(os.getenv("VERIFY_ROUND_DELAY", "0.5"))
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
 # Stage thresholds: TCP is the entry gate at 95%, HTTPS is the exit gate at
 # the long-standing 90%.
@@ -73,7 +72,7 @@ TCP_MIN_SUCCESS_RATE = 0.95
 HTTPS_MIN_SUCCESS_RATE = 0.90
 # UDP never rejects; it only sets the supports_udp flag at this rate.
 UDP_MIN_SUCCESS_RATE = 0.50
-SPEED_CONCURRENCY = max(1, int(os.getenv("VERIFY_SPEED_CONCURRENCY", "25")))
+SPEED_CONCURRENCY = max(1, int(os.getenv("VERIFY_SPEED_CONCURRENCY", "400")))
 HTTPS_TEST_URL = os.getenv(
     "VERIFY_HTTPS_URL", "https://www.gstatic.com/generate_204"
 )
