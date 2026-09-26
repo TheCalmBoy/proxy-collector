@@ -29,6 +29,10 @@ on:
         description: "HTTPS test URL"
         required: false
         default: "https://www.gstatic.com/generate_204"
+      verify_udp_timeout:
+        description: "Per-packet UDP budget in seconds. Raise it if Stage 2 reports many 'no reply' failures on proxies you expect to relay."
+        required: false
+        default: "6.0"
 
 permissions:
   contents: write
@@ -107,6 +111,15 @@ jobs:
           test -s GeoLite2-Country.mmdb
           ls -lh GeoLite2-Country.mmdb
 
+      - name: Run unit tests
+        # Before the collector, so a broken parser is caught in seconds
+        # rather than after a full sweep. Six real defects in
+        # parse_proxy_uri sat here unnoticed for exactly this long: the
+        # workflow ran verify.py but never the suite that would have
+        # reported them, including sing-box rejecting every TLS config
+        # because "tls" was emitted as a bool.
+        run: python run_tests.py
+
       - name: Run collector
         run: python main.py
 
@@ -119,6 +132,7 @@ jobs:
           VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
           VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '400' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
+          VERIFY_UDP_TIMEOUT: ${{ inputs.verify_udp_timeout || '6.0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
           VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
         run: |
