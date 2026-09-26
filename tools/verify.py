@@ -61,7 +61,7 @@ SS_METHOD_KEY_BYTES = {
 }
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
-MIN_SPEED_MB_S = 0.075  # 75 KB/s
+MIN_SPEED_MB_S = 0.100  # 100 KB/s
 TCP_TIMEOUT = 1.5
 PACKET_TEST_COUNT = 20
 PACKET_TEST_ROUND_DELAY = float(os.getenv("VERIFY_ROUND_DELAY", "0.5"))
@@ -568,7 +568,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "show-error",
         "fail",
         "connect-timeout = 10",
-        "max-time = 30",
+        "max-time = 50",
         f'output = "{body_path}"',
         'write-out = "\\n__SPEED_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
