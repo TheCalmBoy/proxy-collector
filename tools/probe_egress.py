@@ -103,6 +103,16 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         }
         if vmess.get("net"):
             outbound["transport"] = _vmess_transport(vmess)
+        # A TLS *object*, not a boolean and not absent: sing-box rejects
+        # "tls": true outright, and a vmess link that carries tls=tls but
+        # no tls block connects in the clear.
+        if str(vmess.get("tls") or "").lower() in ("tls", "reality"):
+            tls: dict[str, Any] = {
+                "server_name": str(vmess.get("sni") or vmess.get("host") or host)
+            }
+            if str(vmess.get("fp") or "").lower() == "chrome":
+                tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
+            outbound["tls"] = tls
         return outbound
 
     parsed = urllib.parse.urlsplit(clean)
@@ -123,17 +133,49 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             "uuid": uuid if parsed.scheme == "vless" else None,
             "password": uuid if parsed.scheme == "trojan" else None,
         }
+        # sing-box 1.14.0 wants a TLS *object*, not a boolean. A bare
+        # "tls": true is rejected outright when it decodes the config:
+        #   outbounds[0].tls: json: cannot unmarshal bool into Go struct
+        # field TrojanOutboundOptions.OutboundTLSOptions
+        # so every trojan, vless and vmess probe config was being refused
+        # before a single packet moved. The tests already expected the
+        # object form; they were not in the CI test list, so nothing had
+        # noticed the disagreement.
+        server_name = _first(params, "sni", "host") or host
         if parsed.scheme == "vless":
             outbound["flow"] = _first(params, "flow") or ""
-            outbound["tls"] = _first(params, "security", "tls") in ("tls", "reality")
-            if outbound["tls"]:
-                outbound["server_name"] = _first(params, "sni", "host") or host
-                if _first(params, "fp") == "chrome":
-                    outbound["utls"] = {"enabled": True, "fingerprint": "chrome"}
-        else:
-            outbound["tls"] = _first(params, "security", "tls") == "tls"
-            if outbound["tls"]:
-                outbound["server_name"] = _first(params, "sni", "host") or host
+            security = _first(params, "security", "tls")
+            if security in ("tls", "reality"):
+                tls_options: dict[str, Any] = {"server_name": server_name}
+                # REALITY is not TLS with a flag on. It needs its own block
+                # carrying the server's public key, or the handshake never
+                # authenticates and the probe reports a dead proxy.
+                if security == "reality":
+                    reality: dict[str, Any] = {
+                        "enabled": True,
+                        "public_key": _first(params, "pbk", "public-key") or "",
+                    }
+                    short_id = _first(params, "sid", "short-id")
+                    if short_id:
+                        reality["short_id"] = short_id
+                    tls_options["reality"] = reality
+                # uTLS is what makes the handshake look like a browser.
+                # A missing or unsupported fingerprint falls back to
+                # chrome, because omitting utls entirely or sending a value
+                # sing-box rejects both fail the handshake outright.
+                fingerprint = (_first(params, "fp") or "").lower()
+                if fingerprint not in UTLS_FINGERPRINTS:
+                    fingerprint = "chrome"
+                tls_options["utls"] = {"enabled": True, "fingerprint": fingerprint}
+                outbound["tls"] = tls_options
+        elif parsed.scheme == "trojan" and _first(params, "security", "tls") != "none":
+            # Trojan is TLS by definition - the protocol runs inside TLS
+            # and a trojan:// link carries no security= parameter saying
+            # so. Treating a missing parameter as "no TLS" built a
+            # plaintext outbound for every trojan link that only set sni,
+            # which is how a bare trojan:// proxy never got probed at all.
+            # An explicit security=none is the only way to ask for that.
+            outbound["tls"] = {"server_name": server_name}
         transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
@@ -175,7 +217,9 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         if user:
             outbound["username"] = user
             outbound["password"] = pwd
-        outbound["tls"] = parsed.scheme == "https"
+        # An object, never a boolean - sing-box refuses "tls": true.
+        if parsed.scheme == "https":
+            outbound["tls"] = {"server_name": host, "enabled": True}
         return outbound
 
     raise UnsupportedConfig(f"unsupported_scheme_{parsed.scheme}")
