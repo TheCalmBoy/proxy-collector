@@ -161,6 +161,20 @@ jobs:
           print(json.dumps(verify.get("stats", {}), indent=2))
           PY
 
+      - name: Publish only the configs that passed verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The collector publishes every config it scraped, but the whole
+          # point of running verify.py is to publish only the ones that
+          # passed all four stages. verify-output/ was written and then
+          # thrown away, so every consumer was reading unverified data.
+          #
+          # Rebuild the published files from the verified subset, using the
+          # same layout main.py produces so clients see no difference.
+          # Logic lives in publish_step.py so it is covered by tests.
+          python .github/workflows/publish_step.py
+
       - name: Deploy generated database to gh-pages
         uses: peaceiris/actions-gh-pages@v4.1.0
         with:
