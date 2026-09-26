@@ -544,12 +544,26 @@ async def _https_request_inner(
 
 
 async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
-    """Run 5 MB download speed test via Worker"""
+    """Measure download throughput, then resolve the egress IP separately.
+
+    The bulk bytes come from Cloudflare's speed CDN, not the Worker: pushing
+    gigabytes of payload through one Worker made it the run's bottleneck and
+    burned its request quota. The Worker is only asked for the egress IP,
+    which costs a few hundred bytes per surviving config.
+    """
+    result: dict[str, Any] = {
+        "ip": None,
+        "country": None,
+        "latency_ms": None,
+        "download_mb_s": None,
+        "speed_ok": False,
+    }
+
+    ip_task = asyncio.create_task(_egress_ip(record, worker_url, token))
     body_path = Path("/tmp") / f"speed-{record['id']}.bin"
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
-        f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
-        f'header = "Authorization: Bearer {token}"',
+        f'url = "https://speed.cloudflare.com/__down?bytes={SPEED_TEST_BYTES}"',
         "silent",
         "show-error",
         "fail",
@@ -568,41 +582,64 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         )
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
-    if not body_path.exists() or process.returncode != 0:
-        return {"ok": False, "error": f"curl_exit_{process.returncode}", "curl_code": process.returncode}
-
-    response_body = body_path.read_bytes()
-    body_path.unlink(missing_ok=True)
-    metadata_line, separator, downloaded = response_body.partition(b"\n")
-    if not separator:
-        return {"ok": False, "error": "missing_speed_metrics"}
-
-    try:
-        result = json.loads(metadata_line.decode())
-    except Exception:
-        return {"ok": False, "error": "invalid_worker_response"}
-
     _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
-    latency_ms = None
-    download_mb_s = None
-    if marker:
+    if marker and body_path.exists() and process.returncode == 0:
         try:
             downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
-            latency_ms = round(starttransfer * 1000, 1)
+            result["latency_ms"] = round(starttransfer * 1000, 1)
             if total > starttransfer:
-                download_mb_s = len(downloaded) / 1_000_000 / (total - starttransfer)
+                # The CDN response is pure payload, so its size is the
+                # number of bytes actually received.
+                result["download_mb_s"] = downloaded_size / 1_000_000 / (total - starttransfer)
         except (UnicodeDecodeError, ValueError):
             pass
+    body_path.unlink(missing_ok=True)
 
-    ok = download_mb_s is not None and download_mb_s >= MIN_SPEED_MB_S
+    egress = await ip_task
+    if egress.get("error"):
+        result["error"] = egress["error"]
+    elif result["download_mb_s"] is None:
+        result["error"] = "no_speed_data"
+    elif result["download_mb_s"] < MIN_SPEED_MB_S:
+        result["error"] = "speed_below_threshold"
+    else:
+        result["ok"] = True
+        result["error"] = None
+    result["speed_ok"] = result["ok"]
+    result["ip"] = egress.get("ip")
+    result["country"] = egress.get("country")
+    return result
+
+
+async def _egress_ip(record: dict[str, Any], worker_url: str, token: str) -> dict[str, Any]:
+    """Ask the Worker which IP the proxy egresses from (a few hundred bytes)."""
+    config_lines = [
+        f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
+        f'url = "{worker_url}/ip"',
+        f'header = "Authorization: Bearer {token}"',
+        "silent",
+        "show-error",
+        "fail",
+        "connect-timeout = 10",
+        "max-time = 15",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        "curl", "--config", "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
+    if process.returncode != 0:
+        return {"ip": None, "country": None, "error": f"curl_exit_{process.returncode}"}
+    try:
+        payload = json.loads(stdout.decode())
+    except (UnicodeDecodeError, ValueError):
+        return {"ip": None, "country": None, "error": "invalid_worker_response"}
     return {
-        "ok": ok,
-        "ip": result.get("ip"),
-        "country": (result.get("cloudflare") or {}).get("country"),
-        "latency_ms": latency_ms,
-        "download_mb_s": download_mb_s,
-        "speed_ok": ok,
-        "error": None if ok else "speed_below_threshold" if download_mb_s is not None else "no_speed_data",
+        "ip": payload.get("ip"),
+        "country": (payload.get("cloudflare") or {}).get("country"),
+        "error": None,
     }
 
 
