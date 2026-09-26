@@ -199,12 +199,13 @@ class _ScriptedStream:
 
 
 def _fake_round_trip(fake_sendto, fake_recvfrom, reason="reply received"):
-    # Takes the same four arguments as the real coroutine, including
-    # source_port, so a swapped-in fake cannot quietly accept a call the
-    # production code no longer makes.
-    async def round_trip(request, addr, _timeout, _source_port=None):
-        await fake_sendto(None, request, addr)
-        await fake_recvfrom(None, 1024)
+    # Mirrors the real coroutine: it now takes the caller's already-bound
+    # datagram socket rather than a port to bind, so a fake with the old
+    # signature would reject the production call instead of quietly
+    # accepting a shape the code no longer uses.
+    async def round_trip(request, addr, _timeout, sock=None):
+        await fake_sendto(sock, request, addr)
+        await fake_recvfrom(sock, 2048)
         return True, reason
 
     return round_trip

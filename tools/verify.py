@@ -266,11 +266,24 @@ async def _udp_associate_probe(
         if version != 5 or method != 0:
             return False, f"not SOCKS5 (VER={version} METHOD={method})"
 
-        # UDP ASSOCIATE, asking the server for any reachable relay endpoint.
+        # Bind the datagram socket first and name its port in the request,
+        # which is what RFC 1928 asks the client to do. The earlier
+        # version asked for 0.0.0.0:0 and then tried to send from the TCP
+        # control connection's own port, because sing-box relays a session
+        # keyed on the client's UDP source port. That collided: with 750
+        # probes in flight the ephemeral allocator had already handed the
+        # same port to another probe, and bind() failed with EADDRINUSE
+        # (errno 98), turning a working proxy into a hard failure. Owning
+        # the socket from the start makes the collision impossible.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        client_port = sock.getsockname()[1]
+
+        # UDP ASSOCIATE, naming our datagram socket's port.
         writer.write(
             b"\x05\x03\x00\x01"
             + socket.inet_aton("0.0.0.0")
-            + struct.pack("!H", 0)
+            + struct.pack("!H", client_port)
             + b"\x00\x00"
         )
         await writer.drain()
@@ -324,17 +337,10 @@ async def _udp_associate_probe(
             + struct.pack("!H", UDP_TEST_PORT)
             + _dns_query()
         )
-        # sing-box's SOCKS inbound relays a UDP session keyed on the
-        # client's datagram source port, and it is the port the reply must
-        # come back to. Sending from an arbitrary ephemeral port is
-        # accepted and then ignored, which is why the probe timed out
-        # even after the reply parsed correctly.
-        source_port = None
-        sockname = writer.get_extra_info("sockname")
-        if sockname:
-            source_port = int(sockname[1])
+        # The socket is already bound, so the round trip uses it as is
+        # rather than re-binding to a port number that may be taken.
         ok, reason = await _datagram_round_trip(
-            request, (relay_host, relay_port), timeout, source_port
+            request, (relay_host, relay_port), timeout, sock
         )
         if not ok:
             return False, f"datagram: {reason}"
@@ -352,6 +358,13 @@ async def _udp_associate_probe(
         # request was written, so the probe could never see a reply and
         # every config read as UDP-incapable.
         writer.close()
+        # Every early return above bypasses the round trip, which is what
+        # owns the datagram socket when it creates one. At 20 rounds across
+        # 600 configs an unclosed socket per probe is thousands of leaked
+        # descriptors, and the bind collisions this probe just fixed come
+        # straight back.
+        if sock is not None:
+            sock.close()
 
 
 def _dns_query() -> bytes:
@@ -374,7 +387,7 @@ async def _datagram_round_trip(
     request: bytes,
     addr: tuple[str, int],
     timeout: float,
-    source_port: int | None = None,
+    sock: socket.socket | None = None,
 ) -> tuple[bool, str]:
     """Send one datagram through a relay endpoint and wait for a reply.
 
@@ -382,20 +395,20 @@ async def _datagram_round_trip(
     all look identical as a bare False: the relay is unreachable, or it
     took the datagram and nothing came back.
 
-    source_port binds the sending socket to a specific local port. Some
-    relays key the session on the client's UDP source port, so a probe
-    that sends from an arbitrary port gets silence. When the relay
-    reports its own bound endpoint, pass the matching port here.
+    sock is a datagram socket the caller has already bound. Pass it when
+    the source port matters: sing-box keys a session on the client's UDP
+    source port, and the port the ASSOCIATE request named is the one the
+    reply returns to. Binding here instead would race other probes for
+    the same ephemeral port under concurrency.
     """
     loop = asyncio.get_running_loop()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setblocking(False)
-    if source_port is not None:
-        try:
-            sock.bind(("127.0.0.1", source_port))
-        except OSError as exc:
-            sock.close()
-            return False, f"cannot bind relay source port {source_port}: {exc}"
+    # A socket passed in belongs to the caller, which needs it closed only
+    # once it is finished with the whole probe. One made here is ours to
+    # close either way.
+    owned = sock is None
+    if sock is None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
     try:
         try:
             await asyncio.wait_for(
@@ -413,7 +426,8 @@ async def _datagram_round_trip(
             return False, f"relay receive failed: {exc.__class__.__name__}"
         return True, "reply received"
     finally:
-        sock.close()
+        if owned:
+            sock.close()
 
 
 async def _udp_reliability(
