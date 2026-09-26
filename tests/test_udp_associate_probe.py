@@ -331,6 +331,25 @@ class UdpAssociateProbe(unittest.TestCase):
 
         self.assertNotIn("break", inspect.getsource(verify._udp_reliability))
 
+    def test_stage2_does_not_borrow_the_tcp_connect_budget(self):
+        """A UDP round trip is slower than a bare connect.
+
+        Stage 2 once used TCP_TIMEOUT (1.5s) and shared Stage 1's
+        semaphore. At 576 configs every one of the 11520 probes timed out
+        and the stage read 0/576, while the same code read 12/12 against
+        12 configs. The budget was the variable, not the proxies.
+        """
+        self.assertNotEqual(verify.UDP_TEST_TIMEOUT, verify.TCP_TIMEOUT)
+        self.assertGreater(verify.UDP_TEST_TIMEOUT, verify.TCP_TIMEOUT)
+
+    def test_reliability_probes_with_the_udp_budget(self):
+        """Guards the call site, not just the constant."""
+        import inspect
+
+        source = inspect.getsource(verify._udp_reliability)
+        self.assertIn("UDP_TEST_TIMEOUT", source)
+        self.assertNotIn("TCP_TIMEOUT", source)
+
 
 if __name__ == "__main__":
     unittest.main()

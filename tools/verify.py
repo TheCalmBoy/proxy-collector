@@ -71,6 +71,14 @@ TCP_TIMEOUT = 1.5
 # to 0 across runs with identical code.
 HTTPS_TIMEOUT = float(os.getenv("VERIFY_HTTPS_TIMEOUT", "8.0"))
 PACKET_TEST_COUNT = 20
+# Stage 2 needs its own budget for the same reason as Stage 4. A UDP
+# round trip through a proxy is an outbound datagram, a remote forward,
+# and a reply, so it is slower than a bare TCP connect, and Stage 2 runs
+# against every Stage 1 survivor while sharing Stage 1's concurrency
+# semaphore. At 576 configs on the 1.5s connect budget all 11520 probes
+# timed out and the stage read 0/576; the same code read 12/12 against a
+# 12-config set, so the budget, not the proxies, was the variable.
+UDP_TEST_TIMEOUT = float(os.getenv("VERIFY_UDP_TIMEOUT", "6.0"))
 PACKET_TEST_ROUND_DELAY = float(os.getenv("VERIFY_ROUND_DELAY", "0.5"))
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
 # Stage thresholds: TCP is the entry gate at 95%, HTTPS is the exit gate at
@@ -369,7 +377,7 @@ async def _udp_reliability(
         try:
             ok, detail = await _under(
                 semaphore,
-                lambda: _udp_associate_probe(record["port"], TCP_TIMEOUT),
+                lambda: _udp_associate_probe(record["port"], UDP_TEST_TIMEOUT),
             )
         except Exception as exc:
             ok, detail = False, f"probe raised {exc.__class__.__name__}"
