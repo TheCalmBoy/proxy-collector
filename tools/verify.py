@@ -855,15 +855,25 @@ async def main() -> int:
     sing_box_proc = await _run_sing_box(config)
 
     try:
+        # Each stage runs to completion before the next starts, so a stage's
+        # wall time is the gap between its start and end lines in the log.
+        # Without these, a slow run is indistinguishable from a hung one.
+        stage_started = time.monotonic()
+
+        def _mark(label: str) -> None:
+            nonlocal stage_started
+            now = time.monotonic()
+            print(f"[{now - stage_started:7.1f}s] {label}")
+            stage_started = now
+
         # TCP is cheap (one CONNECT). HTTPS costs a full TLS handshake, so it
         # gets its own independent limit instead of sharing one with TCP.
         tcp_semaphore = asyncio.Semaphore(TCP_CONCURRENCY)
         https_semaphore = asyncio.Semaphore(HTTPS_CONCURRENCY)
-        # ── Stage 1: 20 TCP requests, keep >=95% ──────────────────────────
-        print(f"Stage 1: TCP x{PACKET_TEST_COUNT} ({len(records)} configs)...")
-        tcp_semaphore = asyncio.Semaphore(TCP_CONCURRENCY)
-        https_semaphore = asyncio.Semaphore(HTTPS_CONCURRENCY)
         speed_semaphore = asyncio.Semaphore(SPEED_CONCURRENCY)
+
+        # ── Stage 1: 20 TCP requests, keep >=95% ──────────────────────────
+        _mark(f"Stage 1: TCP x{PACKET_TEST_COUNT} ({len(records)} configs)...")
 
         tcp_results = await asyncio.gather(*[
             _tcp_reliability(r, tcp_semaphore) for r in records
@@ -881,7 +891,7 @@ async def main() -> int:
             return 1
 
         # ── Stage 2: 20 UDP requests, flag only (never rejects) ───────────
-        print(f"Stage 2: UDP x{PACKET_TEST_COUNT} ({len(tcp_survivors)} configs)...")
+        _mark(f"Stage 2: UDP x{PACKET_TEST_COUNT} ({len(tcp_survivors)} configs)...")
         udp_results = await asyncio.gather(*[
             _udp_reliability(r, tcp_semaphore) for r in tcp_survivors
         ])
@@ -890,7 +900,7 @@ async def main() -> int:
         print(f"Stage 2: UDP capable: {udp_yes}/{len(tcp_survivors)} (not a filter)")
 
         # ── Stage 3: 5 MB download + speed, before the costly HTTPS stage ─
-        print(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
+        _mark(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
         speed_results = await asyncio.gather(*[
             _speed_test(r, worker_url, worker_token, speed_semaphore) for r in tcp_survivors
         ])
@@ -905,7 +915,7 @@ async def main() -> int:
             return 1
 
         # ── Stage 4: 20 HTTPS requests, >=90% ─────────────────────────────
-        print(f"Stage 4: HTTPS x{PACKET_TEST_COUNT} ({len(speed_survivors)} configs)...")
+        _mark(f"Stage 4: HTTPS x{PACKET_TEST_COUNT} ({len(speed_survivors)} configs)...")
         https_results = await asyncio.gather(*[
             _https_reliability(r, https_semaphore) for r in speed_survivors
         ])
@@ -966,7 +976,7 @@ async def main() -> int:
                 "stage4_https_passed": len(survivors),
             }
         }, indent=2))
-        print(f"Done. Enriched configs: {len(survivors)}")
+        _mark(f"Done. Enriched configs: {len(survivors)}")
         print(f"Saved to {output_path}")
 
     finally:

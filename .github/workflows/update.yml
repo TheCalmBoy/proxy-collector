@@ -125,7 +125,10 @@ jobs:
           # This job opens thousands of sockets; the default soft limit is ~1024.
           ulimit -n 65535 || echo "warning: could not raise fd limit"
           ulimit -n
-          python tools/verify.py
+          # Progress lines are useless if they arrive all at once when the
+          # process exits: a timed-out or cancelled run then prints nothing
+          # and there is no way to tell which stage was slow.
+          PYTHONUNBUFFERED=1 python -u tools/verify.py
 
       - name: Preserve latest egress health index
         shell: bash
