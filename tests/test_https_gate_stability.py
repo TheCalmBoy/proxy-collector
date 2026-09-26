@@ -69,12 +69,14 @@ class HttpsGateStability(unittest.TestCase):
         self.assertEqual(rate, 1.0)
         self.assertEqual(self.calls["rounds"], verify.PACKET_TEST_COUNT * 2)
 
-    def test_dead_config_is_retried_once_and_still_rejected(self):
+    def test_dead_config_is_not_retried(self):
         rate = self._scripted([0.0, 0.0])
         self.assertEqual(rate, 0.0)
         # A config with zero successes is not retried: there is nothing to
         # rescue, and retrying would double the cost of every dead proxy.
-        self.assertEqual(self.calls["rounds"], verify.PACKET_TEST_COUNT)
+        # The early exit also cuts this single pass short, so it costs the
+        # failure budget (3 rounds at a 90% gate over 20), not 20.
+        self.assertEqual(self.calls["rounds"], 3)
 
     def test_retry_never_lowers_a_rate(self):
         rate = self._scripted([0.95, 0.5])
@@ -102,6 +104,65 @@ class FailureSummary(unittest.TestCase):
 
     def test_summary_handles_no_results(self):
         self.assertEqual(verify.https_failure_summary([], 0.90), "no results")
+
+
+class EarlyExit(unittest.TestCase):
+    """A pass that cannot reach the gate must stop early, but the rate it
+    reports must stay identical to the rate a full pass would report."""
+
+    def _record(self):
+        return {"id": "abc123", "port": 30000, "server": "1.2.3.4", "server_port": 443}
+
+    def _run(self, outcomes):
+        """outcomes is a list of booleans, one per round; the last entry
+        repeats once the list runs out."""
+        self.calls = {"n": 0}
+
+        async def fake_request(_port, _url, _timeout):
+            idx = min(self.calls["n"], len(outcomes) - 1)
+            self.calls["n"] += 1
+            return outcomes[idx], 1.0
+
+        async def fake_sleep(_):
+            return None
+
+        async def scenario():
+            from unittest import mock
+
+            with mock.patch.object(verify, "_https_request", fake_request), \
+                 mock.patch.object(verify.asyncio, "sleep", fake_sleep):
+                return await verify._https_rounds(self._record(), None)
+
+        return asyncio.run(scenario())
+
+    def test_dead_proxy_stops_after_roughly_the_budget(self):
+        # 90% of 20 needs 18 successes, so a pass that fails its first
+        # 3 rounds can never recover and should stop there.
+        rate = self._run([False, False, False])
+        self.assertEqual(rate, 0.0)
+        self.assertLessEqual(
+            self.calls["n"], verify.PACKET_TEST_COUNT,
+            "a hopeless pass must not run all 20 rounds",
+        )
+        self.assertEqual(self.calls["n"], 3)
+
+    def test_working_proxy_still_runs_every_round(self):
+        rate = self._run([True] * 20)
+        self.assertEqual(rate, 1.0)
+        self.assertEqual(self.calls["n"], verify.PACKET_TEST_COUNT)
+
+    def test_early_exit_does_not_change_the_reported_rate(self):
+        # 17 successes then 3 failures: 17 < 18 required, so the pass ends
+        # at 17/20 = 0.85, which is the same value a full 20-round pass
+        # would have reported.
+        rate = self._run([True] * 17 + [False] * 3)
+        self.assertAlmostEqual(rate, 0.85, places=3)
+        self.assertEqual(self.calls["n"], 20)
+
+    def test_exactly_meeting_the_gate_is_not_cut_short(self):
+        # 18 of 20 = 0.90 clears the gate and must survive the early exit.
+        rate = self._run([True] * 18 + [False] * 2)
+        self.assertAlmostEqual(rate, 0.90, places=3)
 
 
 if __name__ == "__main__":

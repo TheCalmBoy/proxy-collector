@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -135,8 +136,16 @@ async def _https_reliability(
 async def _https_rounds(
     record: dict[str, Any], semaphore: asyncio.Semaphore | None
 ) -> float:
-    """One full pass of PACKET_TEST_COUNT proxied HTTPS GETs."""
+    """One pass of up to PACKET_TEST_COUNT proxied HTTPS GETs.
+
+    Exits as soon as the gate is unreachable. A pass is guaranteed to fail
+    once failures exceed the budget, so continuing to probe a dead proxy
+    only spends the runner's wall clock, which is the scarce resource:
+    Stage 4 was the slowest stage in every run.
+    """
     successes = 0
+    # Rounds needed to clear the gate, e.g. 18 of 20 at 90%.
+    required = int(math.ceil(HTTPS_MIN_SUCCESS_RATE * PACKET_TEST_COUNT))
     for index in range(PACKET_TEST_COUNT):
         if index:
             await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
@@ -148,6 +157,11 @@ async def _https_rounds(
         except Exception:
             ok = False
         successes += 1 if ok else 0
+        # Give up once even a perfect run of the remaining rounds falls
+        # short. Probing a dead proxy for the full 20 rounds only burns the
+        # runner's wall clock, and Stage 4 is the slowest stage.
+        if successes + (PACKET_TEST_COUNT - index - 1) < required:
+            break
     return successes / PACKET_TEST_COUNT
 
 
