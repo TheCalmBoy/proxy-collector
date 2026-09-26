@@ -1,0 +1,4 @@
+ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpDOFFobUJMSnpoS28ySkhS@20.234.96.89:443#IE-DC-AS8075-616104BB
+vless://cd3bb7d9-7df3-4644-ac05-c260990ac277@50.7.5.187:443?encryption=none&flow=xtls-rprx-vision&fp=firefox&security=tls&sni=ireland-new-ded1.failspace.top&type=tcp#IE-DC-AS30058-400EB61F
+vless://cd3bb7d9-7df3-4644-ac05-c260990ac277@ireland-new-ded1.failspace.top:443?allowInsecure=1&insecure=1&type=tcp&security=tls&sni=ireland-new-ded1.failspace.top&flow=xtls-rprx-vision#IE-DC-AS30058-BD9AD445
+vless://cd3bb7d9-7df3-4644-ac05-c260990ac277@ireland-new-ded1.failspace.top:443?flow=xtls-rprx-vision&security=tls&type=tcp#IE-DC-AS30058-3F3C94B3

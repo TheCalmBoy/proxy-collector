@@ -1,0 +1,13 @@
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform101.golnamakcert.top:80?type=ws&headerType=none&host=platform101.halalkhor.info&path=%2Fplatform101#CL-DC-AS20473-4F0EA69B
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform102.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform102&host=platform102.halalkhor.info#CL-DC-AS20473-7AA1396C
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform103.golnamakcert.top:80?&sni=platform103.halalkhor.info&type=ws&headerType=none&host=platform103.halalkhor.info&path=%2Fplatform103#CL-DC-AS20473-B761F1FA
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform106&host=platform106.halalkhor.info#CL-DC-AS20473-40C56877
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform107.golnamakcert.top:80?&sni=platform107.halalkhor.info&type=ws&headerType=none&host=platform107.halalkhor.info&path=%2Fplatform107#CL-DC-AS20473-AD9E34FD
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform108.golnamakcert.top:80?type=ws&encryption=none&flow=&host=platform108.halalkhor.info&path=%2Fplatform108#CL-DC-AS20473-DC2DD9B3
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform109.golnamakcert.top:80?path=%2Fplatform109&security=none&encryption=none&host=platform109.halalkhor.info&type=ws#CL-DC-AS20473-CA2D3DE8
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform113.golnamakcert.top:80?&sni=platform113.halalkhor.info&type=ws&headerType=none&host=platform113.halalkhor.info&path=%2Fplatform113#CL-DC-AS20473-AF07461C
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform113.golnamakcert.top:80?type=ws&encryption=none&flow=&host=platform113.halalkhor.info&path=%2Fplatform113#CL-DC-AS20473-4324DACE
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform115.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform115&host=platform115.halalkhor.info&encryption=none#CL-DC-AS20473-41C51739
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform115.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform115&host=platform115.halalkhor.info&sni=platform115.halalkhor.info#CL-DC-AS20473-B2CB6C40
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform117.golnamakcert.top:80?&type=ws&headerType=none&host=platform117.halalkhor.info&path=%2Fplatform117#CL-DC-AS20473-ABE3285C
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform118.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform118&host=platform118.halalkhor.info#CL-DC-AS20473-8C1AC92D

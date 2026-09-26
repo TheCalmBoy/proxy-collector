@@ -1,0 +1,2 @@
+vless://442581ff-646e-4e99-af3e-a9d9a636a44b@freeman.curtvip.ir:20410?encryption=none&type=tcp&security=reality&sni=secureconnect-pa.mtls.clients6.google.com&fp=chrome&pbk=BErODvy5h6Cjw5zWfX_CZ5ODH9p1XbZwU-ZEHyVXEGI&sid=e2ce3e050232978c&allowInsecure=1#IR-DC-AS216169-508B71F8
+vless://442581ff-646e-4e99-af3e-a9d9a636a44b@g2.haxat.bestvbest.ir:20610?security=reality&encryption=none&pbk=lcXIrYi2o8yXrYHR321qQ--5lqVT8a6TKbaGpYTq4CI&headerType=none&fp=chrome&type=tcp&sni=doctor-yab.ir&sid=1d1a8f9fefeff5e6#IR-DC-AS34918-A7A18110
