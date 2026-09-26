@@ -48,6 +48,21 @@ HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "25")))
 # sing-box 1.14 rejects any other value, and the whole process refuses to
 # start, so unknown flows must be filtered out during parsing.
 SUPPORTED_VLESS_FLOWS = frozenset({"xtls-rprx-vision"})
+# sing-box 1.14 shadowsocks ciphers. chacha20-poly1305 and friends appear in
+# the upstream source but are not built into the release we run.
+SUPPORTED_SS_METHODS = frozenset({
+    "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
+    "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+    "none",
+})
+# The 2022 ciphers derive their key from a base64 PSK and reject wrong lengths.
+SS_METHOD_KEY_BYTES = {
+    "2022-blake3-aes-128-gcm": 16,
+    "2022-blake3-aes-256-gcm": 32,
+    "2022-blake3-chacha20-poly1305": 32,
+}
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 MIN_SPEED_MB_S = 0.075  # 75 KB/s
@@ -179,6 +194,18 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             method, password = _decode_base64(auth).decode().split(":", 1)
         except Exception as exc:
             raise UnsupportedConfig("invalid_ss_auth") from exc
+        if method not in SUPPORTED_SS_METHODS:
+            # Unrecognised ciphers abort the shared sing-box process, which
+            # zeroes the entire run rather than skipping one bad config.
+            raise UnsupportedConfig(f"unsupported_ss_method:{method}")
+        required_key = SS_METHOD_KEY_BYTES.get(method)
+        if required_key is not None:
+            try:
+                key_len = len(_decode_base64(password))
+            except Exception as exc:
+                raise UnsupportedConfig("invalid_ss_key") from exc
+            if key_len != required_key:
+                raise UnsupportedConfig("invalid_ss_key_length")
         outbound = {
             "type": "shadowsocks",
             "server": host,

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib.util
 import io
 import json
@@ -237,6 +238,37 @@ class VerifyPortRoutingTests(unittest.TestCase):
         )
         outbound = verify.parse_proxy_uri(uri)
         self.assertEqual(outbound.get("flow", ""), "")
+
+    def test_ss_config_with_unknown_cipher_is_rejected(self):
+        """An unknown shadowsocks cipher must not reach sing-box.
+
+        "chacha20-poly1305" is not a sing-box 1.14 method; passing it through
+        aborts the shared process and zeroes the whole run.
+        """
+        auth = base64.b64encode(b"chacha20-poly1305:secret").decode()
+        uri = f"ss://{auth}@example.com:443#badcipher"
+        with self.assertRaises(verify.UnsupportedConfig):
+            verify.parse_proxy_uri(uri)
+
+    def test_ss_config_with_supported_cipher_is_accepted(self):
+        auth = base64.b64encode(b"aes-256-gcm:secret").decode()
+        uri = f"ss://{auth}@example.com:443#ok"
+        outbound = verify.parse_proxy_uri(uri)
+        self.assertEqual(outbound["method"], "aes-256-gcm")
+
+    def test_ss_2022_cipher_with_wrong_key_length_is_rejected(self):
+        """2022-blake3 ciphers need a base64 PSK of an exact length."""
+        auth = base64.b64encode(b"2022-blake3-aes-256-gcm:short").decode()
+        uri = f"ss://{auth}@example.com:443#shortkey"
+        with self.assertRaises(verify.UnsupportedConfig):
+            verify.parse_proxy_uri(uri)
+
+    def test_ss_2022_cipher_with_correct_key_length_is_accepted(self):
+        key = base64.b64encode(b"0" * 32).decode()
+        auth = base64.b64encode(f"2022-blake3-aes-256-gcm:{key}".encode()).decode()
+        uri = f"ss://{auth}@example.com:443#goodkey"
+        outbound = verify.parse_proxy_uri(uri)
+        self.assertEqual(outbound["method"], "2022-blake3-aes-256-gcm")
 
     def test_malformed_uri_does_not_abort_the_whole_config(self):
         """One unparseable URI must not kill the run.
