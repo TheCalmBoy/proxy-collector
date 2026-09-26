@@ -29,17 +29,12 @@ from pathlib import Path
 from typing import Any
 
 # Config
-# Config. Multiple independent upstreams give us more diversity and a
-# fallback: any one source being down or stale no longer empties the pool.
-SOURCE_URLS = [
-    url.strip()
-    for url in os.getenv(
-        "SOURCE_URLS",
-        "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt,"
-        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
-    ).split(",")
-    if url.strip()
-]
+# Config. One curated upstream: it already aggregates ~19 sources and applies
+# its own verification, so adding a second feed only duplicates entries.
+SOURCE_URL = os.getenv(
+    "SOURCE_URL",
+    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+)
 WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
@@ -747,31 +742,25 @@ async def main() -> int:
         print("WORKER_URL must be an HTTPS URL.", file=sys.stderr)
         return 2
 
-    print(f"Fetching candidate configs from {len(SOURCE_URLS)} source(s)...")
+    print("Fetching candidate configs...")
+    try:
+        req = urllib.request.Request(SOURCE_URL, headers={"accept": "text/plain"})
+        body = urllib.request.urlopen(req, timeout=30).read().decode()
+    except Exception as exc:
+        print(f"Failed to fetch source: {exc}", file=sys.stderr)
+        return 1
+
+    # Drop exact duplicates before anything is parsed or tested.
     uris: list[str] = []
     seen: set[str] = set()
-    failed_sources = 0
-    for source_url in SOURCE_URLS:
-        try:
-            req = urllib.request.Request(source_url, headers={"accept": "text/plain"})
-            body = urllib.request.urlopen(req, timeout=30).read().decode()
-        except Exception as exc:
-            failed_sources += 1
-            print(f"Source failed ({source_url}): {exc}", file=sys.stderr)
-            continue
-        added = 0
-        for line in body.splitlines():
-            uri = line.strip()
-            if uri and uri not in seen:
-                seen.add(uri)
-                uris.append(uri)
-                added += 1
-        print(f"  {added} new from {source_url}")
+    for line in body.splitlines():
+        uri = line.strip()
+        if uri and uri not in seen:
+            seen.add(uri)
+            uris.append(uri)
     if not uris:
-        print("No configs from any source", file=sys.stderr)
+        print("No configs from source", file=sys.stderr)
         return 1
-    if failed_sources:
-        print(f"Warning: {failed_sources}/{len(SOURCE_URLS)} sources failed")
     print(f"Fetched {len(uris)} unique configs")
 
     config, records, stats = build_sing_box_config(uris)
