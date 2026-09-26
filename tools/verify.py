@@ -133,6 +133,13 @@ async def _udp_reliability(
 
     This is metadata only: the caller flags the result and never rejects on
     it, because many working configs simply do not carry UDP.
+
+    The probe sends a datagram to the endpoint's own port, so it measures
+    whether that port has a UDP listener. It is verified working against a
+    live responder, and 0/457 means these endpoints have no UDP listener,
+    which is normal for TCP-only proxy servers. Note that like the other
+    probes it uses TCP_TIMEOUT, so a silent endpoint costs the full
+    timeout per round.
     """
     successes = 0
     for index in range(PACKET_TEST_COUNT):
