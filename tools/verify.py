@@ -443,22 +443,25 @@ async def _tcp_connect(host: str, port: int, timeout: float) -> tuple[bool, floa
 
 
 async def _udp_ping(host: str, port: int, timeout: float) -> tuple[bool, float | None]:
-    """Send UDP packet, return (success, latency_ms)"""
+    """Send one UDP datagram and wait for a reply, without blocking the loop.
+
+    This used to use a blocking socket.recvfrom inside a coroutine, which
+    stalled every other coroutine in the process for the full timeout: one
+    dead server froze all 479 configs at once. loop.sock_recvfrom is the
+    async equivalent and yields the loop while waiting.
+    """
     start = time.perf_counter()
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(timeout)
-        sock.sendto(b"\x00", (host, port))
-        try:
-            sock.recvfrom(1024)
-            latency_ms = (time.perf_counter() - start) * 1000
-            return True, latency_ms
-        except socket.timeout:
-            return False, None
-        finally:
-            sock.close()
-    except Exception:
+        await asyncio.wait_for(loop.sock_sendto(sock, b"\x00", (host, port)), timeout)
+        await asyncio.wait_for(loop.sock_recvfrom(sock, 1024), timeout)
+    except (OSError, asyncio.TimeoutError):
         return False, None
+    finally:
+        sock.close()
+    return True, (time.perf_counter() - start) * 1000
 
 
 async def _https_request(proxy_port: int, url: str, timeout: float) -> tuple[bool, float | None]:
