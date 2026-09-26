@@ -112,14 +112,15 @@ async def _socks5(allow_udp_associate: bool):
             await reader.readexactly(4)
 
             if cmd == 3 and allow_udp_associate:
-                # Report the relay endpoint. A real server sends the 2
-                # reserved bytes that follow the bound address; the probe
-                # waits for them, so this must too.
+                # VER REP RSV ATYP BND.ADDR BND.PORT, and nothing after.
+                # This fixture used to append two extra reserved bytes and
+                # the probe used to read a trailing pair as well, so the
+                # two errors cancelled and the test passed against a
+                # reply no real server sends.
                 writer.write(
                     b"\x05\x00\x00\x01"
                     + socket.inet_aton("127.0.0.1")
                     + struct.pack("!H", relay_port)
-                    + b"\x00\x00"
                 )
                 await writer.drain()
             else:
@@ -127,7 +128,6 @@ async def _socks5(allow_udp_associate: bool):
                     b"\x05\x07\x00\x01"
                     + socket.inet_aton("0.0.0.0")
                     + struct.pack("!H", 0)
-                    + b"\x00\x00"
                 )
                 await writer.drain()
             # Hold the control connection open while the client probes.
@@ -150,12 +150,19 @@ async def _socks5(allow_udp_associate: bool):
 
 
 def _associate_reply(relay_host: str, relay_port: int, rep: int = 0) -> bytes:
-    """A SOCKS5 UDP ASSOCIATE reply: VER REP RSV ATYP BND.ADDR BND.PORT RSV."""
+    """A SOCKS5 UDP ASSOCIATE reply: VER REP RSV ATYP BND.ADDR BND.PORT.
+
+    Four header bytes, and the reply ends at BND.PORT. A real sing-box
+    sends exactly ten bytes for an IPv4 endpoint - 05 00 00 01 7f 00 00
+    01 e9 dc - so the ATYP is the fourth byte. The fixture used to
+    append two extra reserved bytes and the probe used to read a
+    trailing pair as well; neither is in the reply, and the pair of
+    errors cancelled until now.
+    """
     return (
         bytes([5, rep, 0, 1])
         + socket.inet_aton(relay_host)
         + struct.pack("!H", relay_port)
-        + b"\x00\x00"
     )
 
 
@@ -192,7 +199,10 @@ class _ScriptedStream:
 
 
 def _fake_round_trip(fake_sendto, fake_recvfrom, reason="reply received"):
-    async def round_trip(request, addr, _timeout):
+    # Takes the same four arguments as the real coroutine, including
+    # source_port, so a swapped-in fake cannot quietly accept a call the
+    # production code no longer makes.
+    async def round_trip(request, addr, _timeout, _source_port=None):
         await fake_sendto(None, request, addr)
         await fake_recvfrom(None, 1024)
         return True, reason

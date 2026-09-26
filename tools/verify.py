@@ -274,6 +274,17 @@ async def _udp_associate_probe(
             + b"\x00\x00"
         )
         await writer.drain()
+        # RFC 1928: VER(1) REP(1) RSV(1) ATYP(1) BND.ADDR BND.PORT.
+        # sing-box writes exactly 10 bytes for an IPv4 bound address:
+        #   05 00 00 01 7f 00 00 01 e9 dc
+        # ATYP is the fourth byte, so it arrives inside a 4-byte read.
+        # The bug was never the ATYP offset; it was reading exactly 4
+        # bytes and then reading more. That left one byte of the reply
+        # still in the stream, so the next read consumed the first
+        # BND.ADDR byte (0x7f) as ATYP, then a short address, then
+        # BND.PORT=1 - and the probe sent its datagram to 127.0.0.1:1,
+        # where nothing listens. Splitting a stream on a byte count
+        # instead of on the reply's own structure is what broke it.
         header = await step("associate reply", reader.readexactly(4))
         if header[0] != 5 or header[1] != 0:
             # 0x07 is "command not supported": the proxy is TCP-only.
@@ -294,7 +305,6 @@ async def _udp_associate_probe(
         relay_port = struct.unpack(
             "!H", await step("relay port", reader.readexactly(2))
         )[0]
-        await step("associate trailer", reader.readexactly(2))
 
         if not relay_host or relay_host == "0.0.0.0":
             relay_host = "127.0.0.1"
@@ -314,8 +324,17 @@ async def _udp_associate_probe(
             + struct.pack("!H", UDP_TEST_PORT)
             + _dns_query()
         )
+        # sing-box's SOCKS inbound relays a UDP session keyed on the
+        # client's datagram source port, and it is the port the reply must
+        # come back to. Sending from an arbitrary ephemeral port is
+        # accepted and then ignored, which is why the probe timed out
+        # even after the reply parsed correctly.
+        source_port = None
+        sockname = writer.get_extra_info("sockname")
+        if sockname:
+            source_port = int(sockname[1])
         ok, reason = await _datagram_round_trip(
-            request, (relay_host, relay_port), timeout
+            request, (relay_host, relay_port), timeout, source_port
         )
         if not ok:
             return False, f"datagram: {reason}"
@@ -325,6 +344,13 @@ async def _udp_associate_probe(
     except (OSError, asyncio.TimeoutError, struct.error, IndexError) as exc:
         return False, f"probe aborted: {exc.__class__.__name__}"
     finally:
+        # The control connection has to outlive the datagram round trip.
+        # sing-box reads the client's first datagram on this same
+        # connection - its trace log says "read first packet" - and
+        # reports "use of closed network connection" when the client hangs
+        # up first. Closing here tore down the relay the moment the
+        # request was written, so the probe could never see a reply and
+        # every config read as UDP-incapable.
         writer.close()
 
 
@@ -345,17 +371,31 @@ def _dns_query() -> bytes:
 
 
 async def _datagram_round_trip(
-    request: bytes, addr: tuple[str, int], timeout: float
+    request: bytes,
+    addr: tuple[str, int],
+    timeout: float,
+    source_port: int | None = None,
 ) -> tuple[bool, str]:
     """Send one datagram through a relay endpoint and wait for a reply.
 
     Returns (ok, reason). The reason distinguishes the failure modes that
     all look identical as a bare False: the relay is unreachable, or it
     took the datagram and nothing came back.
+
+    source_port binds the sending socket to a specific local port. Some
+    relays key the session on the client's UDP source port, so a probe
+    that sends from an arbitrary port gets silence. When the relay
+    reports its own bound endpoint, pass the matching port here.
     """
     loop = asyncio.get_running_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setblocking(False)
+    if source_port is not None:
+        try:
+            sock.bind(("127.0.0.1", source_port))
+        except OSError as exc:
+            sock.close()
+            return False, f"cannot bind relay source port {source_port}: {exc}"
     try:
         try:
             await asyncio.wait_for(
