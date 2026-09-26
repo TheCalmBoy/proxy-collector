@@ -238,6 +238,23 @@ class VerifyPortRoutingTests(unittest.TestCase):
         outbound = verify.parse_proxy_uri(uri)
         self.assertEqual(outbound.get("flow", ""), "")
 
+    def test_malformed_uri_does_not_abort_the_whole_config(self):
+        """One unparseable URI must not kill the run.
+
+        urlsplit raises a bare ValueError (e.g. "Invalid IPv6 URL") for some
+        entries in the upstream source; that used to propagate and zero the
+        entire run.
+        """
+        good = (
+            "vless://00000000-0000-0000-0000-000000000000@example.com:443"
+            "?security=tls&sni=example.com#ok"
+        )
+        broken = "vless://uuid@[::1:443@example.com#broken"
+        config, records, stats = verify.build_sing_box_config([broken, good])
+        self.assertEqual(stats["unsupported"], 1)
+        self.assertEqual(len(records), 1, "the healthy config must survive")
+        self.assertTrue(config["outbounds"])
+
     def test_slow_configs_are_not_written_to_enriched_output(self):
         async def fake_socks_connect(*_args):
             return True, b"\x05\x00"

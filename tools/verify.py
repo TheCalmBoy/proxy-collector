@@ -583,6 +583,13 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             stats["unsupported"] += 1
             reasons[str(exc)] = reasons.get(str(exc), 0) + 1
             continue
+        except Exception as exc:
+            # A single malformed URI must never abort the run: urlsplit raises
+            # bare ValueError on things like unbracketed IPv6 literals.
+            stats["unsupported"] += 1
+            key = f"unparseable:{type(exc).__name__}"
+            reasons[key] = reasons.get(key, 0) + 1
+            continue
 
         identifier = _tag(uri)
         inbound_tag = f"in-{identifier}"
