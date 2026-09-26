@@ -1,4 +1,2 @@
-.wrangler/
-sing-box-1.14.0-linux-amd64/
-sing-box-1.14.0-linux-amd64.tar.gz
-probe-output/
+__pycache__/
+*.pyc

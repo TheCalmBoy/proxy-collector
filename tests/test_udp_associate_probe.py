@@ -191,11 +191,11 @@ class _ScriptedStream:
         return default
 
 
-def _fake_round_trip(fake_sendto, fake_recvfrom):
+def _fake_round_trip(fake_sendto, fake_recvfrom, reason="reply received"):
     async def round_trip(request, addr, _timeout):
         await fake_sendto(None, request, addr)
         await fake_recvfrom(None, 1024)
-        return True
+        return True, reason
 
     return round_trip
 
@@ -260,7 +260,7 @@ class UdpAssociateProbe(unittest.TestCase):
         self.assertEqual(self.last_addr, ("192.0.2.7", 5555))
 
     def test_datagram_carries_a_socks5_udp_header(self):
-        """RSV(2) FRAG(1) ATYP(1) ADDR PORT DATA, per RFC 1928."""
+        """RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT DATA, per RFC 1928."""
         (ok, _lat), _stream = self._probe(_associate_reply("127.0.0.1", 4444))
         self.assertTrue(ok)
         self.assertEqual(self.sent_payload[:2], b"\x00\x00", "RSV")
@@ -272,6 +272,22 @@ class UdpAssociateProbe(unittest.TestCase):
         self.assertEqual(
             struct.unpack("!H", self.sent_payload[8:10])[0], verify.UDP_TEST_PORT
         )
+
+    def test_datagram_payload_is_a_real_dns_query(self):
+        """A filler byte is silently dropped by 1.1.1.1, so the probe would
+        time out and call every working proxy UDP-incapable."""
+        (ok, _lat), _stream = self._probe(_associate_reply("127.0.0.1", 4444))
+        self.assertTrue(ok)
+        payload = self.sent_payload[10:]
+        self.assertGreater(len(payload), 12, "payload too short to be a query")
+        txid, flags, qdcount = struct.unpack("!HHH", payload[:6])
+        self.assertEqual(flags, 0x0100, "QR must be 0 for a query")
+        self.assertEqual(qdcount, 1, "exactly one question")
+        self.assertIn(b"\x07example\x03com\x00", payload)
+        qtype, qclass = struct.unpack(
+            "!HH", payload[payload.index(b"\x00", 12) + 1:][:4]
+        )
+        self.assertEqual((qtype, qclass), (1, 1), "must be an A/IN question")
 
     def test_no_relay_reply_is_incapable(self):
         (ok, _lat), _stream = self._probe(_associate_reply("127.0.0.1", 4444), expect_reply=False)
@@ -285,9 +301,11 @@ class UdpAssociateProbe(unittest.TestCase):
             with mock.patch.object(verify.asyncio, "open_connection", fake_connect):
                 return await verify._udp_associate_probe(12345, 1.0)
 
-        ok, latency = asyncio.run(scenario())
+        ok, detail = asyncio.run(scenario())
         self.assertFalse(ok)
-        self.assertIsNone(latency)
+        # The reason is carried instead of None so a refused TCP connect is
+        # distinguishable from a proxy that accepted and then went quiet.
+        self.assertIn("12345", detail)
 
     def test_bad_version_is_rejected(self):
         (ok, _lat), _stream = self._probe(b"\x04\x00")
@@ -312,15 +330,6 @@ class UdpAssociateProbe(unittest.TestCase):
         import inspect
 
         self.assertNotIn("break", inspect.getsource(verify._udp_reliability))
-
-
-def _fake_round_trip(fake_sendto, fake_recvfrom):
-    async def round_trip(request, addr, timeout):
-        await fake_sendto(None, request, addr)
-        await fake_recvfrom(None, 1024)
-        return True
-
-    return round_trip
 
 
 if __name__ == "__main__":

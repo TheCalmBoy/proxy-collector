@@ -191,10 +191,15 @@ def https_failure_summary(results: list[float], threshold: float) -> str:
 UDP_TEST_HOST = os.getenv("VERIFY_UDP_TEST_HOST", "1.1.1.1")
 UDP_TEST_PORT = int(os.getenv("VERIFY_UDP_TEST_PORT", "53"))
 
+# Why UDP probes failed, tallied across Stage 2. A bare 0/N cannot tell a
+# broken probe from a TCP-only fleet; this can. Reset per run so a
+# long-lived process does not accumulate across runs.
+UDP_FAILURE_REASONS: dict[str, int] = {}
+
 
 async def _udp_associate_probe(
     proxy_port: int, timeout: float
-) -> tuple[bool, float | None]:
+) -> tuple[bool, float | str | None]:
     """Ask a SOCKS5 server to relay one datagram, per RFC 1928.
 
     This replaces a raw datagram aimed at the endpoint's own TCP port. That
@@ -206,16 +211,19 @@ async def _udp_associate_probe(
 
     UDP ASSOCIATE is the only correct question: it asks the proxy itself
     to open a relay path, which is what "this proxy carries UDP" means.
-    Returns (False, None) when the server refuses the command, which is
-    the expected answer for a TCP-only proxy.
+
+    Returns (ok, detail): latency in ms on success, and a short reason
+    string on failure. A refused command yields the REP code, which is the
+    expected answer for a TCP-only proxy and is distinguishable from a
+    relay that accepted the request and then went silent.
     """
     start = time.perf_counter()
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection("127.0.0.1", proxy_port), timeout=timeout
         )
-    except (OSError, asyncio.TimeoutError):
-        return False, None
+    except (OSError, asyncio.TimeoutError) as exc:
+        return False, f"no SOCKS inbound on 127.0.0.1:{proxy_port} ({exc.__class__.__name__})"
 
     sock: socket.socket | None = None
     try:
@@ -223,7 +231,7 @@ async def _udp_associate_probe(
         await writer.drain()
         version, method = await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
         if version != 5 or method != 0:
-            return False, None
+            return False, f"not SOCKS5 (VER={version} METHOD={method})"
 
         # UDP ASSOCIATE, asking the server for any reachable relay endpoint.
         writer.write(
@@ -235,7 +243,8 @@ async def _udp_associate_probe(
         await writer.drain()
         header = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
         if header[0] != 5 or header[1] != 0:
-            return False, None  # Server refused: TCP-only proxy.
+            # 0x07 is "command not supported": the proxy is TCP-only.
+            return False, f"UDP ASSOCIATE refused (REP={header[1]})"
         atyp = header[3]
         if atyp == 1:
             relay_host = socket.inet_ntoa(
@@ -259,7 +268,7 @@ async def _udp_associate_probe(
         if not relay_host or relay_host == "0.0.0.0":
             relay_host = "127.0.0.1"
         if relay_port == 0:
-            return False, None
+            return False, "associate returned no relay port"
 
         # SOCKS5 UDP request header, per RFC 1928:
         #   RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT DATA
@@ -272,22 +281,45 @@ async def _udp_associate_probe(
             + b"\x01"            # ATYP, 1 = IPv4
             + socket.inet_aton(UDP_TEST_HOST)
             + struct.pack("!H", UDP_TEST_PORT)
-            + b"\x00"            # a one-byte payload to prompt a reply
+            + _dns_query()
         )
-        ok = await _datagram_round_trip(request, (relay_host, relay_port), timeout)
+        ok, reason = await _datagram_round_trip(
+            request, (relay_host, relay_port), timeout
+        )
         if not ok:
-            return False, None
+            return False, reason
         return True, (time.perf_counter() - start) * 1000
-    except (OSError, asyncio.TimeoutError, struct.error, IndexError):
-        return False, None
+    except (OSError, asyncio.TimeoutError, struct.error, IndexError) as exc:
+        return False, f"probe aborted: {exc.__class__.__name__}"
     finally:
         writer.close()
 
 
+def _dns_query() -> bytes:
+    """A minimal DNS A query for example.com, for the UDP relay probe.
+
+    The payload has to be a real query, not a filler byte. 1.1.1.1 silently
+    drops a 1-byte datagram, so a probe built on one gets no reply and
+    reports every working proxy as UDP-incapable. Verified: a 1-byte
+    payload to 1.1.1.1:53 times out, while this query is answered in
+    ~20 ms.
+    """
+    header = struct.pack("!HHHHHH", 0xABCD, 0x0100, 1, 0, 0, 0)  # ID, flags, 1 question
+    question = b"".join(
+        bytes([len(label)]) + label for label in b"example.com".split(b".")
+    ) + b"\x00"          # end of the name
+    return header + question + struct.pack("!HH", 1, 1)  # QTYPE A, QCLASS IN
+
+
 async def _datagram_round_trip(
     request: bytes, addr: tuple[str, int], timeout: float
-) -> bool:
-    """Send one datagram through a relay endpoint and wait for a reply."""
+) -> tuple[bool, str]:
+    """Send one datagram through a relay endpoint and wait for a reply.
+
+    Returns (ok, reason). The reason distinguishes the failure modes that
+    all look identical as a bare False: the relay is unreachable, or it
+    took the datagram and nothing came back.
+    """
     loop = asyncio.get_running_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setblocking(False)
@@ -295,10 +327,12 @@ async def _datagram_round_trip(
         await asyncio.wait_for(
             loop.sock_sendto(sock, request, addr), timeout=timeout
         )
-        await asyncio.wait_for(loop.sock_recvfrom(sock, 1024), timeout=timeout)
-        return True
-    except (OSError, asyncio.TimeoutError):
-        return False
+        await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=timeout)
+        return True, "reply received"
+    except asyncio.TimeoutError:
+        return False, f"no reply from {addr[0]}:{addr[1]} in {timeout}s"
+    except OSError as exc:
+        return False, f"relay send failed: {exc.__class__.__name__}"
     finally:
         sock.close()
 
@@ -320,19 +354,31 @@ async def _udp_reliability(
 
     No early exit here, unlike Stages 1 and 4: this is a flag, not a filter,
     so a partial pass would report a rate that was not measured.
+
+    The failure reasons are tallied into UDP_FAILURE_REASONS and printed
+    once for the whole stage. Every mode used to collapse into the same
+    0/N, which is why a broken probe and a TCP-only fleet stayed
+    indistinguishable in the logs. Printing per record instead would bury
+    the signal under hundreds of lines, so this counts and the Stage 2
+    summary reports.
     """
     successes = 0
     for index in range(PACKET_TEST_COUNT):
         if index:
             await asyncio.sleep(PACKET_TEST_ROUND_DELAY)
         try:
-            ok, _ = await _under(
+            ok, detail = await _under(
                 semaphore,
                 lambda: _udp_associate_probe(record["port"], TCP_TIMEOUT),
             )
-        except Exception:
-            ok = False
-        successes += 1 if ok else 0
+        except Exception as exc:
+            ok, detail = False, f"probe raised {exc.__class__.__name__}"
+        if ok:
+            successes += 1
+        else:
+            reason = detail if isinstance(detail, str) else "unknown"
+            tally = UDP_FAILURE_REASONS.get(reason, 0) + 1
+            UDP_FAILURE_REASONS[reason] = tally
     return successes / PACKET_TEST_COUNT
 
 
@@ -1103,6 +1149,16 @@ async def main() -> int:
         udp_flags = dict(zip((r["id"] for r in tcp_survivors), udp_results))
         udp_yes = sum(1 for v in udp_flags.values() if v >= UDP_MIN_SUCCESS_RATE)
         print(f"Stage 2: UDP capable: {udp_yes}/{len(tcp_survivors)} (not a filter)")
+        if UDP_FAILURE_REASONS:
+            # The reason a probe failed is what separates "these proxies are
+            # TCP-only" from "the probe is broken". Without this, both read
+            # as 0/N and the two are indistinguishable after the fact.
+            ranked = sorted(
+                UDP_FAILURE_REASONS.items(), key=lambda kv: -kv[1]
+            )
+            print("Stage 2: why UDP failed:")
+            for reason, count in ranked:
+                print(f"  {count:>6}  {reason}")
 
         # ── Stage 3: 5 MB download + speed, before the costly HTTPS stage ─
         _mark(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
