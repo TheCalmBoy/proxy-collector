@@ -418,14 +418,20 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     if process.returncode != 0:
         return {"ok": False, "error": f"curl_exit_{process.returncode}"}
 
-    _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
+    # curl's write-out appends the metrics marker to the same stdout as the
+    # response body, so the body has to be split off before parsing. Parsing
+    # all of stdout fails on every request that actually succeeded, which is
+    # what produced "invalid_worker_response=84" while 84 configs were fine.
+    body_bytes, _, metric = stdout.partition(b"\n__SPEED_METRICS__")
+    if not body_bytes.strip():
+        return {"ok": False, "error": "empty_worker_response"}
     try:
-        result = json.loads(stdout.decode().strip())
+        result = json.loads(body_bytes.decode().strip())
     except Exception:
         return {"ok": False, "error": "invalid_worker_response"}
     latency_ms = None
     download_mb_s = None
-    if marker:
+    if metric:
         try:
             downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
             latency_ms = round(starttransfer * 1000, 1)
