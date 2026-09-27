@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "5,35 * * * *"
   workflow_dispatch:
+    inputs:
+      probe_concurrency:
+        description: "Concurrent speed tests through sing-box. Each one is a 5 MB download, so this is real runner bandwidth, not just sockets."
+        required: false
+        default: "50"
 
 permissions:
   contents: write
@@ -18,7 +23,12 @@ jobs:
     timeout-minutes: 35
     env:
       PROBE_BATCH_SIZE: "all"
-      PROBE_CONCURRENCY: "750"
+      # 750 concurrent 5 MB downloads through one sing-box process saturated
+      # the runner: 99/174 died with curl exit 35 (TLS handshake failure) and
+      # 50 with exit 97 (proxy handshake rejected), which is local resource
+      # exhaustion masquerading as dead proxies. Phase 1 uses 750 sockets for
+      # cheap one-byte CONNECTs; phase 2 moves real payload, so it gets 50.
+      PROBE_CONCURRENCY: ${{ inputs.probe_concurrency || '50' }}
       RETEST_DELAY_SECONDS: "300"
 
     steps:
@@ -67,10 +77,18 @@ jobs:
           PY
 
       - name: Run initial and delayed egress checks
+        shell: bash
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
-        run: python tools/probe_egress.py
+        run: |
+          # This step opens one socket per concurrent config, and the default
+          # soft limit is ~1024. update.yml raises it; this workflow never did,
+          # so under concurrency it hits EMFILE and the failures look like
+          # broken proxies.
+          ulimit -n 65535 || echo "warning: could not raise fd limit"
+          ulimit -n
+          python tools/probe_egress.py
 
       - name: Upload egress report
         if: always() && hashFiles('probe-output/report.json') != ''
