@@ -334,7 +334,17 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
         inbounds.append(inbound)
         outbounds.append(outbound)
         rules.append({"inbound": [inbound_tag], "action": "route", "outbound": outbound_tag})
-        records.append({"id": identifier, "port": port, "scheme": outbound["type"]})
+        records.append({
+            "id": identifier,
+            "port": port,
+            "scheme": outbound["type"],
+            # The classification stage writes scheme/server/server_port into
+            # egress-health.json, and it was reading these off the record.
+            # They were never stored, so the run raised KeyError: 'server'
+            # as soon as a config survived long enough to be classified.
+            "server": outbound.get("server"),
+            "server_port": outbound.get("server_port"),
+        })
         stats["supported"] += 1
 
     config = {
@@ -601,6 +611,25 @@ async def main() -> int:
             print("sing-box exited during startup; see artifact log.", file=sys.stderr)
             return 1
 
+        # sing-box is polled once at startup and then left to run for the
+        # whole session, but it died partway through and every later probe
+        # came back curl exit 7 (connection refused) because the SOCKS
+        # listeners were gone. Restart it if that happens, and say so.
+        async def _ensure_core():
+            nonlocal core
+            if core.poll() is None:
+                return
+            print(f"sing-box exited ({core.returncode}); restarting it.", file=sys.stderr)
+            core = subprocess.Popen(
+                [SING_BOX, "run", "-c", str(config_path)],
+                stdout=open("/tmp/probe-egress-sing-box.log", "ab"),
+                stderr=subprocess.STDOUT,
+            )
+            await asyncio.sleep(5)
+            if core.poll() is not None:
+                print("sing-box failed to restart; aborting.", file=sys.stderr)
+                raise RuntimeError("sing-box will not stay up")
+
         # Initial speed test via Worker
         print("Running initial speed test via Worker...")
         first = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
@@ -641,6 +670,7 @@ async def main() -> int:
         for i in range(STABILITY_INTERVALS):
             await asyncio.sleep(STABILITY_INTERVAL_SECONDS)
             print(f"Stability check {i+1}/{STABILITY_INTERVALS}...")
+            await _ensure_core()
             results = await _run_stability_check([r for r, _ in live])
             for j, r in enumerate(results):
                 rid = live[j][0]["id"]
@@ -655,6 +685,7 @@ async def main() -> int:
 
         # Final speed test via Worker
         print("Running final speed test via Worker...")
+        await _ensure_core()
         final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r, _ in live))
         ok = sum(1 for r in final if r.get("ok"))
         print(f"Final: {ok}/{len(live)} returned an IP")

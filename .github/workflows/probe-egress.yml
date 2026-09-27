@@ -90,6 +90,18 @@ jobs:
           ulimit -n
           python tools/probe_egress.py
 
+      - name: Upload sing-box log
+        # Always uploaded and not if-guarded. When sing-box dies mid-run every
+        # probe fails with curl exit 7 and the log is the only thing that says
+        # why; the report artifact is skipped precisely when the run fails.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-egress-sing-box-${{ github.run_id }}
+          path: /tmp/probe-egress-sing-box.log
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Upload egress report
         if: always() && hashFiles('probe-output/report.json') != ''
         uses: actions/upload-artifact@v4
