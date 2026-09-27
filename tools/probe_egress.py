@@ -517,6 +517,19 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
     return classification
 
 
+def _print_error_breakdown(results: list[dict[str, Any]], label: str) -> None:
+    """Log what the failures actually were, so a bad run names its own cause."""
+    counts: dict[str, int] = {}
+    for r in results:
+        if r.get("ok"):
+            continue
+        counts[str(r.get("error", "unknown"))] = counts.get(str(r.get("error", "unknown")), 0) + 1
+    if not counts:
+        return
+    top = ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1]))
+    print(f"{label} failures: {top}")
+
+
 async def main() -> int:
     # Read these here, not at module import. They are step-level env vars in
     # the workflow, so a module-level read happens before the step's env is
@@ -584,6 +597,10 @@ async def main() -> int:
         first = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
         ok = sum(1 for r in first if r.get("ok"))
         print(f"Initial: {ok}/{len(records)} returned an IP")
+        # Without this the run only ever reports "0/N returned an IP", which
+        # says nothing about why. Print the dominant failure so the cause is
+        # visible in the log instead of requiring a local reproduction.
+        _print_error_breakdown(first, "Initial")
 
         # Stability checks via cloudflare trace
         ip_history = {r["id"]: [] for r in records}
