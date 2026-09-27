@@ -627,12 +627,20 @@ async def main() -> int:
                 country_history[rid].append(r.get("country"))
 
         print(f"Running {STABILITY_INTERVALS} stability checks at {STABILITY_INTERVAL_SECONDS}s intervals...")
+        # Only configs that produced an IP are worth re-checking: the others
+        # never established a working path, and polling all 174 ten times is
+        # 1740 requests through proxies that are already failing.
+        live = [r for r in first if r.get("ok")]
+        print(f"Stability checks on {len(live)}/{len(records)} configs that returned an IP")
+        if not live:
+            print("No config returned an IP in the initial round; skipping stability checks.")
+            return 1
         for i in range(STABILITY_INTERVALS):
             await asyncio.sleep(STABILITY_INTERVAL_SECONDS)
             print(f"Stability check {i+1}/{STABILITY_INTERVALS}...")
-            results = await _run_stability_check(records)
+            results = await _run_stability_check(live)
             for j, r in enumerate(results):
-                rid = records[j]["id"]
+                rid = live[j]["id"]
                 if r.get("ok"):
                     ip_history[rid].append(r.get("ip"))
                     country_history[rid].append(r.get("country"))
@@ -644,9 +652,10 @@ async def main() -> int:
 
         # Final speed test via Worker
         print("Running final speed test via Worker...")
-        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
+        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in live))
         ok = sum(1 for r in final if r.get("ok"))
-        print(f"Final: {ok}/{len(records)} returned an IP")
+        print(f"Final: {ok}/{len(live)} returned an IP")
+        _print_error_breakdown(final, "Final")
 
         for r in final:
             if r.get("ok"):
