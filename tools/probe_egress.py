@@ -26,6 +26,9 @@ from typing import Any
 
 ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
+SING_BOX = os.getenv("SING_BOX", "sing-box")
+WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
+WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 PORT_BASE = 30000
 SPEED_TEST_BYTES = 5_000_000
 MIN_DOWNLOAD_MB_S = 0.0005
