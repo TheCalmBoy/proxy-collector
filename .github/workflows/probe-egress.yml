@@ -44,6 +44,28 @@ jobs:
           sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
           sing-box version
 
+      - name: Fetch verified configs from Phase 1
+        # probe_egress.py reads verify-output/enriched-configs.json, but that
+        # file is a build artifact of the update.yml runner and is never
+        # committed. This workflow is a separate job with a fresh checkout, so
+        # the file has to be fetched. The only published copy lives on gh-pages,
+        # which update.yml writes at the end of every successful run.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify-output
+          curl --fail --location --silent --show-error --retry 3 --retry-delay 10 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/enriched-configs.json?ts=$(date +%s)" \
+            -o verify-output/enriched-configs.json
+          test -s verify-output/enriched-configs.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("verify-output/enriched-configs.json").read_text())
+          print(f"Fetched {len(data.get('configs', []))} verified configs from Phase 1")
+          PY
+
       - name: Run initial and delayed egress checks
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
