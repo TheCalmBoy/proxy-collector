@@ -27,8 +27,6 @@ from typing import Any
 ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 SING_BOX = os.getenv("SING_BOX", "sing-box")
-WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
-WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 PORT_BASE = 30000
 SPEED_TEST_BYTES = 5_000_000
 MIN_DOWNLOAD_MB_S = 0.0005
@@ -520,6 +518,20 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
 
 
 async def main() -> int:
+    # Read these here, not at module import. They are step-level env vars in
+    # the workflow, so a module-level read happens before the step's env is
+    # applied and yields "", which curl reports as "URL rejected: No host
+    # present" for every config. verify.py reads them in main() for the same
+    # reason.
+    worker_url = os.environ.get("WORKER_URL", "").rstrip("/")
+    worker_token = os.environ.get("WORKER_TOKEN", "")
+    if not worker_url or not worker_token:
+        print("Set WORKER_URL and WORKER_TOKEN", file=sys.stderr)
+        return 2
+    if not worker_url.startswith("https://"):
+        print("WORKER_URL must be an HTTPS URL.", file=sys.stderr)
+        return 2
+
     ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
     if not ENRICHED_PATH.exists():
         print(f"Enriched configs not found at {ENRICHED_PATH}", file=sys.stderr)
@@ -569,7 +581,7 @@ async def main() -> int:
 
         # Initial speed test via Worker
         print("Running initial speed test via Worker...")
-        first = await asyncio.gather(*(_speed_test(r, WORKER_URL, WORKER_TOKEN, semaphore) for r in records))
+        first = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
         ok = sum(1 for r in first if r.get("ok"))
         print(f"Initial: {ok}/{len(records)} returned an IP")
 
@@ -606,7 +618,7 @@ async def main() -> int:
 
         # Final speed test via Worker
         print("Running final speed test via Worker...")
-        final = await asyncio.gather(*(_speed_test(r, WORKER_URL, WORKER_TOKEN, semaphore) for r in records))
+        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
         ok = sum(1 for r in final if r.get("ok"))
         print(f"Final: {ok}/{len(records)} returned an IP")
 
