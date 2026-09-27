@@ -133,9 +133,17 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             "type": parsed.scheme,
             "server": host,
             "server_port": port,
-            "uuid": uuid if parsed.scheme == "vless" else None,
-            "password": uuid if parsed.scheme == "trojan" else None,
+            "uuid": uuid,
         }
+        # Emit only the credential field this scheme actually has. sing-box
+        # rejects unknown keys outright, even when they are null:
+        #   outbounds[16].password: json: unknown field "password"
+        # so a VLESS outbound carrying "password": null aborts the whole
+        # sing-box process and every config in the file is lost. Trojan uses
+        # the same UUID as its password and takes no uuid field.
+        if parsed.scheme == "trojan":
+            del outbound["uuid"]
+            outbound["password"] = uuid
         # sing-box 1.14.0 wants a TLS *object*, not a boolean. A bare
         # "tls": true is rejected outright when it decodes the config:
         #   outbounds[0].tls: json: cannot unmarshal bool into Go struct
