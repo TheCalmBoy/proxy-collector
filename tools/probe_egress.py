@@ -630,7 +630,10 @@ async def main() -> int:
         # Only configs that produced an IP are worth re-checking: the others
         # never established a working path, and polling all 174 ten times is
         # 1740 requests through proxies that are already failing.
-        live = [r for r in first if r.get("ok")]
+        # live holds (record, result) pairs: the result has the IP but no
+        # "port", and the record has the port but no IP, so either alone
+        # raises KeyError.
+        live = [(r, res) for r, res in zip(records, first) if res.get("ok")]
         print(f"Stability checks on {len(live)}/{len(records)} configs that returned an IP")
         if not live:
             print("No config returned an IP in the initial round; skipping stability checks.")
@@ -638,9 +641,9 @@ async def main() -> int:
         for i in range(STABILITY_INTERVALS):
             await asyncio.sleep(STABILITY_INTERVAL_SECONDS)
             print(f"Stability check {i+1}/{STABILITY_INTERVALS}...")
-            results = await _run_stability_check(live)
+            results = await _run_stability_check([r for r, _ in live])
             for j, r in enumerate(results):
-                rid = live[j]["id"]
+                rid = live[j][0]["id"]
                 if r.get("ok"):
                     ip_history[rid].append(r.get("ip"))
                     country_history[rid].append(r.get("country"))
@@ -652,7 +655,7 @@ async def main() -> int:
 
         # Final speed test via Worker
         print("Running final speed test via Worker...")
-        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in live))
+        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r, _ in live))
         ok = sum(1 for r in final if r.get("ok"))
         print(f"Final: {ok}/{len(live)} returned an IP")
         _print_error_breakdown(final, "Final")
