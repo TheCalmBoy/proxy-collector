@@ -568,7 +568,7 @@ async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, 
     return await asyncio.gather(*[check_one(r) for r in records])
 
 
-def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], fraud_scores: list[int | None], countries: list[str | None]) -> dict[str, Any]:
+def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], fraud_scores: list[int | None], countries: list[str | None], hosting_history: list[bool | None] | None = None) -> dict[str, Any]:
     """Classify dynamic config based on IP history and quality metrics"""
     unique_ips = list(dict.fromkeys(ip_history))  # preserve order
     unique_countries = list(dict.fromkeys([c for c in countries if c]))
@@ -584,6 +584,15 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
     valid_fraud = [f for f in fraud_scores if f is not None]
     min_fraud = min(valid_fraud) if valid_fraud else 100
 
+    # Residential-vs-datacenter, from the per-check "hosting" flag. The worker
+    # already collects it (see _build_result) but it was never written into the
+    # classification, so the published index carried no connection_type at all
+    # and every consumer fell back to a bare risk word.
+    hosting_flags = [h for h in (hosting_history or []) if h is not None]
+    connection_type = None
+    if hosting_flags:
+        connection_type = "datacenter" if any(hosting_flags) else "residential"
+
     classification = {
         "unique_ips": unique_ips,
         "ip_count": len(unique_ips),
@@ -593,6 +602,7 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
         "avg_speed_mb_s": round(avg_speed, 3),
         "max_speed_mb_s": round(max_speed, 3),
         "min_fraud_score": min_fraud,
+        "connection_type": connection_type,
     }
 
     # Decision logic
@@ -736,6 +746,7 @@ async def main() -> int:
         speed_history = {r["id"]: [] for r in records}
         fraud_history = {r["id"]: [] for r in records}
         country_history = {r["id"]: [] for r in records}
+        hosting_history = {r["id"]: [] for r in records}
 
         # Include initial results
         for r in first:
@@ -745,6 +756,7 @@ async def main() -> int:
                 speed_history[rid].append(r.get("download_mb_s"))
                 fraud_history[rid].append(r.get("fraud_score"))
                 country_history[rid].append(r.get("country"))
+                hosting_history[rid].append(r.get("hosting"))
 
         print(f"Running {STABILITY_INTERVALS} stability checks at {STABILITY_INTERVAL_SECONDS}s intervals...")
         # Only configs that produced an IP are worth re-checking: the others
@@ -773,6 +785,8 @@ async def main() -> int:
                         speed_history[rid].append(speed_history[rid][-1])
                     if fraud_history[rid]:
                         fraud_history[rid].append(fraud_history[rid][-1])
+                    if hosting_history[rid]:
+                        hosting_history[rid].append(hosting_history[rid][-1])
 
         # Final speed test via Worker
         print("Running final speed test via Worker...")
@@ -789,6 +803,7 @@ async def main() -> int:
                 speed_history[rid].append(r.get("download_mb_s"))
                 fraud_history[rid].append(r.get("fraud_score"))
                 country_history[rid].append(r.get("country"))
+                hosting_history[rid].append(r.get("hosting"))
 
     finally:
         core.terminate()
@@ -811,6 +826,7 @@ async def main() -> int:
             speed_history[rid],
             fraud_history[rid],
             country_history[rid],
+            hosting_history[rid],
         )
 
         # Only include non-rejected configs
