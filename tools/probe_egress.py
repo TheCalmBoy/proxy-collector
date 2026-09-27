@@ -740,7 +740,12 @@ async def main() -> int:
             "server": record["server"],
             "server_port": record.get("server_port"),
             "classification": classification,
-            "speed_mb_s": round(avg_speed, 3),
+            # The subscription worker gates every proxy on
+            # healthById[id].download_mb_s (src/index.js:429), so this has to
+            # be published under that exact name. It was published as
+            # "speed_mb_s", the worker read it as absent, and every proxy
+            # looked unverified.
+            "download_mb_s": round(avg_speed, 3),
             "ip_count": len(ips),
             "unique_ips": ips,
             "primary_country": classification.get("country"),
