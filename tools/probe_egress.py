@@ -359,6 +359,28 @@ def ip_family(value: Any) -> str:
     return "unknown"
 
 
+async def _listener_alive(port: int, timeout: float = 5.0) -> bool:
+    """True when something accepts a TCP connection on the SOCKS listener.
+
+    sing-box can be alive as a process while its listeners are already closed,
+    which is what a mid-session crash looks like from the outside: probes stop
+    with curl exit 7 and every remaining proxy is scored as dead. Checking the
+    socket catches that before the results are believed.
+    """
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=timeout
+        )
+    except (OSError, asyncio.TimeoutError):
+        return False
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except (OSError, asyncio.TimeoutError):
+        pass
+    return True
+
+
 def families_of(ips: list[Any]) -> str:
     """Collapse the observed addresses into a single label."""
     seen = {ip_family(ip) for ip in ips if ip_family(ip) != "unknown"}
@@ -690,6 +712,14 @@ async def main() -> int:
             if core.poll() is not None:
                 print("sing-box failed to restart; aborting.", file=sys.stderr)
                 raise RuntimeError("sing-box will not stay up")
+            # A core can be running while its listeners are already gone, which
+            # is what a crash mid-session looks like: every later probe returns
+            # curl exit 7. Confirm a listener answers before resuming, so the
+            # run does not silently score every remaining proxy as dead.
+            probe_port = PORT_BASE
+            if not await _listener_alive(probe_port):
+                print(f"restarted sing-box is not answering on {probe_port}; aborting.", file=sys.stderr)
+                raise RuntimeError("sing-box restarted without live listeners")
 
         # Initial speed test via Worker
         print("Running initial speed test via Worker...")
