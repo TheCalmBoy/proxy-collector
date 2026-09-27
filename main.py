@@ -172,6 +172,63 @@ def fetch_source_configs(session: requests.Session) -> list[str]:
     return lines
 
 
+def fetch_previous_verified(session: requests.Session) -> list[str]:
+    """Re-seed from our own last published output.
+
+    Upstream repos rotate: a config that passed every gate yesterday can be
+    absent from today's source, and a failed probe is not proof the proxy died
+    (probe hosts rate-limit, CI runners get throttled). Treating the previous
+    run's qualified set as an additional source means a drop in upstream only
+    costs us the new candidates, never the known-good ones.
+
+    Read from the published artifact rather than the local OUTPUT_DIR: the
+    workflow starts from a clean checkout, so locally there is nothing to reuse.
+    """
+    url = os.getenv("PREVIOUS_VERIFIED_URL", "").strip()
+    if not url:
+        return []
+
+    print(f"Re-seeding from previous verified output: {url}")
+    try:
+        response = session.get(url, timeout=HTTP_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        # Never fail the run because the carry-over is unavailable; upstream is
+        # still a valid source on its own.
+        print(f"Previous verified output unavailable ({error}); continuing without it.")
+        return []
+
+    # The published file is plain text, but accept the base64 sibling too so a
+    # bad guess at the URL degrades to a no-op instead of garbage input. Sniff
+    # the WHOLE body, not just line 1: a file whose first line is prose (a
+    # header, an error page) would otherwise be decoded as base64 into noise,
+    # silently yielding zero configs instead of the real ones.
+    text = response.text
+    looks_like_plain = sum(1 for line in text.splitlines() if "://" in line)
+    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/=\s]", text)
+    if looks_like_b64 and looks_like_plain == 0:
+        try:
+            text = base64.b64decode(text.strip() + "=" * (-len(text.strip()) % 4)).decode("utf-8", "replace")
+        except Exception:
+            pass
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "://" not in line:
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+
+    print(f"Loaded {len(lines)} configs from the previous verified output.")
+    return lines
+
+
 def geoip_country(reader: geoip2.database.Reader, ip: str) -> str | None:
     try:
         result = reader.country(ip)
@@ -458,11 +515,37 @@ def main() -> None:
             "The GitHub Actions workflow should download DB-IP Lite before running main.py."
         )
 
-    source_lines = fetch_source_configs(session)
-    print(f"Loaded {len(source_lines)} unique config lines from the source.")
+    upstream_lines = fetch_source_configs(session)
+    carryover_lines = fetch_previous_verified(session)
+    print(f"Loaded {len(upstream_lines)} unique config lines from the source.")
+
+    # Union upstream with our own last winners. Dedup on the base URI (the part
+    # before "#") because the carry-over file is already annotated, so the same
+    # proxy would otherwise enter twice under two names and survive the
+    # post-annotation dedup in build_outputs() as two separate entries.
+    def base_of(line: str) -> str:
+        return line.split("#", 1)[0]
+
+    source_lines: list[str] = []
+    seen_bases: set[str] = set()
+    for line in upstream_lines + carryover_lines:
+        key = base_of(line)
+        if key in seen_bases:
+            continue
+        seen_bases.add(key)
+        source_lines.append(line)
+
+    # Every carry-over config must be probed again this run. A stale good result
+    # is worse than none: it would publish a proxy that no longer works.
+    print(
+        f"Carry-over added {len(source_lines) - len(upstream_lines)} configs; "
+        f"all {len(source_lines)} will be re-verified from scratch."
+    )
 
     stats: dict[str, Any] = {
         "source_entries": len(source_lines),
+        "upstream_entries": len(upstream_lines),
+        "carryover_entries": len(carryover_lines),
         "parsed_entries": 0,
         "unresolved_entries": 0,
         "unsupported_entries": 0,

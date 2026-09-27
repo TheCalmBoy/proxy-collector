@@ -121,6 +121,11 @@ jobs:
         run: python run_tests.py
 
       - name: Run collector
+        env:
+          # Re-seed from our own last published set. Upstream rotates, and a
+          # failed probe is not proof a proxy died, so without this a config
+          # that passed every gate can vanish from the feed for good.
+          PREVIOUS_VERIFIED_URL: https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt
         run: python main.py
 
       - name: Run verification (TCP/UDP/download/HTTPS)
