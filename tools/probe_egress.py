@@ -387,17 +387,23 @@ async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
 
 
 async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
-    body_path = Path("/tmp") / f"speed-{record['id']}.bin"
+    """Ask the Worker which IP this config egresses from.
+
+    This was a 5 MB download with SPEED_TEST_BYTES, which made no sense
+    here: Phase 1 already measures speed (Stage 3, writing to /dev/null) and
+    a config only reaches Phase 2 if it passed. Downloading 5 MB again per
+    config per round is what exhausted the proxies, not a property of the
+    configs. An IP check needs a few hundred bytes, so request those.
+    """
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
-        f'url = "{worker_url}/ip?download_bytes={SPEED_TEST_BYTES}"',
+        f'url = "{worker_url}/ip"',
         f'header = "Authorization: Bearer {token}"',
         "silent",
         "show-error",
         "fail",
         "connect-timeout = 10",
-        "max-time = 30",
-        f'output = "{body_path}"',
+        "max-time = 20",
         'write-out = "\\n__SPEED_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
     async with semaphore:
@@ -409,21 +415,14 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         )
         stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
-    if not body_path.exists() or process.returncode != 0:
+    if process.returncode != 0:
         return {"ok": False, "error": f"curl_exit_{process.returncode}"}
 
-    response_body = body_path.read_bytes()
-    body_path.unlink(missing_ok=True)
-    metadata_line, separator, downloaded = response_body.partition(b"\n")
-    if not separator:
-        return {"ok": False, "error": "missing_speed_metrics"}
-
+    _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
     try:
-        result = json.loads(metadata_line.decode())
+        result = json.loads(stdout.decode().strip())
     except Exception:
         return {"ok": False, "error": "invalid_worker_response"}
-
-    _, marker, metric = stdout.partition(b"\n__SPEED_METRICS__")
     latency_ms = None
     download_mb_s = None
     if marker:
@@ -431,11 +430,15 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
             downloaded_size, starttransfer, total = map(float, metric.decode().strip().split())
             latency_ms = round(starttransfer * 1000, 1)
             if total > starttransfer:
-                download_mb_s = len(downloaded) / 1_000_000 / (total - starttransfer)
+                download_mb_s = downloaded_size / 1_000_000 / (total - starttransfer)
         except (UnicodeDecodeError, ValueError):
             pass
 
-    ok = download_mb_s is not None and download_mb_s >= MIN_DOWNLOAD_MB_S
+    # Phase 2 succeeds on learning the egress IP, not on hitting a speed
+    # threshold. Gating on throughput here meant a healthy proxy that answered
+    # correctly was recorded as a failure whenever the small response came back
+    # too quickly to satisfy MIN_DOWNLOAD_MB_S.
+    ok = bool(result.get("ip"))
     return {
         "ok": ok,
         "id": record["id"],
