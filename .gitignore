@@ -3,3 +3,4 @@ __pycache__/
 sing-box-*/
 *.tar.gz
 .wrangler/
+probe-output/report.json
