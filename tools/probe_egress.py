@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -310,6 +311,66 @@ def _tag(uri: str) -> str:
     return hashlib.sha256(uri.encode()).hexdigest()[:8].upper()
 
 
+# The published feed tags each config with an id the upstream source already
+# put in the URI fragment: "ss://...#HK <flag> | @provider | 0DFD85". The
+# subscription worker keys its health lookup on exactly that trailing token,
+# while egress-health.json was keyed on a sha256 of the whole URI, so no id
+# ever matched and the worker filtered out every proxy as unverified. Reuse the
+# upstream id when it is present, and fall back to the hash only for configs
+# that carry no fragment id.
+_TRAILING_ID_RE = re.compile(r"^(?:[A-F0-9]{6,8})$")
+
+
+def _feed_id(uri: str) -> str | None:
+    """Return the id already present in the URI fragment, if any."""
+    if "#" not in uri:
+        return None
+    tail = uri.split("#", 1)[1].split("|")[-1].strip()
+    return tail.upper() if _TRAILING_ID_RE.match(tail) else None
+
+
+def _record_id(uri: str) -> str:
+    return _feed_id(uri) or _tag(uri)
+
+
+# Every check reports the egress address, so the family can be read straight
+# off it instead of adding another probe round-trip: an IPv4 literal is dotted
+# quad, an IPv6 literal is colon-separated (Cloudflare's trace returns v6 in
+# its compressed form).
+_IPV6_RE = re.compile(r"^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]+$")
+
+
+def ip_family(value: Any) -> str:
+    """Classify an address as 'ipv4', 'ipv6' or 'unknown'."""
+    if not isinstance(value, str):
+        return "unknown"
+    text = value.strip()
+    if not text:
+        return "unknown"
+    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", text):
+        return "ipv4"
+    # An IPv4-mapped address such as ::ffff:1.2.3.4 is still an IPv4 exit as
+    # far as a client is concerned; report it as such.
+    mapped = re.match(r"^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$", text, flags=re.IGNORECASE)
+    if mapped:
+        return "ipv4"
+    if _IPV6_RE.match(text):
+        return "ipv6"
+    return "unknown"
+
+
+def families_of(ips: list[Any]) -> str:
+    """Collapse the observed addresses into a single label."""
+    seen = {ip_family(ip) for ip in ips if ip_family(ip) != "unknown"}
+    if not seen:
+        return "unknown"
+    if seen == {"ipv4"}:
+        return "ipv4"
+    if seen == {"ipv6"}:
+        return "ipv6"
+    return "dual"
+
+
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
     inbounds: list[dict[str, Any]] = []
     outbounds: list[dict[str, Any]] = []
@@ -325,7 +386,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             stats["unsupported"] += 1
             reasons[str(exc)] = reasons.get(str(exc), 0) + 1
             continue
-        identifier = _tag(uri)
+        identifier = _record_id(uri)
         inbound_tag = f"in-{identifier}"
         outbound_tag = f"proxy-{identifier}"
         port = PORT_BASE + len(records)
@@ -748,6 +809,10 @@ async def main() -> int:
             "download_mb_s": round(avg_speed, 3),
             "ip_count": len(ips),
             "unique_ips": ips,
+            # Which address family this exit actually presents. A v6-only exit
+            # behaves differently from a v4 one behind a dual-stack client, and
+            # without this the two are indistinguishable in the index.
+            "ip_family": families_of(ips),
             "primary_country": classification.get("country"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
