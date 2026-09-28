@@ -25,6 +25,10 @@ on:
         description: "Comma-separated upstream config URLs. Empty = default (0xRadikal + Epodonios). Set to the 0xRadikal URL alone to A/B the second source."
         required: false
         default: ""
+      min_speed_mb_s:
+        description: "Stage 3 minimum download speed in MB/s (0.100 = 100 KB/s). Raise to trade yield for usable bandwidth; measure before changing."
+        required: false
+        default: "0.100"
       debug_https:
         description: "Print HTTPS handshake failures"
         type: boolean
@@ -145,6 +149,7 @@ jobs:
           VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
           VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '40' }}
           SOURCE_URLS: ${{ inputs.source_urls }}
+          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '0.100' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_UDP_TIMEOUT: ${{ inputs.verify_udp_timeout || '6.0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}

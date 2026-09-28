@@ -62,7 +62,12 @@ SS_METHOD_KEY_BYTES = {
 }
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
-MIN_SPEED_MB_S = 0.100  # 100 KB/s
+# 100 KB/s over a 5 MB body is a 50-second floor, which is why this is worth
+# raising rather than lowering: at 200 KB/s a config must sustain roughly a
+# quarter of a megabit for 25s to pass, and anything that cannot is not going
+# to be useful to a subscriber. Left env-tunable so the threshold can be
+# measured against real yield rather than assumed to be free.
+MIN_SPEED_MB_S = float(os.getenv("VERIFY_MIN_SPEED_MB_S", "0.100"))
 TCP_TIMEOUT = 1.5
 # Stage 4 does a full TLS handshake plus an HTTP round trip through the
 # proxy, which is far more work than the bare TCP connect Stage 1 performs.
