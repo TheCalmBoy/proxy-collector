@@ -130,6 +130,10 @@ jobs:
           # failed probe is not proof a proxy died, so without this a config
           # that passed every gate can vanish from the feed for good.
           PREVIOUS_VERIFIED_URL: https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt
+          # main.py is what reads SOURCE_URLS, and it runs in this step. Setting
+          # it on the verification step only meant the override was silently
+          # ignored and the collector fetched every default source regardless.
+          SOURCE_URLS: ${{ inputs.source_urls }}
         run: python main.py
 
       - name: Run verification (TCP/UDP/download/HTTPS)
