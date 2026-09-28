@@ -54,6 +54,12 @@ SOURCE_URLS = tuple(
 ) or DEFAULT_SOURCE_URLS
 SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URLS[0])
 IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
+# The free ip-api tier rate-limits per source IP, and one runner resolving every
+# config in the corpus trips it long before the batch/pacing logic can help.
+# Routing the lookups through an already-verified proxy keeps the answers
+# identical (ip-api reports the queried IP's country, not the caller's) while
+# spreading the quota across egress addresses.
+IP_API_PROXY_URL = os.getenv("IP_API_PROXY_URL", "").strip()
 MMDB_PATH = os.getenv("MMDB_PATH", "GeoLite2-Country.mmdb")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 IP_API_BATCH_SIZE = 100
@@ -280,6 +286,34 @@ def geoip_country(reader: geoip2.database.Reader, ip: str) -> str | None:
         return result.country.iso_code
     except Exception:
         return None
+
+
+def build_ip_api_session(base: requests.Session) -> requests.Session:
+    """Return a session whose ip-api traffic optionally leaves via a proxy.
+
+    A dedicated session keeps the proxy config from leaking into the source
+    downloads, which must always be fetched directly. Falls back to `base`
+    unchanged when no proxy is configured or the URL is unusable, so the
+    behaviour with no env var set is exactly what it was before.
+    """
+    if not IP_API_PROXY_URL:
+        return base
+
+    parsed = urllib.parse.urlsplit(IP_API_PROXY_URL)
+    if not parsed.scheme or not parsed.hostname:
+        print(f"  IP_API_PROXY_URL is not a usable proxy URL; using direct route")
+        return base
+
+    session = requests.Session()
+    session.headers.update(dict(base.headers))
+    session.proxies.update(
+        {
+            "http": IP_API_PROXY_URL,
+            "https": IP_API_PROXY_URL,
+        }
+    )
+    print(f"  ip-api lookups routed via proxy {parsed.scheme}://{parsed.hostname}:{parsed.port or ''}")
+    return session
 
 
 def query_ip_api(
@@ -636,7 +670,7 @@ def main() -> None:
 
     print(f"Parsed {stats['parsed_entries']} entries; {len(unique_ips)} unique public IPs.")
     print("Querying hosting/ISP metadata...")
-    api_results = query_ip_api(session, unique_ips)
+    api_results = query_ip_api(build_ip_api_session(session), unique_ips)
 
     classifications: Counter[str] = Counter()
     for record in records:
