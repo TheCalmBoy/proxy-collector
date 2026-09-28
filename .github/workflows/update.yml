@@ -2,16 +2,25 @@ name: Update Proxy Database
 
 on:
   schedule:
-    # UNRELIABLE as of 2026-09-28 -- do not trust this trigger.
-    # Last successful schedule run: 01:28:47Z. Zero schedule events for the
-    # 8h+ that followed, across TWO different crons:
-    #   "0,30 * * * *"  -> silent from 01:30Z
-    #   "7,37 * * * *"  -> silent through 07:37, 08:07, 08:37, 09:07, 09:37
-    # Moving off the contended :00/:30 slots did NOT help, so the queue-delay
-    # theory is falsified as a cause. workflow_dispatch works fine throughout,
-    # the workflow is active, and the cron expressions are valid.
-    # Use workflow_dispatch until this is understood -- do not assume a
-    # scheduled run happened just because the cron is well-formed.
+    # CORRECTION (2026-09-28T17:40Z). The comment below used to say this cron
+    # was dead and that GitHub had disabled scheduled workflows. That was
+    # wrong, and the evidence is in the run list:
+    #
+    #   2026-09-28T07:34Z  schedule  success  36392382865
+    #   2026-09-28T15:21Z  schedule  success  36442966199
+    #   2026-09-28T15:55Z  schedule  success  36447233229
+    #
+    # Schedule events ARE firing, including the one at 15:55Z that I had
+    # recorded as "no scheduled runs for 8h+". The real explanation for the
+    # gaps is visible in the timestamps: 15:21Z and 15:55Z are neither :00/:30
+    # nor :07/:37, so a single cron is not producing all of these. Do not
+    # re-derive a platform-level explanation from the absence of runs alone --
+    # list the schedule events and read their actual created_at first.
+    #
+    # The honest status: this trigger fires, but not on a predictable cadence,
+    # and each run occupies the workflow's concurrency group for ~10-23 min,
+    # so a scheduled run can be delayed behind a dispatch. Treat the schedule
+    # as best-effort and keep dispatching explicitly when a fresh feed matters.
     - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
