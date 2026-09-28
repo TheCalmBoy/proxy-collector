@@ -1245,11 +1245,30 @@ async def main() -> int:
             print("No configs passed TCP", file=sys.stderr)
             return 1
 
-        # ── Stage 2: 20 UDP requests, flag only (never rejects) ───────────
+        # ── Stages 2 and 3 concurrently ───────────────────────────────────
+        # Stage 2 (UDP) and Stage 3 (speed) probe the SAME tcp_survivors, and
+        # neither result feeds the other: UDP is a flag that never rejects, and
+        # speed is an independent measurement. Run back to back they cost the
+        # sum -- 215.7s + 176.5s = 392s in run 36455487959, by far the largest
+        # block in the job. Launched as tasks they cost the max instead, since
+        # the two are bounded by different semaphores (tcp vs speed) and do
+        # not contend for the same resource.
+        #
+        # The stage banners are emitted up front so the log still attributes
+        # time to a stage, and each _mark still stamps its own elapsed.
         _mark(f"Stage 2: UDP x{PACKET_TEST_COUNT} ({len(tcp_survivors)} configs)...")
-        udp_results = await asyncio.gather(*[
+        _mark(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
+        # asyncio.gather() requires coroutines, so these are launched as
+        # ensure_future tasks and gathered together below. Passing the gather
+        # objects themselves is a TypeError, not a no-op.
+        udp_task = asyncio.ensure_future(asyncio.gather(*[
             _udp_reliability(r, tcp_semaphore) for r in tcp_survivors
-        ])
+        ]))
+        speed_task = asyncio.ensure_future(asyncio.gather(*[
+            _speed_test(r, worker_url, worker_token, speed_semaphore) for r in tcp_survivors
+        ]))
+        udp_results, speed_results = await asyncio.gather(udp_task, speed_task)
+
         udp_flags = dict(zip((r["id"] for r in tcp_survivors), udp_results))
         udp_yes = sum(1 for v in udp_flags.values() if v >= UDP_MIN_SUCCESS_RATE)
         print(f"Stage 2: UDP capable: {udp_yes}/{len(tcp_survivors)} (not a filter)")
@@ -1264,11 +1283,6 @@ async def main() -> int:
             for reason, count in ranked:
                 print(f"  {count:>6}  {reason}")
 
-        # ── Stage 3: 5 MB download + speed, before the costly HTTPS stage ─
-        _mark(f"Stage 3: {SPEED_TEST_BYTES // 1_000_000}MB download ({len(tcp_survivors)} configs)...")
-        speed_results = await asyncio.gather(*[
-            _speed_test(r, worker_url, worker_token, speed_semaphore) for r in tcp_survivors
-        ])
         speed_by_id = {r["id"]: res for r, res in zip(tcp_survivors, speed_results)}
         speed_survivors = [r for r in tcp_survivors if speed_by_id[r["id"]].get("speed_ok")]
         print(
