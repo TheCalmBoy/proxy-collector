@@ -138,7 +138,15 @@ jobs:
           # Re-seed from our own last published set. Upstream rotates, and a
           # failed probe is not proof a proxy died, so without this a config
           # that passed every gate can vanish from the feed for good.
-          PREVIOUS_VERIFIED_URL: ${{ inputs.carry_over == false && '' || 'https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt' }}
+          # NOTE: do not write this as `inputs.carry_over == false && '' || URL`.
+          # GitHub expressions have no ternary, and that idiom is a trap: when
+          # the left test is true the middle operand is '' -- falsy -- so the
+          # || branch runs and the URL is emitted anyway. carry_over=false
+          # therefore still carried over, and the whole concurrency sweep was
+          # confounded. The safe form puts the EMPTY value on the || side and a
+          # truthy value in the middle, so neither branch can substitute for the
+          # other: false -> '' || '' -> ''; true -> URL || '' -> URL.
+          PREVIOUS_VERIFIED_URL: ${{ inputs.carry_over && 'https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt' || '' }}
           # main.py is what reads SOURCE_URLS, and it runs in this step. Setting
           # it on the verification step only meant the override was silently
           # ignored and the collector fetched every default source regardless.
