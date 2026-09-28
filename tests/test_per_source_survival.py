@@ -128,6 +128,25 @@ class TestPerSourceSurvival(unittest.TestCase):
             "candidate and published collapsed: the pre-verification bug is back",
         )
 
+    def test_collector_per_source_never_calls_the_dedup_column_published(self):
+        """The column that read published == candidates for every source.
+
+        'published' implied survival and described only dedup. Renaming it to
+        after_dedup is what stops the table being read as evidence for dropping
+        a feed; this test fails if the misleading name comes back.
+        """
+        import inspect
+
+        source = inspect.getsource(main)
+        per_source_block = source[source.index('stats["per_source"]'):]
+        per_source_block = per_source_block[:per_source_block.index("}")]
+        self.assertIn('"after_dedup"', per_source_block)
+        self.assertNotIn(
+            '"published"',
+            per_source_block,
+            "the pre-verification column is named 'published' again",
+        )
+
     def test_verify_main_writes_per_source_into_stats(self):
         import inspect
 

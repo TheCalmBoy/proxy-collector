@@ -690,16 +690,21 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
     stats["country_counts"] = country_counts
     stats["output_entries"] = len(all_lines)
 
-    # Which source actually supplies the output. The candidate column is what
-    # that source offered; the published column is what survived dedup, so
-    # (candidates - published) is the overlap it shares with an earlier feed.
-    # This is the evidence for keeping or dropping a source -- without it the
-    # only signal is a total count that cannot tell a new source from a
-    # duplicate of one already in the list.
+    # Which source supplies each deduplicated output line, BEFORE verification.
+    # Neither column here is a survival rate: "candidates" is everything the
+    # source offered, "after_dedup" is what it uniquely contributed to
+    # output/all.txt, and the difference is overlap with an earlier feed.
+    #
+    # This table is deliberately NOT called "published". An earlier version used
+    # that word and every row read published == candidates with overlap 0,
+    # because both counters incremented over the same pass -- it read like the
+    # evidence for dropping a feed while describing nothing. True per-source
+    # survival is computed after verification, in tools/verify.py's
+    # enriched-configs.json, by joining survivors through source_map.json.
     stats["per_source"] = {
         source: {
             "candidates": per_source_candidates[source],
-            "published": per_source_published[source],
+            "after_dedup": per_source_published[source],
             "overlap": per_source_candidates[source] - per_source_published[source],
         }
         for source in sorted(per_source_published | per_source_candidates)
