@@ -18,7 +18,7 @@ on:
         required: false
         default: "100"
       verify_speed_concurrency:
-        description: "Concurrent 5MB download tests. Default 40 is provisional, NOT a measured optimum: the runs behind it all had carry-over on and are not comparable. A clean carry_over=false sweep is in progress."
+        description: "Concurrent 5MB download tests. Default 40 measured best stage-3 pass rate (51.8%) in a 7-arm carry_over=false sweep: 20=47.9 40=51.8 60=49.8 80=50.2 100=48.7 150=51.2 400=34.8. n=1 per arm and upstream candidate count drifts, so 40 vs 150 is within noise; treat 20-150 as a plateau and 400 as the clear loser."
         required: false
         default: "40"
       source_urls:
