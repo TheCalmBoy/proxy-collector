@@ -21,6 +21,10 @@ on:
         description: "Concurrent 5MB download tests. 400 starved the speed budget and lost ~60% of survivors; 40 measured 2.6x higher yield. Raise only with evidence."
         required: false
         default: "40"
+      source_urls:
+        description: "Comma-separated upstream config URLs. Empty = default (0xRadikal + Epodonios). Set to the 0xRadikal URL alone to A/B the second source."
+        required: false
+        default: ""
       debug_https:
         description: "Print HTTPS handshake failures"
         type: boolean
@@ -136,6 +140,7 @@ jobs:
           VERIFY_TCP_CONCURRENCY: ${{ inputs.verify_tcp_concurrency || '750' }}
           VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
           VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '40' }}
+          SOURCE_URLS: ${{ inputs.source_urls }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
           VERIFY_UDP_TIMEOUT: ${{ inputs.verify_udp_timeout || '6.0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}

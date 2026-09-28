@@ -20,10 +20,17 @@ import requests
 
 # Multiple upstreams, not one. A single repo is a single point of failure:
 # it rotates, throttles, or changes shape and the whole pipeline loses volume
-# with no signal that anything went wrong. Measured overlap against the original
-# source is small, so the union is close to additive rather than duplicated.
-#   0xRadikal  1662 unique  (baseline)
-#   Epodonios  5343 unique  448 shared -> 4895 new
+# with no signal that anything went wrong.
+#
+# These two are NOT independent pools. 0xRadikal's state.json already lists
+# Epodonios as one of its own inputs, and the two share 559 endpoints. Adding
+# Epodonios anyway is deliberate: we consume only 0xRadikal's *verified* output,
+# so whatever its pipeline filtered out never reaches us. Measured against
+# endpoint keys (server:port), not line counts:
+#   0xRadikal verified  1173 endpoints
+#   Epodonios           3509 endpoints
+#   shared               559
+#   Epodonios-only      2950  <- newly reachable
 # Order matters only for attribution; dedup by endpoint happens downstream.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
