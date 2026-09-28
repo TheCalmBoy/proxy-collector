@@ -208,8 +208,16 @@ async def main():
     for r in rows:
         flags = "".join(
             ("+" if r["sites"][s]["reachable"] else "-") for s, _, _ in SITE_CHECKS)
+        # The raw status has to be printable, not just the +/- summary: the
+        # summary collapses a 200 and a 403 into the same '+', which is exactly
+        # the distinction the GEMINI X flag is built on. Earlier runs recorded
+        # per-config status in diag-report.json only, and that artifact never
+        # uploaded, so the matrix could not be rebuilt from the logs.
+        codes = ",".join(
+            (r["sites"][s]["http"] or "---") for s, _, _ in SITE_CHECKS)
         print(f"  {r['reason']:<16} {(r['mb_s'] or 0):>8.3f} MB/s "
-              f"rc={r['curl_rc']:<3} sites[{flags}] port={r['port']}", flush=True)
+              f"rc={r['curl_rc']:<3} sites[{flags}] http[{codes}] port={r['port']}",
+              flush=True)
 
     out = Path(os.environ.get("REPORT_PATH", "diag-report.json"))
     out.write_text(json.dumps({"meta": {"configs": len(rows), "bytes": BYTES,
