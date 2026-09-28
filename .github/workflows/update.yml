@@ -168,6 +168,12 @@ jobs:
           #
           # Failure here is not fatal. A dead pool just means the rate limit
           # comes back, which is the behaviour we had before this step existed.
+          # output/ does not exist yet at this point in the job -- the
+          # collector creates it later. Without this mkdir, curl fails with
+          # (23) "Failure writing output to destination" while the download
+          # itself is perfectly fine, and the run silently falls back to a
+          # direct (and therefore rate-limited) ip-api session.
+          mkdir -p output
           pool="output/ipapi_pool.txt"
           if curl --fail --location --silent --show-error --connect-timeout 20 \
                "${POOL_SOURCE}" -o "${pool}"; then
@@ -185,9 +191,16 @@ jobs:
           sing-box check -c output/ipapi_pool.json
 
       - name: Start ip-api proxy pool sidecar
+        id: pool_ready
         shell: bash
         run: |
           set -euo pipefail
+
+          # Defaults are empty: with no id in the form, GitHub still resolves
+          # steps.pool_ready.outputs.* to '', and main.py reads that as "no
+          # proxy" and runs direct. That is the correct fallback.
+          echo "proxy_url=" >> "$GITHUB_OUTPUT"
+          echo "pool_url=" >> "$GITHUB_OUTPUT"
 
           if [ ! -f output/ipapi_pool.json ]; then
             echo "No pool config; ip-api lookups will run direct."
@@ -205,6 +218,15 @@ jobs:
             if curl --silent --max-time 3 --proxy socks5h://127.0.0.1:11080 \
                  http://ip-api.com/json/ -o /dev/null; then
               echo "ip-api pool sidecar is up."
+              # Only now may the collector be pointed at the SOCKS port.
+              # Before this, "is it up" was decided in the collector's env
+              # block, which cannot see whether the sidecar came up -- so a
+              # sidecar that never started still got IP_API_PROXY_URL set, and
+              # every lookup failed against a port nobody was listening on
+              # instead of falling back to direct.
+              echo "ready" > "$RUNNER_TEMP/pool.env"
+              echo "proxy_url=socks5://127.0.0.1:11080" >> "$GITHUB_OUTPUT"
+              echo "pool_url=http://127.0.0.1:11082" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             sleep 1
@@ -218,8 +240,14 @@ jobs:
           # The sidecar from the previous step, and the Clash API the collector
           # PUTs to in order to advance the selector. Both are no-ops when the
           # pool could not be built, which is why main.py treats them as opt-in.
-          IP_API_PROXY_URL: socks5://127.0.0.1:11080
-          IP_API_PROXY_POOL: http://127.0.0.1:11082
+          #
+          # Sourced from a file the sidecar step writes ONLY after a real
+          # connection through the SOCKS port succeeds. Hardcoding these here
+          # is what made run 36443764848 return ip_api_success: 0 while every
+          # step exited 0: the pool source fetch failed, no sidecar ran, and
+          # yet every lookup was sent to a dead port.
+          IP_API_PROXY_URL: ${{ steps.pool_ready.outputs.proxy_url }}
+          IP_API_PROXY_POOL: ${{ steps.pool_ready.outputs.pool_url }}
           # Re-seed from our own last published set. Upstream rotates, and a
           # failed probe is not proof a proxy died, so without this a config
           # that passed every gate can vanish from the feed for good.
@@ -302,6 +330,31 @@ jobs:
 
           verify = json.loads(Path("verify-output/enriched-configs.json").read_text())
           print(json.dumps(verify.get("stats", {}), indent=2))
+          PY
+
+      - name: Assert ip-api metadata was actually resolved
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          # ip-api is a best-effort enrichment: 100% success is not
+          # achievable and should not fail the job. Zero success, though,
+          # means the country field is missing on every row, the worker 503s,
+          # and the run still exits 0 -- exactly what run 36443764848 did
+          # after the pool fetch silently failed. That is a broken pipeline,
+          # not a degraded one, so it is a hard failure.
+          verify = json.loads(Path("verify-output/enriched-configs.json").read_text())
+          stats = verify.get("stats", {})
+          ok = stats.get("ip_api_success", 0)
+          failed = stats.get("ip_api_failed", 0)
+          print(f"ip_api_success={ok} ip_api_failed={failed}")
+          if ok == 0:
+              raise SystemExit(
+                  "Every ip-api lookup failed (ip_api_success=0). Country "
+                  "metadata is missing on all rows, which silently 503s the "
+                  "worker. Refusing to publish a green run with no countries."
+              )
           PY
 
       - name: Publish only the configs that passed verification
