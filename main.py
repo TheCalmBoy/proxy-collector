@@ -35,6 +35,16 @@ import requests
 # Shared or not, 0xRadikal's output is the one that survives our gates.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+    # Re-added 2026-09-28 on user request. It was dropped in 23d4d5f after an
+    # A/B measured 5440 extra candidates yielding 37 FEWER final configs --
+    # more junk than signal. It is back on request, but A/B it again before
+    # assuming the earlier verdict still holds: upstream rotates constantly and
+    # the health-gate behaviour that sank it may not be the same today.
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+    # Verified live 2026-09-28: 4558 vmess configs, currently reachable.
+    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vmess_configs.txt",
+    # Verified live 2026-09-28: 5771 vless configs, currently reachable.
+    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 )
 # Comma-separated override. A single URL still works.
 SOURCE_URLS = tuple(
