@@ -220,16 +220,24 @@ def _resolve_host_uncached(host: str) -> str | None:
     return candidates[0] if candidates else None
 
 
-def fetch_source_configs(session: requests.Session) -> list[str]:
-    """Union every configured upstream.
+def fetch_source_configs(
+    session: requests.Session,
+) -> tuple[list[str], dict[str, str]]:
+    """Union every configured upstream, with per-line provenance.
 
     A source that fails must not take the run down: the others still carry
     volume, and losing one repo is exactly the silent shrinkage this replaces.
     Per-source counts are printed so a drop is visible in the log rather than
     inferred from a smaller total.
+
+    Returns the union plus a map of line -> first source that supplied it, so
+    every downstream record can be attributed. First-wins matches the dedup
+    order below: a line duplicated across sources is credited to the one that
+    was read first, which keeps the per-source counts summing to the total.
     """
     lines: list[str] = []
     seen: set[str] = set()
+    provenance: dict[str, str] = {}
     for url in SOURCE_URLS:
         try:
             response = session.get(url, timeout=HTTP_TIMEOUT)
@@ -245,12 +253,13 @@ def fetch_source_configs(session: requests.Session) -> list[str]:
                 continue
             seen.add(line)
             lines.append(line)
+            provenance[line] = url
             added += 1
         print(f"  {added:>6} new  {url}")
 
     if not lines:
         raise RuntimeError("No upstream source returned any configs")
-    return lines
+    return lines, provenance
 
 
 def fetch_previous_verified(session: requests.Session) -> list[str]:
@@ -603,12 +612,16 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
     # De-duplicate after annotation using the base URI; a source duplicate should not
     # become multiple public entries merely because metadata changed.
     seen_base: set[str] = set()
+    per_source_published: Counter[str] = Counter()
+    per_source_candidates: Counter[str] = Counter()
     for record in records:
         uri = record["uri"]
         base = uri.split("#", 1)[0]
+        per_source_candidates[record.get("source", "unknown")] += 1
         if base in seen_base:
             continue
         seen_base.add(base)
+        per_source_published[record.get("source", "unknown")] += 1
 
         annotated = record["annotated_uri"]
         country = record["country"] or "ZZ"
@@ -630,6 +643,21 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
     country_counts = {country: len(lines) for country, lines in sorted(grouped.items())}
     stats["country_counts"] = country_counts
     stats["output_entries"] = len(all_lines)
+
+    # Which source actually supplies the output. The candidate column is what
+    # that source offered; the published column is what survived dedup, so
+    # (candidates - published) is the overlap it shares with an earlier feed.
+    # This is the evidence for keeping or dropping a source -- without it the
+    # only signal is a total count that cannot tell a new source from a
+    # duplicate of one already in the list.
+    stats["per_source"] = {
+        source: {
+            "candidates": per_source_candidates[source],
+            "published": per_source_published[source],
+            "overlap": per_source_candidates[source] - per_source_published[source],
+        }
+        for source in sorted(per_source_published | per_source_candidates)
+    }
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -673,7 +701,7 @@ def main() -> None:
             "The GitHub Actions workflow should download DB-IP Lite before running main.py."
         )
 
-    upstream_lines = fetch_source_configs(session)
+    upstream_lines, line_sources = fetch_source_configs(session)
     carryover_lines = fetch_previous_verified(session)
     print(f"Loaded {len(upstream_lines)} unique config lines from the source.")
 
@@ -686,12 +714,20 @@ def main() -> None:
 
     source_lines: list[str] = []
     seen_bases: set[str] = set()
+    CARRYOVER_LABEL = "carry-over"
+    base_sources: dict[str, str] = {}
     for line in upstream_lines + carryover_lines:
         key = base_of(line)
         if key in seen_bases:
             continue
         seen_bases.add(key)
         source_lines.append(line)
+        # A base may reach us from upstream and from our own last output. The
+        # upstream claim wins, because that is the only one that measures
+        # whether the source still carries it; carry-over only gets the bases
+        # that nothing upstream offered this run. Upstream is iterated first,
+        # so setdefault alone already encodes "first source wins".
+        base_sources.setdefault(key, line_sources.get(line, CARRYOVER_LABEL))
 
     # Every carry-over config must be probed again this run. A stale good result
     # is worse than none: it would publish a proxy that no longer works.
@@ -735,6 +771,7 @@ def main() -> None:
                 "host": host,
                 "ip": ip,
                 "country": country,
+                "source": base_sources.get(base_of(uri), CARRYOVER_LABEL),
             }
             records.append(record)
             stats["parsed_entries"] += 1
