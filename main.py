@@ -10,6 +10,7 @@ import socket
 import time
 import urllib.parse
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,10 @@ IP_API_BATCH_SIZE = 100
 # Free-tier fields only; see fetch_ip_metadata for why Pro-only fields break it.
 DEFAULT_IP_API_FIELDS = "status,countryCode,isp,org,as,asname"
 HTTP_TIMEOUT = 30
+# Threads for the concurrent DNS pre-warm. 32 sits well under the runner's
+# thread/process ceiling and well under the file-descriptor limit, and DNS
+# lookups are pure network wait, so this is I/O bound rather than CPU bound.
+DNS_WARMUP_WORKERS = 32
 USER_AGENT = "proxy-collector/1.0 (+https://github.com/your-repo)"
 
 
@@ -192,6 +197,47 @@ def resolve_host(host: str) -> str | None:
     resolved = _resolve_host_uncached(host)
     _DNS_CACHE[host] = resolved
     return resolved
+
+
+def prewarm_dns(hosts: list[str], workers: int = DNS_WARMUP_WORKERS) -> int:
+    """Resolve distinct hosts concurrently so the parse loop never blocks.
+
+    The cache removed duplicate lookups but left the first lookup per host
+    serial: run 36459022405 still spent 437s in the parse phase for ~4000
+    distinct names, because getaddrinfo blocks and the loop held one at a
+    time. Pre-warming collapses that to roughly (distinct / workers) x
+    per-lookup latency.
+
+    Only uncached hosts are submitted, so this is a no-op on a warm cache.
+    Returns the number of hosts submitted, so a caller can log a
+    before/after and prove the warm cache actually did something.
+    """
+    pending = []
+    seen: set[str] = set()
+    for host in hosts:
+        if host in _DNS_CACHE or host in seen:
+            continue
+        seen.add(host)
+        pending.append(host)
+
+    if not pending:
+        return 0
+
+    started = time.monotonic()
+    workers = max(1, min(workers, len(pending)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # map over the CACHED resolver, not _resolve_host_uncached. Calling the
+        # uncached function would do every lookup but write none of them to
+        # _DNS_CACHE, so the parse loop would immediately repeat all of them --
+        # the pre-warm would cost a full extra round of DNS for nothing.
+        list(pool.map(resolve_host, pending))
+
+    elapsed = time.monotonic() - started
+    print(
+        f"DNS pre-warm resolved {len(pending)} distinct hosts "
+        f"across {workers} threads in {elapsed:.1f}s."
+    )
+    return len(pending)
 
 
 def _resolve_host_uncached(host: str) -> str | None:
@@ -745,6 +791,15 @@ def main() -> None:
         f"all {len(source_lines)} will be re-verified from scratch."
     )
 
+    # Warm DNS before parsing. The loop below calls resolve_host() per config
+    # and would otherwise block on the first lookup for each distinct name.
+    # Collecting hosts first costs one extra cheap pass over the lines and
+    # makes the wait a single measurable, concurrent step.
+    endpoints = [parse_endpoint(line) for line in source_lines]
+    distinct_hosts = {host for _, host in endpoints if host}
+    print(f"Collected {len(distinct_hosts)} distinct hosts from {len(source_lines)} lines.")
+    prewarm_dns(sorted(distinct_hosts))
+
     stats: dict[str, Any] = {
         "source_entries": len(source_lines),
         "upstream_entries": len(upstream_lines),
@@ -764,8 +819,9 @@ def main() -> None:
     ip_to_records: defaultdict[str, list[int]] = defaultdict(list)
 
     with geoip2.database.Reader(MMDB_PATH) as reader:
-        for uri in source_lines:
-            scheme, host = parse_endpoint(uri)
+        # zip against the endpoints already parsed for the pre-warm, so the
+        # URI text is only parsed once per line for the whole run.
+        for uri, (scheme, host) in zip(source_lines, endpoints):
             if not scheme or not host:
                 stats["unsupported_entries"] += 1
                 continue
