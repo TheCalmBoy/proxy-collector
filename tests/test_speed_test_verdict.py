@@ -47,8 +47,8 @@ class SpeedTestVerdict(unittest.TestCase):
         )
 
     def test_fast_transfer_is_accepted(self):
-        # 5 MB in 10s of transfer time = 500 KB/s, comfortably over the floor.
-        stdout = b"\n__SPEED_METRICS__5000000 1.0 11.0"
+        # 5 MB in 2.5s of transfer time = 2.0 MB/s, over the 1.0 MB/s floor.
+        stdout = b"\n__SPEED_METRICS__5000000 1.0 3.5"
 
         async def scenario():
             with _patched_process(stdout), self._ok_egress():
@@ -64,8 +64,9 @@ class SpeedTestVerdict(unittest.TestCase):
         self.assertIsNotNone(result["download_mb_s"])
 
     def test_slow_transfer_is_rejected_with_threshold_reason(self):
-        # 5 MB in 200s = 25 KB/s, under the 100 KB/s floor.
-        stdout = b"\n__SPEED_METRICS__5000000 1.0 201.0"
+        # 5 MB in 20s = 250 KB/s: fast enough to finish, under the 1.0 MB/s
+        # floor, and the reason must name the threshold rather than a timeout.
+        stdout = b"\n__SPEED_METRICS__5000000 1.0 21.0"
 
         async def scenario():
             with _patched_process(stdout), self._ok_egress():
@@ -77,6 +78,26 @@ class SpeedTestVerdict(unittest.TestCase):
         result = asyncio.run(scenario())
         self.assertFalse(result["speed_ok"])
         self.assertEqual(result["error"], "speed_below_threshold")
+
+    def test_threshold_and_timeout_are_the_measured_values(self):
+        """Pins Stage 3's tuned numbers so a revert cannot pass unnoticed.
+
+        Both were set from a measured GitHub-runner distribution (min 0.402 /
+        p10 2.574 / median 2.820 MB/s across 59 published configs), not guessed.
+        Each stays env-tunable, so a bad night is a re-run, not a code change.
+        """
+        self.assertEqual(verify.MIN_SPEED_MB_S, 1.0)
+        self.assertEqual(verify.SPEED_MAX_TIME, 30)
+        self.assertEqual(verify.SPEED_TEST_BYTES, 5_000_000)
+
+    def test_threshold_is_env_tunable_for_revert(self):
+        with mock.patch.dict(os.environ, {"VERIFY_MIN_SPEED_MB_S": "0.100"}):
+            import importlib
+            reloaded = importlib.reload(verify)
+            try:
+                self.assertEqual(reloaded.MIN_SPEED_MB_S, 0.100)
+            finally:
+                importlib.reload(verify)
 
     def test_missing_metrics_are_rejected_not_raised(self):
         """curl dying before write-out must yield a verdict, not an exception."""

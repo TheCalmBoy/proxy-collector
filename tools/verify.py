@@ -3,7 +3,7 @@
 Phase 1 Verification: Tiered proxy validation
 - Tier 1: TCP sanity check (1.5s)
 - Tier 2: 20 SOCKS CONNECT + 20 HTTPS GET requests (>=90% pass each)
-- Tier 3: 5 MB speed test via Worker (>=75 KB/s)
+- Tier 3: 5 MB speed test via Cloudflare CDN (>=1.0 MB/s, 30s cap)
 Outputs: enriched-configs.json
 """
 
@@ -79,7 +79,21 @@ SPEED_TEST_BYTES = 5_000_000
 # quarter of a megabit for 25s to pass, and anything that cannot is not going
 # to be useful to a subscriber. Left env-tunable so the threshold can be
 # measured against real yield rather than assumed to be free.
-MIN_SPEED_MB_S = float(os.getenv("VERIFY_MIN_SPEED_MB_S", "0.100"))
+# Raised from 0.100 MB/s after measuring the real published distribution on a
+# GitHub runner: 59 published configs came back at min 0.402 / p10 2.574 /
+# median 2.820 / max 18.936 MB/s. The 0.100 bar was clearing 100% of that
+# pool, so it was filtering nothing at all. At 1.0 MB/s the same pool keeps
+# 58/59 (98.3%): it costs one genuinely marginal config and rejects everything
+# a subscriber would actually notice is slow. Stays env-tunable so a bad night
+# is undone by re-running with the old value.
+MIN_SPEED_MB_S = float(os.getenv("VERIFY_MIN_SPEED_MB_S", "1.0"))
+# Cut from 50s. A stalled config used to burn the entire ceiling, but the
+# ceiling is only reachable by configs that are already below the floor: 5 MB
+# at 1.0 MB/s is 5s of transfer, so anything slower than 0.2 MB/s cannot
+# finish inside 30s and would be rejected by MIN_SPEED_MB_S on the merits
+# anyway. Per-stall wall time drops 50s -> 30s. The excluded time_starttransfer
+# means a slow handshake does not eat this budget.
+SPEED_MAX_TIME = int(os.getenv("VERIFY_MAX_TIME", "30"))
 TCP_TIMEOUT = 1.5
 # Stage 4 does a full TLS handshake plus an HTTP round trip through the
 # proxy, which is far more work than the bare TCP connect Stage 1 performs.
@@ -929,7 +943,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "show-error",
         "fail",
         "connect-timeout = 10",
-        "max-time = 50",
+        f"max-time = {SPEED_MAX_TIME}",
         'output = "/dev/null"',
         'write-out = "\\n__SPEED_METRICS__%{size_download} %{time_starttransfer} %{time_total}"',
     ]
