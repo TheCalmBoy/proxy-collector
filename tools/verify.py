@@ -87,7 +87,13 @@ TCP_MIN_SUCCESS_RATE = 0.95
 HTTPS_MIN_SUCCESS_RATE = 0.90
 # UDP never rejects; it only sets the supports_udp flag at this rate.
 UDP_MIN_SUCCESS_RATE = 0.50
-SPEED_CONCURRENCY = max(1, int(os.getenv("VERIFY_SPEED_CONCURRENCY", "400")))
+# 400-way contention was the single largest source of lost yield: Stage 3
+# measured 172/998 passing at 400 versus 454/904 at 40, because 400 simultaneous
+# 5 MB transfers queue behind each other on one runner and the wall-clock cost
+# of that queueing eats the 100 KB/s budget. The stage went from 74s to 130s and
+# returned 2.6x the configs. Keep this well under the point where throughput,
+# not the runner, is the constraint; raise it only with measured evidence.
+SPEED_CONCURRENCY = max(1, int(os.getenv("VERIFY_SPEED_CONCURRENCY", "40")))
 HTTPS_TEST_URL = os.getenv(
     "VERIFY_HTTPS_URL", "https://www.gstatic.com/generate_204"
 )
@@ -1264,6 +1270,18 @@ async def main() -> int:
             f"Stage 3 passed: {len(speed_survivors)}/{len(tcp_survivors)} "
             f"(>={MIN_SPEED_MB_S * 1000:.0f} KB/s)"
         )
+        # Stage 3 is the largest filter in the pipeline, so its failure modes
+        # are the ones worth knowing about. Without this tally the log shows a
+        # bare pass count and a genuinely slow exit is indistinguishable from
+        # one whose egress lookup failed: both just vanish.
+        speed_reasons: dict[str, int] = {}
+        for r in tcp_survivors:
+            reason = speed_by_id[r["id"]].get("error") or "unknown"
+            speed_reasons[reason] = speed_reasons.get(reason, 0) + 1
+        if sum(speed_reasons.values()):
+            print("Stage 3: why download failed:")
+            for reason, count in sorted(speed_reasons.items(), key=lambda kv: -kv[1]):
+                print(f"  {count:>6}  {reason}")
         if not speed_survivors:
             print("No configs passed the download test", file=sys.stderr)
             return 1

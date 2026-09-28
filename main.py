@@ -18,10 +18,24 @@ import geoip2.database
 import requests
 
 
-SOURCE_URL = os.getenv(
-    "SOURCE_URL",
+# Multiple upstreams, not one. A single repo is a single point of failure:
+# it rotates, throttles, or changes shape and the whole pipeline loses volume
+# with no signal that anything went wrong. Measured overlap against the original
+# source is small, so the union is close to additive rather than duplicated.
+#   0xRadikal  1662 unique  (baseline)
+#   Epodonios  5343 unique  448 shared -> 4895 new
+# Order matters only for attribution; dedup by endpoint happens downstream.
+DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
 )
+# Comma-separated override. A single URL still works.
+SOURCE_URLS = tuple(
+    url.strip()
+    for url in os.getenv("SOURCE_URLS", ",".join(DEFAULT_SOURCE_URLS)).split(",")
+    if url.strip()
+) or DEFAULT_SOURCE_URLS
+SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URLS[0])
 IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
 MMDB_PATH = os.getenv("MMDB_PATH", "GeoLite2-Country.mmdb")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
@@ -154,21 +168,35 @@ def resolve_host(host: str) -> str | None:
 
 
 def fetch_source_configs(session: requests.Session) -> list[str]:
-    print(f"Fetching source configs from: {SOURCE_URL}")
-    response = session.get(SOURCE_URL, timeout=HTTP_TIMEOUT)
-    response.raise_for_status()
+    """Union every configured upstream.
 
+    A source that fails must not take the run down: the others still carry
+    volume, and losing one repo is exactly the silent shrinkage this replaces.
+    Per-source counts are printed so a drop is visible in the log rather than
+    inferred from a smaller total.
+    """
     lines: list[str] = []
     seen: set[str] = set()
-    for raw_line in response.text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    for url in SOURCE_URLS:
+        try:
+            response = session.get(url, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+        except requests.RequestException as error:
+            print(f"Source unavailable, skipping: {url} ({error})")
             continue
-        if line in seen:
-            continue
-        seen.add(line)
-        lines.append(line)
 
+        added = 0
+        for raw_line in response.text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+            added += 1
+        print(f"  {added:>6} new  {url}")
+
+    if not lines:
+        raise RuntimeError("No upstream source returned any configs")
     return lines
 
 
