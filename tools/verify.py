@@ -1373,6 +1373,29 @@ async def main() -> int:
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         output_path = OUTPUT / "enriched-configs.json"
+        # Join key for per-source survival. Absent when verifying a feed directly
+        # rather than the collector's output/all.txt; every survivor then counts
+        # as "unattributed" rather than the run crashing.
+        source_map: dict[str, str] = {}
+        source_map_path = OUTPUT / "source_map.json"
+        if source_map_path.exists():
+            try:
+                source_map = json.loads(source_map_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                source_map = {}
+        # Per-source FINAL survival, not the collector's pre-verification candidate
+        # counts. The collector's per_source.published is a synonym for "candidate":
+        # both counters increment over the same dedup pass, so they are always equal
+        # and overlap is always 0. Only counting survivors here -- joined back to the
+        # base URI -- is what actually answers "does this source earn its place".
+        per_source: dict[str, dict[str, int]] = {}
+        for survivor in survivors:
+            label = source_map.get(survivor["uri"].split("#", 1)[0], "unattributed")
+            entry = per_source.setdefault(label, {"candidates": 0, "survived": 0})
+            entry["survived"] += 1
+        for base, label in source_map.items():
+            per_source.setdefault(label, {"candidates": 0, "survived": 0})["candidates"] += 1
+
         output_path.write_text(json.dumps({
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "configs": survivors,
@@ -1383,6 +1406,7 @@ async def main() -> int:
                 "udp_capable": udp_yes,
                 "stage3_download_passed": len(speed_survivors),
                 "stage4_https_passed": len(survivors),
+                "per_source": per_source,
             }
         }, indent=2))
         _mark(f"Done. Enriched configs: {len(survivors)}")

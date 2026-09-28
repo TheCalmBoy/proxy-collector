@@ -719,6 +719,23 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
         },
     }
 
+    # A sidecar map from base URI -> source label. output/all.txt stays plain URIs
+    # on purpose: the Worker reads the '#' fragment as display metadata, so the
+    # source cannot ride along in the URI itself. Without this map, the collector
+    # can only ever report per_source counts for PRE-verification candidates, and
+    # the per-source "published" number is a synonym for "candidate" -- it cannot
+    # tell a source that contributes unique survivors from one that is a subset of
+    # a feed already in the list.
+    (OUTPUT_DIR / "source_map.json").write_text(
+        json.dumps(
+            {record["uri"].split("#", 1)[0]: record.get("source", "unknown") for record in records},
+            indent=0,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     (OUTPUT_DIR / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
