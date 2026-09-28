@@ -18,23 +18,23 @@ import geoip2.database
 import requests
 
 
-# Multiple upstreams, not one. A single repo is a single point of failure:
-# it rotates, throttles, or changes shape and the whole pipeline loses volume
-# with no signal that anything went wrong.
+# One upstream, and that is a measured decision rather than a default.
 #
-# These two are NOT independent pools. 0xRadikal's state.json already lists
-# Epodonios as one of its own inputs, and the two share 559 endpoints. Adding
-# Epodonios anyway is deliberate: we consume only 0xRadikal's *verified* output,
-# so whatever its pipeline filtered out never reaches us. Measured against
-# endpoint keys (server:port), not line counts:
+# A second source (Epodonios/v2ray-configs) was tried and removed. Measured at
+# fixed concurrency, same gates, same thresholds:
+#   0xRadikal only   1587 candidates -> 402 final
+#   + Epodonios      7027 candidates -> 365 final
+# It added 5440 candidates and produced 37 FEWER final configs. 0xRadikal's
+# verified set is already the best-filtered pool we can get; Epodonios is a
+# pre-filter feed whose extra volume is almost entirely dead endpoints, and
+# the extra TCP probing costs more than the good ones are worth.
+#
+# Endpoint counts for reference (server:port keys, not lines):
 #   0xRadikal verified  1173 endpoints
-#   Epodonios           3509 endpoints
-#   shared               559
-#   Epodonios-only      2950  <- newly reachable
-# Order matters only for attribution; dedup by endpoint happens downstream.
+#   Epodonios           3509 endpoints, 559 shared with 0xRadikal
+# Shared or not, 0xRadikal's output is the one that survives our gates.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
 )
 # Comma-separated override. A single URL still works.
 SOURCE_URLS = tuple(
