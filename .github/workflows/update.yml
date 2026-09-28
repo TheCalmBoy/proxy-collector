@@ -2,7 +2,13 @@ name: Update Proxy Database
 
 on:
   schedule:
-    - cron: "0,30 * * * *"
+    # Off-peak minutes on purpose. GitHub queues scheduled workflows and the
+    # top of the hour is the most contended slot, so "0,30 * * * *" was firing
+    # at :28, :53, :37 and then stopped entirely -- 5h+ with zero schedule runs
+    # while manual dispatches went through normally. Shifting off :00/:30
+    # should cut the queue delay. If it still stalls, the schedule is being
+    # dropped and needs a manual trigger, not a tighter cron.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       verify_limit:
