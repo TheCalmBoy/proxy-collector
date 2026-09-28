@@ -1279,12 +1279,22 @@ async def main() -> int:
         # are the ones worth knowing about. Without this tally the log shows a
         # bare pass count and a genuinely slow exit is indistinguishable from
         # one whose egress lookup failed: both just vanish.
+        # Count the FAILURES, not every candidate. Iterating tcp_survivors here
+        # put the 367 configs that downloaded fine into the "unknown" bucket
+        # (no error key at all), which made the tally read as if every success
+        # were a mystery. Failures are the ones with an error string, or that
+        # came back without speed data; anything else genuinely passed.
         speed_reasons: dict[str, int] = {}
         for r in tcp_survivors:
-            reason = speed_by_id[r["id"]].get("error") or "unknown"
+            if speed_by_id[r["id"]].get("speed_ok"):
+                continue  # a pass, not a failure
+            rec = speed_by_id[r["id"]]
+            # No error string and no speed_ok means the record came back
+            # empty: the worker never produced a verdict for this config.
+            reason = rec.get("error") or "no_speed_data"
             speed_reasons[reason] = speed_reasons.get(reason, 0) + 1
         if sum(speed_reasons.values()):
-            print("Stage 3: why download failed:")
+            print(f"Stage 3: why {sum(speed_reasons.values())} download(s) failed:")
             for reason, count in sorted(speed_reasons.items(), key=lambda kv: -kv[1]):
                 print(f"  {count:>6}  {reason}")
         if not speed_survivors:
