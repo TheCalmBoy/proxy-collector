@@ -346,6 +346,16 @@ jobs:
           # not a degraded one, so it is a hard failure.
           verify = json.loads(Path("verify-output/enriched-configs.json").read_text())
           stats = verify.get("stats", {})
+          print(f"verify stats: {json.dumps(stats, indent=2)}")
+
+          # The ip-api counters are published in manifest.json (stage of the
+          # run that produced them), NOT in enriched-configs.json's stats --
+          # that stats block only carries the four verification stage counts.
+          # Reading ip_api_success from the wrong file silently yields 0, which
+          # is exactly what made this guard kill run 36449477436 even though
+          # the pool had just fixed the problem (ip_api_success: 9438).
+          manifest = json.loads(Path("output/manifest.json").read_text())
+          stats = manifest.get("stats", manifest)
           ok = stats.get("ip_api_success", 0)
           failed = stats.get("ip_api_failed", 0)
           print(f"ip_api_success={ok} ip_api_failed={failed}")
