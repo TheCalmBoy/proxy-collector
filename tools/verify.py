@@ -40,6 +40,18 @@ WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
+
+
+def _sibling_source_map() -> Path | None:
+    """Locate the collector's source_map.json relative to the input, or None.
+
+    The collector writes it into its own output dir; this tool writes elsewhere.
+    Resolving it from SOURCE_URL keeps the two halves joined without an extra
+    env var that the workflow would have to keep in sync.
+    """
+    if SOURCE_URL.startswith("file://"):
+        return Path(SOURCE_URL[len("file://"):]).parent / "source_map.json"
+    return None
 TCP_CONCURRENCY = max(1, int(os.getenv("VERIFY_TCP_CONCURRENCY", "750")))
 HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "100")))
 # sing-box 1.14 rejects any other value, and the whole process refuses to
@@ -1373,12 +1385,16 @@ async def main() -> int:
 
         OUTPUT.mkdir(parents=True, exist_ok=True)
         output_path = OUTPUT / "enriched-configs.json"
-        # Join key for per-source survival. Absent when verifying a feed directly
-        # rather than the collector's output/all.txt; every survivor then counts
-        # as "unattributed" rather than the run crashing.
+        # Join key for per-source survival. It is looked for BESIDE THE INPUT,
+        # not under OUTPUT: the collector writes output/source_map.json while
+        # this tool's OUTPUT is verify-output/, so OUTPUT/"source_map.json" is
+        # always absent and every survivor would silently become
+        # "unattributed". For a file:// SOURCE_URL that sibling is the
+        # collector's real output dir; for an http feed there is no sidecar and
+        # attribution is correctly unknown rather than fabricated.
         source_map: dict[str, str] = {}
-        source_map_path = OUTPUT / "source_map.json"
-        if source_map_path.exists():
+        source_map_path = _sibling_source_map()
+        if source_map_path is not None and source_map_path.exists():
             try:
                 source_map = json.loads(source_map_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):

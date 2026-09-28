@@ -147,6 +147,35 @@ class TestPerSourceSurvival(unittest.TestCase):
             "the pre-verification column is named 'published' again",
         )
 
+    def test_sibling_map_resolves_beside_a_file_url_input(self):
+        """The join must not look under verify.py's own OUTPUT.
+
+        The collector writes output/source_map.json; verify.py's OUTPUT is
+        verify-output/. Reading OUTPUT/"source_map.json" always misses, so
+        every survivor silently becomes "unattributed" and the table looks
+        empty rather than wrong.
+        """
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "all.txt"
+            input_path.write_text("vmess://a\n")
+            (Path(tmp) / "source_map.json").write_text('{"vmess://a": "feedA"}')
+            with mock.patch.object(verify, "SOURCE_URL", f"file://{input_path}"):
+                found = verify._sibling_source_map()
+            self.assertIsNotNone(found)
+            self.assertEqual(found, Path(tmp) / "source_map.json")
+            self.assertTrue(found.exists())
+            self.assertNotEqual(found.parent, verify.OUTPUT)
+
+    def test_sibling_map_is_none_for_a_remote_feed(self):
+        """No sidecar for an http feed: attribution unknown, not invented."""
+        from unittest import mock
+
+        with mock.patch.object(verify, "SOURCE_URL", "https://example.com/c.txt"):
+            self.assertIsNone(verify._sibling_source_map())
+
     def test_verify_main_writes_per_source_into_stats(self):
         import inspect
 
