@@ -264,7 +264,12 @@ jobs:
           # it on the verification step only meant the override was silently
           # ignored and the collector fetched every default source regardless.
           SOURCE_URLS: ${{ inputs.source_urls }}
-        run: python main.py
+          # The collector step printed nothing for 858s and then dumped its whole
+          # summary at once: python main.py buffers stdout when stdout is not a
+          # TTY, and the step did not unbuffer it. So the 14.3 min collector step
+          # was one opaque block and its per-stage cost was unknowable.
+          PYTHONUNBUFFERED: '1'
+        run: python -u main.py
 
       - name: Run verification (TCP/UDP/download/HTTPS)
         shell: bash
@@ -274,9 +279,16 @@ jobs:
           VERIFY_TCP_CONCURRENCY: ${{ inputs.verify_tcp_concurrency || '750' }}
           VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
           VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '40' }}
-          SOURCE_URLS: ${{ inputs.source_urls }}
-          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '0.100' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
+          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '0.100' }}
+          # verify.py reads a SINGLE SOURCE_URL, and the workflow left it empty,
+          # so it fell back to its own default (0xRadikal, ~930 lines) and
+          # re-verified that instead of the corpus main.py had just built. The
+          # collector wrote 10,577 annotated configs to output/all.txt and the
+          # verification stage never saw one of them -- which is why every
+          # "four source" number so far described collection, not output. Point
+          # it at the collector's own product so the new sources are tested.
+          SOURCE_URL: file://${{ github.workspace }}/output/all.txt
           VERIFY_UDP_TIMEOUT: ${{ inputs.verify_udp_timeout || '6.0' }}
           VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
           VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
