@@ -60,6 +60,10 @@ IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
 # identical (ip-api reports the queried IP's country, not the caller's) while
 # spreading the quota across egress addresses.
 IP_API_PROXY_URL = os.getenv("IP_API_PROXY_URL", "").strip()
+# Clash-API base of the sing-box pool sidecar (see tools/ipapi_proxy_pool.py).
+# When set, each ip-api request is preceded by a switch to the next member so
+# the calls spread across egress addresses instead of one.
+IP_API_PROXY_POOL = os.getenv("IP_API_PROXY_POOL", "").strip()
 MMDB_PATH = os.getenv("MMDB_PATH", "GeoLite2-Country.mmdb")
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "output"))
 IP_API_BATCH_SIZE = 100
@@ -313,7 +317,56 @@ def build_ip_api_session(base: requests.Session) -> requests.Session:
         }
     )
     print(f"  ip-api lookups routed via proxy {parsed.scheme}://{parsed.hostname}:{parsed.port or ''}")
+
+    if IP_API_PROXY_POOL:
+        _attach_pool_rotation(session, IP_API_PROXY_POOL)
     return session
+
+
+def _attach_pool_rotation(
+    session: requests.Session,
+    api_url: str,
+) -> None:
+    """Rotate the sidecar's selected member before each ip-api request.
+
+    The sidecar's pool is a sing-box `selector`, which holds one member until
+    something switches it. Rotating here is what makes the calls leave via
+    different egress addresses instead of one; without it the free-tier quota
+    is still spent by a single caller.
+    """
+    base = api_url.rstrip("/")
+    # The control plane must stay direct: routing sing-box's own Clash API
+    # through the proxy it is switching would ask it to proxy a request that
+    # tells it which proxy to use.
+    control = requests.Session()
+    try:
+        listing = control.get(f"{base}/proxies/pool", timeout=HTTP_TIMEOUT)
+        members = listing.json().get("all", [])
+    except Exception as exc:
+        print(f"  pool rotation disabled: {exc}")
+        return
+    if len(members) < 2:
+        print("  pool rotation needs at least 2 members; disabled")
+        return
+
+    state = {"i": 0}
+    original_post = session.post
+
+    def rotating_post(*args: object, **kwargs: object):
+        member = members[state["i"] % len(members)]
+        state["i"] += 1
+        try:
+            control.put(
+                f"{base}/proxies/pool",
+                json={"name": member},
+                timeout=HTTP_TIMEOUT,
+            )
+        except Exception:
+            pass
+        return original_post(*args, **kwargs)
+
+    session.post = rotating_post  # type: ignore[method-assign]
+    print(f"  round-robin across {len(members)} pool members via {base}")
 
 
 def query_ip_api(

@@ -1,2 +1,6 @@
 requests>=2.32,<3
 geoip2>=5,<6
+# requests only speaks SOCKS through PySocks. Without it a socks5:// proxy URL
+# fails with "Invalid schema" at adapter setup, so the ip-api pool sidecar
+# would be unusable in CI even though the config is valid.
+PySocks>=1.7,<2
