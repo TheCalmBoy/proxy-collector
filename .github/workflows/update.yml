@@ -18,11 +18,11 @@ on:
         required: false
         default: "100"
       verify_speed_concurrency:
-        description: "Concurrent 5MB download tests. 400 starved the speed budget and lost ~60% of survivors; 40 measured 2.6x higher yield. Raise only with evidence."
+        description: "Concurrent 5MB download tests. Default 40 is provisional, NOT a measured optimum: the runs behind it all had carry-over on and are not comparable. A clean carry_over=false sweep is in progress."
         required: false
         default: "40"
       source_urls:
-        description: "Comma-separated upstream config URLs. Empty = default (0xRadikal + Epodonios). Set to the 0xRadikal URL alone to A/B the second source."
+        description: "Comma-separated upstream config URLs. Empty = default (0xRadikal verified only). Epodonios was A/B'd and removed: 5440 extra candidates yielded 37 FEWER final configs."
         required: false
         default: ""
       carry_over:
