@@ -2,12 +2,16 @@ name: Update Proxy Database
 
 on:
   schedule:
-    # Off-peak minutes on purpose. GitHub queues scheduled workflows and the
-    # top of the hour is the most contended slot, so "0,30 * * * *" was firing
-    # at :28, :53, :37 and then stopped entirely -- 5h+ with zero schedule runs
-    # while manual dispatches went through normally. Shifting off :00/:30
-    # should cut the queue delay. If it still stalls, the schedule is being
-    # dropped and needs a manual trigger, not a tighter cron.
+    # UNRELIABLE as of 2026-09-28 -- do not trust this trigger.
+    # Last successful schedule run: 01:28:47Z. Zero schedule events for the
+    # 8h+ that followed, across TWO different crons:
+    #   "0,30 * * * *"  -> silent from 01:30Z
+    #   "7,37 * * * *"  -> silent through 07:37, 08:07, 08:37, 09:07, 09:37
+    # Moving off the contended :00/:30 slots did NOT help, so the queue-delay
+    # theory is falsified as a cause. workflow_dispatch works fine throughout,
+    # the workflow is active, and the cron expressions are valid.
+    # Use workflow_dispatch until this is understood -- do not assume a
+    # scheduled run happened just because the cron is well-formed.
     - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
