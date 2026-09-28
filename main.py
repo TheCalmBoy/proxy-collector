@@ -731,8 +731,17 @@ def main() -> None:
 
     # Every carry-over config must be probed again this run. A stale good result
     # is worse than none: it would publish a proxy that no longer works.
+    #
+    # Report the union, not a difference. len(source_lines) - len(upstream_lines)
+    # is NEGATIVE whenever carry-over lines are all already present upstream,
+    # which is the normal case once a feed is republished -- so this printed
+    # "Carry-over added -5835 configs" and hid the fact that upstream had
+    # simply grown. The number that matters is how many bases came only from
+    # carry-over, which is the size of the carry-over label.
+    carryover_only = sum(1 for label in base_sources.values() if label == CARRYOVER_LABEL)
     print(
-        f"Carry-over added {len(source_lines) - len(upstream_lines)} configs; "
+        f"Union: {len(source_lines)} configs "
+        f"({len(upstream_lines)} upstream, {carryover_only} contributed only by carry-over); "
         f"all {len(source_lines)} will be re-verified from scratch."
     )
 
