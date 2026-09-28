@@ -89,9 +89,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("verified", help="file of Phase 2 survivor URIs")
     ap.add_argument("out", help="sing-box config to write")
-    ap.add_argument("--count", type=int, default=8)
+    ap.add_argument(
+        "--count",
+        type=int,
+        default=8,
+        help="pool size; 0 disables the pool and writes no config",
+    )
     ap.add_argument("--port", type=int, default=11080)
     args = ap.parse_args()
+
+    # "0 disables the pool" is a real switch, not a request for a 1-member
+    # pool: writing a config here would make the workflow start a sidecar that
+    # is supposed to be off.
+    if args.count <= 0:
+        print("pool disabled (--count 0); no config written")
+        return 0
 
     pool: list[dict] = []
     seen: set[str] = set()

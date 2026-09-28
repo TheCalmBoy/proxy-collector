@@ -44,6 +44,10 @@ on:
         description: "Stage 3 minimum download speed in MB/s (0.100 = 100 KB/s). Raise to trade yield for usable bandwidth; measure before changing."
         required: false
         default: "0.100"
+      ipapi_pool_size:
+        description: "How many verified configs to use as ip-api egress proxies. 0 disables the pool and runs lookups direct."
+        required: false
+        default: "12"
       debug_https:
         description: "Print HTTPS handshake failures"
         type: boolean
@@ -143,8 +147,79 @@ jobs:
         # because "tls" was emitted as a bool.
         run: python run_tests.py
 
+      - name: Build ip-api proxy pool
+        shell: bash
+        env:
+          POOL_SOURCE: https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt
+          POOL_COUNT: ${{ inputs.ipapi_pool_size || '12' }}
+        run: |
+          set -euo pipefail
+
+          # ip-api's free tier is per-caller-address, so a single runner
+          # resolving a 16k-config corpus gets rate limited and every lookup in
+          # the batch comes back UNKNOWN -- which silently zeroes the country
+          # field on the whole health index and 503s the worker.
+          #
+          # The pool is built from our own last published set, which is the
+          # only list of configs known to have passed the TCP+UDP gates. It is
+          # deliberately NOT this run's output: the pool has to exist before
+          # the collector runs, and stale-but-recent is fine for spreading
+          # quota across egress addresses.
+          #
+          # Failure here is not fatal. A dead pool just means the rate limit
+          # comes back, which is the behaviour we had before this step existed.
+          pool="output/ipapi_pool.txt"
+          if curl --fail --location --silent --show-error --connect-timeout 20 \
+               "${POOL_SOURCE}" -o "${pool}"; then
+            echo "Pool source fetched: $(wc -l < "${pool}") lines"
+          else
+            echo "Could not fetch pool source; continuing without a proxy pool."
+            exit 0
+          fi
+
+          python tools/ipapi_proxy_pool.py "${pool}" output/ipapi_pool.json \
+            --count "${POOL_COUNT}"
+
+          # Fail loudly if the generated config is unusable, otherwise the
+          # sidecar below dies silently and every lookup goes direct.
+          sing-box check -c output/ipapi_pool.json
+
+      - name: Start ip-api proxy pool sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f output/ipapi_pool.json ]; then
+            echo "No pool config; ip-api lookups will run direct."
+            exit 0
+          fi
+
+          sing-box run -c output/ipapi_pool.json \
+            > /tmp/pool.log 2>&1 &
+          echo "$!" > /tmp/pool.pid
+
+          # Readiness by actual connection, not a sleep: a fixed wait passes
+          # silently when the sidecar failed to start and the run then looks
+          # healthy while every lookup is still rate limited.
+          for _ in $(seq 1 20); do
+            if curl --silent --max-time 3 --proxy socks5h://127.0.0.1:11080 \
+                 http://ip-api.com/json/ -o /dev/null; then
+              echo "ip-api pool sidecar is up."
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "warning: pool sidecar did not become ready; log follows"
+          tail -5 /tmp/pool.log || true
+
       - name: Run collector
         env:
+          # The sidecar from the previous step, and the Clash API the collector
+          # PUTs to in order to advance the selector. Both are no-ops when the
+          # pool could not be built, which is why main.py treats them as opt-in.
+          IP_API_PROXY_URL: socks5://127.0.0.1:11080
+          IP_API_PROXY_POOL: http://127.0.0.1:11082
           # Re-seed from our own last published set. Upstream rotates, and a
           # failed probe is not proof a proxy died, so without this a config
           # that passed every gate can vanish from the feed for good.
@@ -195,6 +270,18 @@ jobs:
             cp /tmp/egress-health.json output/egress-health.json
           else
             echo "No published egress health index yet."
+          fi
+
+      - name: Stop ip-api proxy pool sidecar
+        if: always()
+        shell: bash
+        run: |
+          # Runs even when the collector failed: a leaked sing-box keeps
+          # sockets and the Clash API port open for the rest of the job, and
+          # the next step would otherwise probe a sidecar nobody is using.
+          if [ -f /tmp/pool.pid ]; then
+            kill "$(cat /tmp/pool.pid)" 2>/dev/null || true
+            echo "stopped pool sidecar"
           fi
 
       - name: Show generated summary
