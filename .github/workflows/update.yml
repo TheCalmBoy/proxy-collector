@@ -25,6 +25,11 @@ on:
         description: "Comma-separated upstream config URLs. Empty = default (0xRadikal + Epodonios). Set to the 0xRadikal URL alone to A/B the second source."
         required: false
         default: ""
+      carry_over:
+        description: "Re-seed from our own last verified output. Turn OFF for a controlled A/B: consecutive runs otherwise inherit each other's winners, so arm N contains arm N-1's survivors and the comparison is meaningless."
+        type: boolean
+        required: false
+        default: true
       min_speed_mb_s:
         description: "Stage 3 minimum download speed in MB/s (0.100 = 100 KB/s). Raise to trade yield for usable bandwidth; measure before changing."
         required: false
@@ -133,7 +138,7 @@ jobs:
           # Re-seed from our own last published set. Upstream rotates, and a
           # failed probe is not proof a proxy died, so without this a config
           # that passed every gate can vanish from the feed for good.
-          PREVIOUS_VERIFIED_URL: https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt
+          PREVIOUS_VERIFIED_URL: ${{ inputs.carry_over == false && '' || 'https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt' }}
           # main.py is what reads SOURCE_URLS, and it runs in this step. Setting
           # it on the verification step only meant the override was silently
           # ignored and the collector fetched every default source regardless.
