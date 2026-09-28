@@ -167,8 +167,34 @@ def is_public_ip(value: str) -> bool:
         return False
 
 
+_DNS_CACHE: dict[str, str | None] = {}
+
+
 def resolve_host(host: str) -> str | None:
-    """Resolve a hostname and return one public address, preferring IPv4."""
+    """Resolve a hostname and return one public address, preferring IPv4.
+
+    Memoized, and that is the whole point of it. The four upstream feeds
+    republish the same few thousand hosts, so a 10.6k-config corpus contains
+    far fewer distinct names than configs -- but the caller looped over every
+    config and paid a blocking getaddrinfo each time. Run 36455487959 spent
+    632s of its 22.8 min between "Loaded 16652 unique config lines" and
+    "Parsed 10533 entries"; the ip-api pool and the sources were both fast.
+    A cache turns that into one lookup per DISTINCT host.
+
+    lru_cache would work but is not used deliberately: callers pass untrusted
+    upstream strings, and a bounded cache on an unbounded key space is a
+    memory-growth vector on a hostile feed. This dict is bounded the same way
+    the input is -- it dies with the process.
+    """
+    if host in _DNS_CACHE:
+        return _DNS_CACHE[host]
+
+    resolved = _resolve_host_uncached(host)
+    _DNS_CACHE[host] = resolved
+    return resolved
+
+
+def _resolve_host_uncached(host: str) -> str | None:
     try:
         ipaddress.ip_address(host)
         return host if is_public_ip(host) else None
