@@ -97,6 +97,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # Gate the publish on the suite. test.yml also runs these on every push,
+      # but that is a separate workflow: without this step a failing commit
+      # still reaches the feed, because nothing here depends on that job.
+      # The suite is ~5s and touches no network, so it costs nothing next to
+      # the verification this job already does.
+      - name: Run test suite
+        run: python -m unittest discover -s tests
+
       - name: Install sing-box
         shell: bash
         run: |
