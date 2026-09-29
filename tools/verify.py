@@ -1149,8 +1149,23 @@ async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     await asyncio.sleep(3)  # startup time
     if proc.returncode is not None:
         stdout, stderr = await proc.communicate()
+        # Print BOTH streams. A startup failure that only writes to stdout
+        # previously surfaced as "exit 1" with an empty message, which cost a
+        # full diagnosis cycle on run 36506931445.
         print(f"sing-box failed to start (exit {proc.returncode}):", file=sys.stderr)
-        print(stderr.decode()[-2000:], file=sys.stderr)
+        if stdout.strip():
+            print("--- stdout ---", file=sys.stderr)
+            print(stdout.decode()[-2000:], file=sys.stderr)
+        if stderr.strip():
+            print("--- stderr ---", file=sys.stderr)
+            print(stderr.decode()[-2000:], file=sys.stderr)
+        if not stdout.strip() and not stderr.strip():
+            print(
+                "both streams empty: sing-box died before its logger opened. "
+                "Usually a process/socket resource limit at this config count, "
+                "not a malformed config (that would fail the check above).",
+                file=sys.stderr,
+            )
         raise RuntimeError(f"sing-box exited with code {proc.returncode}")
     return proc
 
