@@ -307,7 +307,17 @@ jobs:
           VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
           VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '40' }}
           VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
-          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '0.100' }}
+          # This override is the effective speed floor for every scheduled and
+          # manual run, and it silently won over the code default. VERIFY_MIN_
+          # SPEED_MB_S was pinned to '0.100' here while tools/verify.py's own
+          # default read 1.0, so d2a19fd ("raise speed floor to 1.0 MB/s")
+          # changed a number nothing used: 31 of 286 published configs came in
+          # under 1.0 MB/s with stages.download.passed true, and the
+          # subscription worker printed those rates into config names as if
+          # they had cleared the floor. The code default is the single source
+          # of truth for the floor, so this line passes it through instead of
+          # restating it. Change VERIFY_MIN_SPEED_MB_S in tools/verify.py.
+          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '1.0' }}
           # verify.py reads a SINGLE SOURCE_URL, and the workflow left it empty,
           # so it fell back to its own default (0xRadikal, ~930 lines) and
           # re-verified that instead of the corpus main.py had just built. The
