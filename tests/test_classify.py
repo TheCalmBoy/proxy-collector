@@ -7,8 +7,31 @@ its first branch and returned UNKNOWN 978 times out of 978.
 """
 
 import importlib.util
+import sys
+import types
 import unittest
 from pathlib import Path
+
+# main.py imports geoip2 at module scope, so the suite cannot even load
+# without it. classify() under test never touches the geoip2 database, and CI
+# has the real package installed, so stubbing it here is what lets a local run
+# exercise the other 140 tests instead of dying at import with a single
+# collection error that hides the real result.
+if "geoip2" not in sys.modules:
+    # find_spec returns None for a missing top-level module; it does not raise.
+    # Testing the return value (not catching) is what actually catches the case.
+    spec_found = None
+    try:
+        spec_found = importlib.util.find_spec("geoip2")
+    except (ImportError, ValueError):
+        pass
+    if spec_found is None:
+        stub = types.ModuleType("geoip2")
+        database = types.ModuleType("geoip2.database")
+        database.Reader = object
+        stub.database = database
+        sys.modules["geoip2"] = stub
+        sys.modules["geoip2.database"] = database
 
 _SPEC = importlib.util.spec_from_file_location(
     "collector_main", Path(__file__).resolve().parents[1] / "main.py"

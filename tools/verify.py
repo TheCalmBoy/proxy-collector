@@ -111,6 +111,42 @@ PACKET_TEST_COUNT = 20
 # 12-config set, so the budget, not the proxies, was the variable.
 UDP_TEST_TIMEOUT = float(os.getenv("VERIFY_UDP_TIMEOUT", "6.0"))
 PACKET_TEST_ROUND_DELAY = float(os.getenv("VERIFY_ROUND_DELAY", "0.5"))
+# How many candidates a feed must supply before a zero-survivor result counts
+# as "this feed is dead weight" rather than "this run was unlucky". Set above
+# the largest feed observed surviving nothing (4502) so a genuinely working
+# feed can never trip it, and low enough that a big dead feed does.
+DEAD_WEIGHT_MIN_CANDIDATES = int(os.getenv("VERIFY_DEAD_WEIGHT_MIN_CANDIDATES", "1000"))
+
+
+def _source_yield_rows(per_source: dict[str, dict[str, int]]) -> list[str]:
+    """Add a survival rate to each source and rank them worst-yield first.
+
+    A rate is what makes the table actionable: 0/4502 and 256/1326 look
+    comparable as bare counters, but one is 41% of the run spent for nothing.
+    Separated out from main() so the ranking and the dead-weight rule are
+    testable without running a 10k-config verification.
+    """
+    dead_weight: list[tuple[str, dict[str, int]]] = []
+    for label, counts in per_source.items():
+        cands = counts["candidates"]
+        counts["survival_rate"] = round(100.0 * counts["survived"] / cands, 2) if cands else 0.0
+        # Only flag a feed with real volume behind the zero. A small feed that
+        # happened to draw dead proxies this run is noise, not a verdict.
+        if counts["survived"] == 0 and cands >= DEAD_WEIGHT_MIN_CANDIDATES:
+            dead_weight.append((label, counts))
+
+    rows = [
+        f"  source yield: {counts['survival_rate']:6.2f}%  "
+        f"{counts['survived']:5d}/{counts['candidates']:<6d} {label.rsplit('/', 1)[-1][:60]}"
+        for label, counts in sorted(per_source.items(), key=lambda kv: kv[1]["survival_rate"])
+    ]
+    for label, counts in dead_weight:
+        rows.append(
+            f"WARNING: source contributed 0 survivors from {counts['candidates']} candidates "
+            f"({counts['candidates']} of them): {label}"
+        )
+    return rows
+
 PACKET_TEST_MIN_SUCCESS_RATE = 0.90
 # Stage thresholds: TCP is the entry gate at 95%, HTTPS is the exit gate at
 # the long-standing 90%.
@@ -1558,6 +1594,9 @@ async def main() -> int:
             entry["survived"] += 1
         for base, label in source_map.items():
             per_source.setdefault(label, {"candidates": 0, "survived": 0})["candidates"] += 1
+
+        for row in _source_yield_rows(per_source):
+            print(row, file=sys.stderr)
 
         output_path.write_text(json.dumps({
             "generated_at": datetime.now(timezone.utc).isoformat(),

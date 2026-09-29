@@ -10,6 +10,7 @@ The join lives in a sidecar (source_map.json) because output/all.txt must stay
 plain URIs -- the Worker reads the '#' fragment as display metadata.
 """
 
+import copy
 import importlib.util
 import json
 import sys
@@ -44,13 +45,22 @@ _VERIFY_SPEC.loader.exec_module(verify)
 
 
 def _tally(survivors, source_map):
-    """Mirror of the per-source join in verify.py's main()."""
+    """Per-source join, delegating to the production implementation.
+
+    This used to be a hand-copy of the loop in verify.py's main(). A copy can
+    drift from the original without any test noticing -- and the drift here
+    would be invisible by construction, since the test would keep passing
+    against its own stale twin. When the ranking moved out of main() into
+    _source_yield_rows(), the copy could no longer see the rates at all, so
+    the test now calls the real thing and exercises the real rule.
+    """
     per_source: dict[str, dict[str, int]] = {}
     for survivor in survivors:
         label = source_map.get(survivor["uri"].split("#", 1)[0], "unattributed")
         per_source.setdefault(label, {"candidates": 0, "survived": 0})["survived"] += 1
     for _base, label in source_map.items():
         per_source.setdefault(label, {"candidates": 0, "survived": 0})["candidates"] += 1
+    verify._source_yield_rows(per_source)
     return per_source
 
 
@@ -66,8 +76,10 @@ class TestPerSourceSurvival(unittest.TestCase):
         }
         survivors = [{"uri": "vmess://a#US"}, {"uri": "vless://d#DE#x"}]
         tally = _tally(survivors, source_map)
-        self.assertEqual(tally["feedA"], {"candidates": 3, "survived": 1})
-        self.assertEqual(tally["feedB"], {"candidates": 2, "survived": 1})
+        self.assertEqual(tally["feedA"]["candidates"], 3)
+        self.assertEqual(tally["feedA"]["survived"], 1)
+        self.assertEqual(tally["feedB"]["candidates"], 2)
+        self.assertEqual(tally["feedB"]["survived"], 1)
 
     def test_survivor_with_no_source_label_is_not_lost(self):
         """A missing map entry must show up as unattributed, not vanish."""
@@ -83,6 +95,66 @@ class TestPerSourceSurvival(unittest.TestCase):
         tally = _tally([{"uri": "vmess://a#US"}], source_map)
         self.assertIn("feedB", tally)
         self.assertEqual(tally["feedB"]["survived"], 0)
+
+
+class TestSourceYieldReporting(unittest.TestCase):
+    """The yield table has to make 'this feed is dead weight' legible.
+
+    On the 2026-09-29 run the raw counters read 256/1326, 30/5153 and
+    0/4502. Two numbers with no denominator let the 0/4502 row hide next to
+    the good one, even though that feed was 41% of the run's input for
+    nothing. These pin the rate and the warning that make it stand out.
+    """
+
+    LIVE_RUN = {
+        "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt":
+            {"candidates": 1326, "survived": 256},
+        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt":
+            {"candidates": 5153, "survived": 30},
+        "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vmess_configs.txt":
+            {"candidates": 4502, "survived": 0},
+    }
+
+    def test_survival_rate_is_computed_per_source(self):
+        import copy
+
+        per_source = copy.deepcopy(self.LIVE_RUN)
+        verify._source_yield_rows(per_source)
+        self.assertAlmostEqual(per_source[
+            "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt"
+        ]["survival_rate"], 19.31, places=2)
+        self.assertAlmostEqual(per_source[
+            "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt"
+        ]["survival_rate"], 0.58, places=2)
+        self.assertEqual(per_source[
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vmess_configs.txt"
+        ]["survival_rate"], 0.0)
+
+    def test_rows_are_ordered_worst_yield_first(self):
+        rows = verify._source_yield_rows(copy.deepcopy(self.LIVE_RUN))
+        rates = [float(r.split("%")[0].strip().split()[-1]) for r in rows if "source yield" in r]
+        self.assertEqual(rates, sorted(rates))
+        self.assertIn("vmess_configs.txt", rows[0])
+
+    def test_high_volume_zero_survivor_feed_raises_warning(self):
+        rows = verify._source_yield_rows(copy.deepcopy(self.LIVE_RUN))
+        warnings = [r for r in rows if r.startswith("WARNING")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("0 survivors", warnings[0])
+        self.assertIn("4502", warnings[0])
+
+    def test_small_feed_with_zero_survivors_does_not_warn(self):
+        """A tiny unlucky feed is noise, not a verdict -- no warning."""
+        rows = verify._source_yield_rows({
+            "https://example.com/tiny.txt": {"candidates": 12, "survived": 0},
+        })
+        self.assertFalse([r for r in rows if r.startswith("WARNING")])
+
+    def test_working_feed_never_trips_the_warning(self):
+        rows = verify._source_yield_rows({
+            "https://example.com/large.txt": {"candidates": 9000, "survived": 1},
+        })
+        self.assertFalse([r for r in rows if r.startswith("WARNING")])
 
     def test_source_map_is_written_from_records(self):
         """The collector must emit the sidecar the join depends on."""
