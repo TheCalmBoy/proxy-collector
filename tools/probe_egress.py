@@ -479,6 +479,63 @@ async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
         return {"ok": False, "error": "parse_failed"}
 
 
+# Gemini's web app gates on IP reputation, not on whether the proxy works. A
+# datacenter exit that answers /ip perfectly can still be served a CAPTCHA or a
+# 403 by gemini.google.com, which makes the node useless for anything the user
+# actually wants it for. s3diag.py already probes this for diagnostics; this is
+# the same check in the main pipeline so the answer reaches egress-health.json
+# and the worker's ranking.
+GEMINI_URL = os.getenv("GEMINI_PROBE_URL", "https://gemini.google.com/")
+
+
+async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
+    """Ask Gemini for a page through the proxy and report the raw verdict.
+
+    Returns ``ok`` only when Gemini actually served content (HTTP 2xx/3xx). A
+    403 is the interesting answer, not an error to swallow: it means the egress
+    IP is flagged. A curl timeout or a 5xx means we learned nothing and is
+    reported as ``ok: False`` with a distinct reason, so the worker can tell
+    "flagged" apart from "we did not manage to check".
+    """
+    config_lines = [
+        f'proxy = "socks5h://127.0.0.1:{proxy_port}"',
+        f'url = "{GEMINI_URL}"',
+        "silent",
+        "show-error",
+        "fail",
+        "connect-timeout = 5",
+        "max-time = 15",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        "curl", "--config", "-",
+        "--write-out", "\\n%{http_code}",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
+
+    if process.returncode != 0:
+        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+
+    try:
+        text = stdout.decode(errors="replace").strip()
+        body, _, code = text.rpartition("\n")
+        status = int(code.strip()) if code.strip().isdigit() else 0
+    except Exception:
+        return {"ok": False, "error": "parse_failed"}
+
+    if status == 0:
+        return {"ok": False, "error": "no_status"}
+    # 2xx and 3xx mean Gemini served us. 401/403/429 are the reputation gates:
+    # the exit is reachable but flagged, which is exactly what we want to know.
+    return {
+        "ok": 200 <= status < 400,
+        "flagged": status in (401, 403, 429),
+        "http_status": status,
+    }
+
+
 async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
     """Ask the Worker which IP this config egresses from.
 
@@ -538,6 +595,19 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     # correctly was recorded as a failure whenever the small response came back
     # too quickly to satisfy MIN_DOWNLOAD_MB_S.
     ok = bool(result.get("ip"))
+
+    # Ask Gemini from the same exit, on the same SOCKS port we just used. This
+    # is one extra request per config per round, and it is the only place we
+    # learn whether Google will actually serve this IP. A node we never asked
+    # gets None, never True.
+    gemini: dict[str, Any] = {}
+    if ok:
+        try:
+            gemini = await _gemini_probe(record["port"])
+        except Exception as exc:  # a failed reputation check must not drop a
+            # working config; it just leaves the flag unknown.
+            gemini = {"ok": None, "error": f"probe_exception_{type(exc).__name__}"}
+
     return {
         "ok": ok,
         "id": record["id"],
@@ -566,6 +636,13 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
             download_mb_s is not None
             and download_mb_s >= MIN_DOWNLOAD_MB_S
         ),
+        # Gemini reputation, probed through this config's own exit. None means
+        # we never managed to check (the probe timed out or the run was cut
+        # short) and must stay None: the worker treats a missing flag as
+        # "unknown", not as "clean", so an unchecked node is never credited.
+        "gemini": gemini.get("ok") if isinstance(gemini, dict) else None,
+        "gemini_flagged": gemini.get("flagged") if isinstance(gemini, dict) else None,
+        "gemini_http_status": gemini.get("http_status") if isinstance(gemini, dict) else None,
     }
 
 
@@ -578,6 +655,27 @@ async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, 
             return await _cloudflare_trace(record["port"])
 
     return await asyncio.gather(*[check_one(r) for r in records])
+
+
+def _gemini_verdict(history: list[bool | None]) -> dict[str, Any]:
+    """Roll per-round Gemini verdicts into one honest answer.
+
+    Three outcomes, kept distinct on purpose:
+      clean    - at least one round served us, and no round was flagged
+      flagged  - any round came back 401/403/429; the IP is on a reputation list
+      unknown  - we never got an answer we can act on
+
+    A config that fails the check on one round and passes on another is
+    "flagged", not "clean": a user who hits the 403 has still lost the node, and
+    averaging the two would hide exactly the case worth knowing about.
+    """
+    known = [v for v in history if v is not None]
+    if not known:
+        return {"status": "unknown", "clean": None, "flagged": None, "rounds": 0}
+    flagged = [v for v in known if v is False]
+    if flagged:
+        return {"status": "flagged", "clean": False, "flagged": True, "rounds": len(known)}
+    return {"status": "clean", "clean": True, "flagged": False, "rounds": len(known)}
 
 
 def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], fraud_scores: list[int | None], countries: list[str | None], hosting_history: list[bool | None] | None = None) -> dict[str, Any]:
@@ -759,6 +857,9 @@ async def main() -> int:
         fraud_history = {r["id"]: [] for r in records}
         country_history = {r["id"]: [] for r in records}
         hosting_history = {r["id"]: [] for r in records}
+        # Gemini verdicts, same shape as the other per-round histories. A None
+        # entry means the probe did not answer this round; it is not a pass.
+        gemini_history = {r["id"]: [] for r in records}
 
         # Include initial results
         for r in first:
@@ -769,6 +870,7 @@ async def main() -> int:
                 fraud_history[rid].append(r.get("fraud_score"))
                 country_history[rid].append(r.get("country"))
                 hosting_history[rid].append(r.get("hosting"))
+                gemini_history[rid].append(r.get("gemini"))
 
         print(f"Running {STABILITY_INTERVALS} stability checks at {STABILITY_INTERVAL_SECONDS}s intervals...")
         # Only configs that produced an IP are worth re-checking: the others
@@ -816,6 +918,7 @@ async def main() -> int:
                 fraud_history[rid].append(r.get("fraud_score"))
                 country_history[rid].append(r.get("country"))
                 hosting_history[rid].append(r.get("hosting"))
+                gemini_history[rid].append(r.get("gemini"))
 
     finally:
         core.terminate()
@@ -865,6 +968,11 @@ async def main() -> int:
             # "speed_mb_s", the worker read it as absent, and every proxy
             # looked unverified.
             "download_mb_s": round(avg_speed, 3),
+            # Gemini reputation, aggregated over every round this config was
+            # probed. status is "clean" | "flagged" | "unknown" -- three
+            # distinct answers, because "we could not check" must never be
+            # rendered as "clean" downstream.
+            "gemini": _gemini_verdict(gemini_history.get(rid, [])),
             "ip_count": len(ips),
             "unique_ips": ips,
             # Which address family this exit actually presents. A v6-only exit
