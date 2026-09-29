@@ -553,7 +553,19 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
         "connection_type": (result.get("ffraud") or {}).get("connection_type"),
         "latency_ms": latency_ms,
         "download_mb_s": download_mb_s,
-        "speed_ok": ok,
+        # ok above means "we learned the egress IP", which says nothing about
+        # throughput. Reusing it here published sub-floor numbers -- 0.204
+        # MB/s against a 1.0 MB/s Stage 3 floor -- under a key named speed_ok,
+        # and the subscription worker reads this document and prints
+        # download_mb_s as if it were a verified speed. So a config that
+        # answered but crawled got labelled with its own crawl rate.
+        # speed_ok now answers only its own question: did this record meet the
+        # minimum download rate this stage was asked to measure? It is a
+        # separate verdict, not a copy of the egress outcome.
+        "speed_ok": (
+            download_mb_s is not None
+            and download_mb_s >= MIN_DOWNLOAD_MB_S
+        ),
     }
 
 
