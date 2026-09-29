@@ -119,6 +119,16 @@ jobs:
           sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
           sing-box version
 
+      # sing-box opens one listening socket per inbound at startup. At ~6500
+      # configs that exceeds the soft fd limit on GitHub's runners and it dies
+      # at ~4085 inbounds with a bare "exit 1" and no message -- the exact
+      # failure of scheduled run 36506931445. This step is the fix; a GITHUB_ENV
+      # export would not survive into later steps, which run in fresh shells.
+      - name: Raise file descriptor limit
+        run: |
+          ulimit -n 65535 2>/dev/null || true
+          echo "fd soft limit: $(ulimit -n)"
+
       - name: Verify sing-box works
         run: |
           echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > /tmp/test-config.json
