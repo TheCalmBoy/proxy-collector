@@ -196,5 +196,129 @@ class DispatchInputDefaultsMatchCodeTests(unittest.TestCase):
         )
 
 
+class ScheduleOrderingTests(unittest.TestCase):
+    """update.yml must publish the pool BEFORE probe-egress.yml reads it.
+
+    probe-egress.yml has no inputs and no shared state. It fetches
+    gh-pages/enriched-configs.json, which only update.yml writes. So the two
+    crons ARE the contract, and cron cannot express "after".
+
+    What went wrong (2026-09-29): the crons were "7,37" and "5,35". Both ran
+    twice an hour, the probe landed 2 min BEFORE each update, and the two
+    concurrency groups differ, so nothing serialized them. Every probe measured
+    the previous hour's pool and the :35 one raced the :37 publish.
+    """
+
+    WORKFLOWS = REPO / ".github/workflows"
+    PRODUCER = WORKFLOWS / "update.yml"
+    CONSUMER = WORKFLOWS / "probe-egress.yml"
+
+    def schedule_crons(self, path: Path) -> list[int]:
+        """The minute-of-hour for every schedule entry, in file order.
+
+        Only the minute field is read; the rest of the expression (hour, day of
+        month, month, day of week) is fixed to ``*`` in every cron in this repo.
+        """
+        minutes = []
+        in_schedule = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped == "on:":
+                in_schedule = False
+            if stripped == "schedule:":
+                in_schedule = True
+                continue
+            if in_schedule:
+                if stripped and not stripped.startswith(("#", "-")):
+                    break  # next key: workflow_dispatch:, permissions:, ...
+                if (m := re.search(r'cron:\s*"?([^"\n]+?)"?\s*$', stripped)):
+                    fields = m.group(1).split()
+                    self.assertEqual(
+                        len(fields), 5,
+                        f"{path.name}: cron {m.group(1)!r} is not a 5-field "
+                        "expression; this test only understands 'min * * * *'",
+                    )
+                    for part in fields[0].split(","):
+                        self.assertRegex(
+                            part.strip(), r"^\d+$",
+                            f"{path.name}: minute field {part!r} is not a literal",
+                        )
+                        minutes.append(int(part))
+        return minutes
+
+    def test_both_workflows_still_have_schedules(self):
+        self.assertTrue(self.PRODUCER.is_file(), f"missing {self.PRODUCER}")
+        self.assertTrue(self.CONSUMER.is_file(), f"missing {self.CONSUMER}")
+        for path in (self.PRODUCER, self.CONSUMER):
+            self.assertTrue(
+                self.schedule_crons(path),
+                f"{path.name} has no cron; the pipeline stopped running unattended",
+            )
+
+    def test_update_runs_exactly_once_per_hour(self):
+        self.assertEqual(
+            self.schedule_crons(self.PRODUCER), [7],
+            "update.yml must publish the pool exactly once an hour",
+        )
+
+    def test_probe_runs_exactly_once_per_hour(self):
+        self.assertEqual(
+            self.schedule_crons(self.CONSUMER), [37],
+            "probe-egress.yml must run exactly once an hour, after the update",
+        )
+
+    def test_probe_never_fires_before_or_with_the_update(self):
+        """The regression itself: probe minute must be strictly after update's."""
+        update_minutes = self.schedule_crons(self.PRODUCER)
+        probe_minutes = self.schedule_crons(self.CONSUMER)
+        for probe in probe_minutes:
+            for update in update_minutes:
+                self.assertGreater(
+                    probe, update,
+                    f"probe-egress.yml fires at :{probe}02 before update.yml at "
+                    f":{update}02. It reads the pool update.yml publishes, so it "
+                    "measures the previous hour instead of this one",
+                )
+
+    def test_gap_covers_a_full_update_run(self):
+        """30 min must exceed a 10-23 min run, or the two jobs overlap.
+
+        The 10-23 min figure is measured: GH Actions run 36570401322 took
+        12:46:41 -> 12:53:14.
+        """
+        update_minutes = self.schedule_crons(self.PRODUCER)
+        probe_minutes = self.schedule_crons(self.CONSUMER)
+        worst_case_run_minutes = 25
+        for probe in probe_minutes:
+            for update in update_minutes:
+                gap = (probe - update) % 60
+                self.assertGreaterEqual(
+                    gap, worst_case_run_minutes,
+                    f"only {gap} min between update :{update}02 and probe :{probe}02; "
+                    f"an update can run {worst_case_run_minutes} min, so a slow run "
+                    "makes the probe measure the previous hour again",
+                )
+
+    def test_probe_refuses_a_stale_pool(self):
+        """A cron gap is a promise; the staleness check is the enforcement.
+
+        Without it, a skipped or failed :07 update produces a probe run that
+        fetches yesterday's pool, measures it, and publishes a health report
+        with a fresh generated_at -- describing configs that no longer exist.
+        """
+        text = self.CONSUMER.read_text(encoding="utf-8")
+        self.assertIn("MAX_POOL_AGE_MINUTES", text)
+        self.assertIn("enriched-configs.json", text)
+        for line in text.splitlines():
+            if "MAX_POOL_AGE_MINUTES" in line and ":" in line and "os.environ" not in line:
+                m = re.match(r"\s*MAX_POOL_AGE_MINUTES:\s*['\"]?(\d+)", line)
+                if m:
+                    self.assertGreaterEqual(
+                        int(m.group(1)), 60,
+                        "the staleness window must be well above the 30 min cron gap, "
+                        "or normal GitHub cron jitter fails the probe",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

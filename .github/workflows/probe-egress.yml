@@ -2,7 +2,27 @@ name: Probe proxy egress IPs
 
 on:
   schedule:
-    - cron: "5,35 * * * *"
+    # Hourly at :37, deliberately 30 min AFTER update.yml's :07 run.
+    #
+    # This workflow has no input and no shared state with update.yml. It fetches
+    # the pool from gh-pages:
+    #
+    #     gh-pages/enriched-configs.json
+    #
+    # which only the update.yml run produces. So the ordering IS the whole
+    # contract, and a cron cannot express it: the :37 probe is guaranteed to
+    # start after the :07 update's earliest start, and the update takes 10-23
+    # min, so the pool on gh-pages is already this hour's by the time it lands.
+    #
+    # Before (2026-09-29) this was "5,35" against update.yml's "7,37". Both ran
+    # twice an hour and the probe fired 2 min BEFORE each update, so it always
+    # measured the PREVIOUS hour's pool -- and at :35 it raced the :37 publish,
+    # which is a truncated-raw-file read. Their concurrency groups are separate
+    # (proxy-egress-probe vs proxy-database-update), so nothing serialized them.
+    #
+    # If you change this cron, also change update.yml's. The invariant is:
+    # update fires first, 30 min of gap, and the gap exceeds a full update run.
+    - cron: "37 * * * *"
   workflow_dispatch:
     inputs:
       probe_concurrency:
@@ -74,6 +94,43 @@ jobs:
 
           data = json.loads(Path("verify-output/enriched-configs.json").read_text())
           print(f"Fetched {len(data.get('configs', []))} verified configs from Phase 1")
+          PY
+
+      - name: Reject a stale pool
+        # The :37 cron assumes the :07 update already republished. Crons are
+        # best-effort on both sides, so a skipped or failed update used to look
+        # exactly like a healthy run: the probe fetched yesterday's
+        # enriched-configs.json, measured it, and published an egress-health.json
+        # with a fresh generated_at -- a health report describing a pool that no
+        # longer exists.
+        #
+        # Fail loudly instead. The window is 2h because the normal gap is 30 min
+        # and a full update run is 10-23 min; 2h only trips when two consecutive
+        # hourly updates are missing, which is never healthy.
+        shell: bash
+        env:
+          MAX_POOL_AGE_MINUTES: "120"
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          path = Path("verify-output/enriched-configs.json")
+          generated_at = json.loads(path.read_text())["generated_at"]
+          produced = datetime.fromisoformat(generated_at)
+          if produced.tzinfo is None:
+              produced = produced.replace(tzinfo=timezone.utc)
+          age_min = (datetime.now(timezone.utc) - produced).total_seconds() / 60
+          limit = float(os.environ["MAX_POOL_AGE_MINUTES"])
+          print(f"pool generated_at={generated_at} age={age_min:.1f} min (limit {limit:.0f})")
+          if age_min > limit:
+              sys.exit(
+                  f"REFUSING TO PROBE: enriched-configs.json is {age_min:.1f} min old.\n"
+                  f"The :07 update.yml run did not publish. Probing a stale pool would "
+                  f"publish an egress-health.json describing configs that are already gone."
+              )
           PY
 
       - name: Run initial and delayed egress checks
