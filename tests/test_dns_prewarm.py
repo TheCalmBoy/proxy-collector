@@ -102,8 +102,12 @@ class TestPrewarmDns(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertGreater(peak, 1, "lookups never overlapped: this is serial")
-        # Serial would be >= 8 * delay. Anything near one delay proves overlap.
-        self.assertLess(elapsed, 8 * barrier_delay * 0.75)
+        # Do NOT assert wall-clock here. `peak > 1` already proves the
+        # lookups overlapped, and it is immune to runner load. The old
+        # `elapsed < 0.3` bound failed on a loaded runner (run 36513411543:
+        # 3.77s) purely because the machine was busy, not because the
+        # pre-warm went serial. Serial would show peak == 1, which is what
+        # the assertion above catches.
 
     def test_failed_lookups_are_cached_as_misses(self):
         """A name that fails must not be retried once per config."""
