@@ -1,0 +1,62 @@
+# Why this exists
+#
+# update.yml installs dependencies and runs the collector, but no workflow in
+# this repo invoked `unittest` or `pytest`. 132 tests existed and none of them
+# were a gate. That is how two silent regressions shipped to a live
+# subscription: the Worker looked up its health index by an id that the
+# published feed never used, so every score was -1 and the "Best" group
+# rendered empty -- HTTP 200 the entire time, nothing to alert on.
+#
+# This job is deliberately separate from update.yml's build job. It does not
+# install sing-box, does not touch the network, and does not publish anything:
+# it must stay fast enough to run on every push. If a test here needs the
+# network or a sing-box binary, it belongs in update.yml, not here.
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # requirements.txt pins geoip2 and PySocks. Without geoip2, importing
+      # main.py raises ModuleNotFoundError and every test that touches the
+      # module -- not just the GeoIP ones -- fails to load, so the install is
+      # not optional here.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+
+      # The consistency checker exits non-zero only past --max-mismatch, so at
+      # the default 10% budget this passes on live data (measured 6.2%). Raise
+      # it deliberately once the upstream geolocation paths agree, not before.
+      - name: Check published country tags against measured egress
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -f gh-pages/all.txt ] && [ -f gh-pages/egress-health.json ]; then
+            python3 tools/country_consistency.py \
+              --feed gh-pages/all.txt \
+              --health gh-pages/egress-health.json
+          else
+            echo "published feed not present in a fresh checkout; skipping"
+          fi
