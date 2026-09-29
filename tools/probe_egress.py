@@ -439,8 +439,28 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     return config, records, {**stats, **{f"skip_{key}": value for key, value in sorted(reasons.items())}}
 
 
+async def _run_curl(config_lines: list[str]) -> tuple[int, str]:
+    process = await asyncio.create_subprocess_exec(
+        "curl", "--config", "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
+    return process.returncode, stdout.decode("utf-8", "replace")
+
+
 async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
-    """Get IP info from cloudflare.com/cdn-cgi/trace via proxy"""
+    """Get IP info from cloudflare.com/cdn-cgi/trace via proxy.
+
+    Exit 7 is "could not connect" and was being reported as a dead proxy.
+    On a runner saturated with concurrent sing-box listeners it is really
+    local exhaustion: the listener was alive but too busy to accept, or the
+    process was out of descriptors. The scheme split in the published data
+    (100% of shadowsocks, 0% of vless/vmess/trojan) was this race, not the
+    protocols, so a refused connection is retried on its own with nothing
+    else in flight before it is believed.
+    """
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{proxy_port}"',
         f'url = "{CLOUDFLARE_TRACE_URL}"',
@@ -450,19 +470,18 @@ async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
         "connect-timeout = 5",
         "max-time = 10",
     ]
-    process = await asyncio.create_subprocess_exec(
-        "curl", "--config", "-",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
-
-    if process.returncode != 0:
-        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+    returncode, stdout = await _run_curl(config_lines)
+    if returncode != 0:
+        # Only a refused connection is ambiguous. Every other exit is the
+        # proxy's own answer (35/97 handshake, 56 receive, 28 timeout).
+        if returncode == 7:
+            await asyncio.sleep(0.5 + (proxy_port % 7) * 0.3)
+            returncode, stdout = await _run_curl(config_lines)
+        if returncode != 0:
+            return {"ok": False, "error": f"curl_exit_{returncode}"}
 
     try:
-        text = stdout.decode().strip()
+        text = stdout.strip()
         lines = text.split("\n")
         data = {}
         for line in lines:
@@ -648,7 +667,7 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
 
 async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Run one stability check using cloudflare trace"""
-    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "750"))))
+    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "25"))))
 
     async def check_one(record):
         async with semaphore:
@@ -806,7 +825,11 @@ async def main() -> int:
     with Path("/tmp/probe-egress-sing-box.log").open("wb") as log:
         core = subprocess.Popen([SING_BOX, "run", "-c", str(config_path)], stdout=log, stderr=subprocess.STDOUT)
 
-    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "750"))))
+    # Phase 2 moves the real payload, so it stays at the conservative value
+    # even when PROBE_CONCURRENCY is unset. The 750 this used to default to
+    # is what exhausted the runner and turned working proxies into
+    # curl_exit_7 rows.
+    semaphore = asyncio.Semaphore(max(1, int(os.getenv("PROBE_CONCURRENCY", "25"))))
 
     try:
         await asyncio.sleep(5)
