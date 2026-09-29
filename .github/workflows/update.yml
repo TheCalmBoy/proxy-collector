@@ -52,7 +52,14 @@ on:
       min_speed_mb_s:
         description: "Stage 3 minimum download speed in MB/s (0.100 = 100 KB/s). Raise to trade yield for usable bandwidth; measure before changing."
         required: false
-        default: "0.100"
+        # This default IS the scheduled-run floor, and it silently won over the
+        # env line. A bare `workflow run` supplies no inputs, so
+        # ${{ inputs.min_speed_mb_s }} resolves to THIS value and the `||`
+        # fallback never runs. f26bedd fixed the env line to '1.0' while this
+        # stayed 0.100, so run 36557357087 still verified at 100 KB/s
+        # ("Stage 3 passed: 278/1335 (>=100 KB/s)") and published 38 configs
+        # below 1.0 MB/s. Both definitions must agree.
+        default: "1.0"
       ipapi_pool_size:
         description: "How many verified configs to use as ip-api egress proxies. 0 disables the pool and runs lookups direct."
         required: false

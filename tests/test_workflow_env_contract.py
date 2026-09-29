@@ -113,5 +113,88 @@ class WorkflowDoesNotRestateCodeDefaultsTests(unittest.TestCase):
         self.assertRegex(text, r"VERIFY_LIMIT:.*\|\|\s*'0'")
 
 
+def dispatch_input_defaults() -> dict[str, str]:
+    """Map workflow_dispatch input name -> its declared default.
+
+    This is the layer that actually decides the value. A bare `gh workflow run`
+    passes no inputs, so ``${{ inputs.X || 'literal' }}`` resolves to the input's
+    OWN default and the `||` fallback is dead code. Checking only the env line
+    is what let 0.100 survive on line 55 while line 320 read 1.0, so run
+    36557357087 logged ">=100 KB/s" and published 38 configs under the floor.
+    """
+    out: dict[str, str] = {}
+    text = workflow_env_text()
+    start = text.find("workflow_dispatch:")
+    block = text[start:] if start != -1 else text
+    # Indentation-driven, not pattern-driven: keys sit at 6 spaces and their
+    # attributes at 8, and a key may be followed by comment lines, so a single
+    # multiline regex over (key + attributes) silently matches nothing.
+    current = None
+    for line in block.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        if indent == 6 and stripped.endswith(":"):
+            current = stripped[:-1].strip()
+            continue
+        if current and indent >= 8:
+            m = re.match(r"default:\s*['\"]?([^'\"\n]+?)['\"]?\s*$", stripped)
+            if m:
+                out[current] = m.group(1).strip()
+                current = None
+    return out
+
+
+class DispatchInputDefaultsMatchCodeTests(unittest.TestCase):
+    """The input default is the effective floor, so it must match verify.py."""
+
+    def test_min_speed_input_default_matches_verify_floor(self):
+        defaults = verify_env_defaults()
+        self.assertIn("VERIFY_MIN_SPEED_MB_S", defaults)
+        code_floor = float(defaults["VERIFY_MIN_SPEED_MB_S"])
+        inputs = dispatch_input_defaults()
+        self.assertIn(
+            "min_speed_mb_s", inputs,
+            "workflow_dispatch lost its min_speed_mb_s input",
+        )
+        self.assertEqual(
+            float(inputs["min_speed_mb_s"]), code_floor,
+            f"workflow_dispatch default min_speed_mb_s={inputs['min_speed_mb_s']} "
+            f"but verify.py floors at {code_floor}; with no inputs supplied the "
+            "default wins and the `||` fallback on the env line never runs",
+        )
+
+    def test_floor_is_never_below_one_mb_s_in_either_layer(self):
+        code_floor = float(verify_env_defaults()["VERIFY_MIN_SPEED_MB_S"])
+        input_floor = float(dispatch_input_defaults()["min_speed_mb_s"])
+        for label, value in (("verify.py", code_floor), ("workflow_dispatch", input_floor)):
+            self.assertGreaterEqual(
+                value, 1.0,
+                f"{label} floor {value} is below the published 1.0 MB/s contract",
+            )
+
+    def test_no_dispatch_input_default_contradicts_its_env_line(self):
+        """Every numeric input default must equal the value its env line uses."""
+        env_pins = workflow_overrides()
+        problems = []
+        for input_name, default in sorted(dispatch_input_defaults().items()):
+            env_name = "VERIFY_" + input_name.upper()
+            if env_name not in env_pins:
+                continue
+            try:
+                if float(default) != float(env_pins[env_name]):
+                    problems.append(
+                        f"{input_name}: input default={default} env line={env_pins[env_name]}"
+                    )
+            except ValueError:
+                continue
+        self.assertEqual(
+            problems, [],
+            "an input default contradicts the env line reading it:\n  "
+            + "\n  ".join(problems),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

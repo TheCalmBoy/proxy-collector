@@ -45,8 +45,14 @@ import requests
 # returned a single survivor: 41% of the run's input for nothing.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
-    # Verified live 2026-09-28: 5771 vless configs, currently reachable.
-    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
+    # Kept 0xRadikal: 1020 candidates -> 218 survived (21.4%), the only feed
+    # that has ever earned its bandwidth.
+    "https://raw.githubusercontent.com/cbusifabcap/daily_free_vpn/main/sub/URI.yml",
+    # Removed barry-far 2026-09-29 after run 36557357087 measured it:
+    #   4169 candidates -> 4 survived (0.1%)
+    # It looked fine on the cheap Stage 1 gate (39% of 2891 endpoints alive) and
+    # then produced almost nothing, so TCP liveness is not a proxy for yield.
+    # Same shape as the two feeds removed in ca59542, four times the volume.
 )
 # Comma-separated override. A single URL still works.
 SOURCE_URLS = tuple(
