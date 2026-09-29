@@ -47,7 +47,14 @@ DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
     # Kept 0xRadikal: 1020 candidates -> 218 survived (21.4%), the only feed
     # that has ever earned its bandwidth.
-    "https://raw.githubusercontent.com/cbusifabcap/daily_free_vpn/main/sub/URI.yml",
+    # Removed cbusifabcap 2026-09-29 after run 36559202167 measured it:
+    #   758 candidates -> 40 survived (5.3%)
+    # I added it on a Stage 1 liveness number (58.5%, matching 0xRadikal's
+    # 58.7%) and that was the wrong signal. Stage 1 liveness has now
+    # mispredicted three sources in a row -- ebrasha, Epodonios, barry-far all
+    # looked alive and yielded ~0%, and cbusifabcap did the same. Only an
+    # end-to-end run's survival_rate is evidence. Do not re-add a source
+    # without a full-run survival number for it.
     # Removed barry-far 2026-09-29 after run 36557357087 measured it:
     #   4169 candidates -> 4 survived (0.1%)
     # It looked fine on the cheap Stage 1 gate (39% of 2891 endpoints alive) and
