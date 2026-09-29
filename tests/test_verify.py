@@ -18,6 +18,53 @@ verify = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(verify)
 
 
+class InboundPortAllocationTests(unittest.TestCase):
+    """Regression for the bare "exit 1" that killed scheduled runs.
+
+    The old code used `30000 + len(records)`. On batches over ~2768 configs
+    that walked into the kernel ephemeral range (32768-60999), which Stage 1/2
+    outbound connections are actively borrowing, and sing-box died at startup
+    with "bind: address already in use".
+    """
+
+    def test_large_batch_stays_clear_of_ephemeral_range(self):
+        # A batch big enough to overlap 32768+ under the old fixed base.
+        uris = [f"socks5://1.2.3.4:{1080 + i}" for i in range(3000)]
+        with mock.patch.object(verify, "_pick_inbound_base", return_value=15000):
+            _, records, _ = verify.build_sing_box_config(uris)
+        lo, _ = verify._ephemeral_bounds()
+        self.assertEqual(len(records), 3000)
+        self.assertLess(max(r["port"] for r in records), lo)
+
+    def test_ports_are_unique_and_contiguous(self):
+        uris = [f"socks5://1.2.3.4:{1080 + i}" for i in range(500)]
+        _, records, _ = verify.build_sing_box_config(uris)
+        ports = [r["port"] for r in records]
+        self.assertEqual(len(set(ports)), len(ports))
+        self.assertEqual(ports, list(range(ports[0], ports[0] + len(ports))))
+
+    def test_picker_skips_a_range_whose_port_is_occupied(self):
+        # First candidate has a port taken; the second is clean.
+        with mock.patch.object(verify, "INBOUND_PORT_CANDIDATES", (15000, 20000)):
+            with mock.patch.object(
+                verify, "_probe_range_free",
+                side_effect=[(False, 15005), (True, -1)],
+            ):
+                base = verify._pick_inbound_base(100)
+        self.assertEqual(base, 20000)
+
+    def test_picker_warns_and_falls_back_instead_of_raising(self):
+        # A busy host must not be able to hard-fail the whole run.
+        with mock.patch.object(verify, "INBOUND_PORT_CANDIDATES", (15000, 20000)):
+            with mock.patch.object(
+                verify, "_probe_range_free", return_value=(False, 15000),
+            ):
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                    base = verify._pick_inbound_base(100)
+        self.assertIn(base, (15000, 20000))
+        self.assertIn("WARNING", err.getvalue())
+
+
 class VerifyPortRoutingTests(unittest.TestCase):
     def test_build_preserves_remote_and_local_ports(self):
         config, records, _ = verify.build_sing_box_config(
@@ -25,7 +72,11 @@ class VerifyPortRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(records[0]["server_port"], 1080)
-        self.assertEqual(records[0]["port"], 30000)
+        # The local listen port is allocated by _pick_inbound_base, so assert
+        # the contract (clear of the ephemeral range) rather than a fixed
+        # number. Hardcoding 30000 is what hid the production bug: that base
+        # overlapped 32768-60999 on large batches.
+        self.assertLess(records[0]["port"], verify._ephemeral_bounds()[0])
         self.assertEqual(config["inbounds"][0]["listen_port"], records[0]["port"])
 
     def test_limit_verification_keeps_config_and_records_in_sync(self):
@@ -131,10 +182,12 @@ class VerifyPortRoutingTests(unittest.TestCase):
                 result = asyncio.run(verify.main())
 
         self.assertEqual(result, 0)
-        self.assertEqual(tcp_calls, [(30000, "1.1.1.1", 443, verify.TCP_TIMEOUT)])
+        # The one allocated local port must reach every stage unchanged.
+        local_port = tcp_calls[0][0]
+        self.assertEqual(tcp_calls, [(local_port, "1.1.1.1", 443, verify.TCP_TIMEOUT)])
         self.assertEqual(udp_calls, [1080])
-        self.assertEqual(https_calls, [30000])
-        self.assertEqual(speed_calls, [30000])
+        self.assertEqual(https_calls, [local_port])
+        self.assertEqual(speed_calls, [local_port])
         # The agreed order: TCP, then UDP, then download, then HTTPS.
         self.assertEqual(stage_order, ["tcp", "udp", "download", "https"])
 
@@ -377,7 +430,11 @@ class VerifyPortRoutingTests(unittest.TestCase):
             return 1.0
 
         async def fake_speed(record, _worker_url, _token, _semaphore):
-            passed = record["port"] == 30000
+            # The FIRST record is the fast one; the second is deliberately
+            # slow and must be dropped. Identify the fast one by the source
+            # config it came from, not by a hardcoded listen port, which the
+            # allocator no longer guarantees.
+            passed = b"one:pass" in record["uri"].encode()
             return {
                 "ok": passed,
                 "country": "NL",

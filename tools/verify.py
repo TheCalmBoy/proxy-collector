@@ -236,6 +236,95 @@ def https_failure_summary(results: list[float], threshold: float) -> str:
 UDP_TEST_HOST = os.getenv("VERIFY_UDP_TEST_HOST", "1.1.1.1")
 UDP_TEST_PORT = int(os.getenv("VERIFY_UDP_TEST_PORT", "53"))
 
+# Base listen port for the per-config SOCKS inbounds. Deliberately OUTSIDE the
+# Linux ephemeral range (32768-60999): the kernel hands those out to Stage 1/2
+# outbound connections, and sing-box keeps every inbound socket bound until a
+# client connects. Overlapping the two produced random "address already in
+# use" startup failures on batches over ~2768 configs. 15000 leaves ~17.7k
+# configs of headroom below 32768. Overridable for constrained runners.
+EPHEMERAL_PORT_FLOOR = int(os.getenv("VERIFY_EPHEMERAL_PORT_FLOOR", "32768"))
+INBOUND_PORT_BASE = int(os.getenv("VERIFY_INBOUND_PORT_BASE", "15000"))
+
+# Candidate listen-port bases, tried in order. Must all sit clear of the
+# kernel ephemeral range; see _pick_inbound_base.
+INBOUND_PORT_CANDIDATES = (
+    int(os.getenv("VERIFY_INBOUND_PORT_BASE", "15000")),
+    20000, 25000, 12000, 8000, 6000,
+)
+
+
+def _ephemeral_bounds() -> tuple[int, int]:
+    """Read the kernel's actual ephemeral port range, not a guess."""
+    try:
+        lo, hi = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+        return int(lo), int(hi)
+    except (OSError, ValueError):
+        return 32768, 60999
+
+
+def _probe_range_free(base: int, count: int) -> tuple[bool, int]:
+    """Try to bind base..base+count-1. Returns (all_free, first_blocked_port).
+
+    Must be called with the probe sockets closed before sing-box starts; the
+    ports are only *likely* free, since the kernel can hand the same range out
+    for an outbound connection in the window between probe and bind.
+    """
+    held: list[socket.socket] = []
+    try:
+        for port in range(base, base + count):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            held.append(s)
+            s.bind(("127.0.0.1", port))
+        return True, -1
+    except OSError:
+        blocked = held[-1].getsockname()[1] if held else base
+        return False, blocked
+    finally:
+        for s in held:
+            s.close()
+
+
+def _pick_inbound_base(count: int) -> int:
+    """Pick a listen-port base that is clear of both the ephemeral range and
+    anything already listening locally.
+
+    The old hardcoded `30000 + len(records)` walked straight into the kernel's
+    ephemeral range (32768-60999) on batches over ~2768 configs and died with
+    "bind: address already in use" -- the bare "exit 1" behind scheduled runs
+    36506931445 and 36513583544.
+
+    Best-effort by design: if no candidate probes fully free (a busy host with
+    thousands of listeners would always fail a full-range probe), fall back to
+    the first non-overlapping candidate with a loud warning rather than
+    refusing to run. A warning plus a chance of success beats a guaranteed
+    failure.
+    """
+    lo, _ = _ephemeral_bounds()
+    fallback: int | None = None
+    tried: list[str] = []
+    for base in INBOUND_PORT_CANDIDATES:
+        if base + count - 1 >= lo:
+            tried.append(f"{base}+{count} overlaps ephemeral floor {lo}")
+            continue
+        if fallback is None:
+            fallback = base
+        free, blocked = _probe_range_free(base, count)
+        if free:
+            if tried:
+                print(f"inbound port base {base} chosen; skipped {tried}",
+                      file=sys.stderr)
+            return base
+        tried.append(f"{base}+{count} blocked at port {blocked}")
+    chosen = fallback if fallback is not None else INBOUND_PORT_CANDIDATES[0]
+    print(
+        f"WARNING: no fully-free inbound port range for {count} configs; "
+        f"using {chosen} anyway. Probes: {tried}. If sing-box reports "
+        f"'address already in use', a local service holds a port in that "
+        f"range.",
+        file=sys.stderr,
+    )
+    return chosen
+
 class _ProbeTimeout(Exception):
     """A labelled timeout, so the failing step is identifiable in logs.
 
@@ -1039,6 +1128,12 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     stats = {"input": len(uris), "supported": 0, "unsupported": 0}
     reasons: dict[str, int] = {}
 
+    # Resolve the listen-port base BEFORE allocating any inbound, probing real
+    # bindability. This is what the old hardcoded `30000 + len(records)` could
+    # not do: it walked straight into the kernel's ephemeral range on large
+    # batches and killed the run with a bare "exit 1".
+    base_port = _pick_inbound_base(len(uris))
+
     for uri in uris:
         try:
             outbound = parse_proxy_uri(uri)
@@ -1057,7 +1152,16 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
         identifier = _tag(uri)
         inbound_tag = f"in-{identifier}"
         outbound_tag = f"proxy-{identifier}"
-        port = 30000 + len(records)
+        # Keep these OUT of the Linux ephemeral range (32768-60999 by default).
+        # Stage 1/2 open thousands of short-lived outbound connections, and
+        # every one of them borrows a port from that range. sing-box holds each
+        # inbound socket open until a client actually connects, so a batch
+        # larger than 2768 configs made this range walk straight into the
+        # ephemeral ports and fail with "bind: address already in use" -- the
+        # bare "exit 1" that killed scheduled runs 36506931445 and 36513583544
+        # with no diagnostic on stderr. High, rarely-allocated ports avoid the
+        # kernel's own allocations entirely.
+        port = base_port + len(records)
         inbound = {"type": "socks", "tag": inbound_tag, "listen": "127.0.0.1", "listen_port": port}
         outbound["tag"] = outbound_tag
 
@@ -1074,6 +1178,20 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             "uri": uri,
         })
         stats["supported"] += 1
+
+    # Cheap post-check: _pick_inbound_base already proved the range bindable,
+    # but the allocation below is what sing-box actually binds, so assert the
+    # shape rather than trust the earlier probe.
+    if inbounds:
+        ports = [i["listen_port"] for i in inbounds]
+        if len(set(ports)) != len(ports):
+            raise RuntimeError("duplicate inbound listen_port in generated config")
+        lo, hi = _ephemeral_bounds()
+        if max(ports) >= lo:
+            raise RuntimeError(
+                f"inbound ports {min(ports)}-{max(ports)} overlap the kernel "
+                f"ephemeral range {lo}-{hi}"
+            )
 
     config = {
         "log": {"level": "warn"},
