@@ -34,16 +34,17 @@ import requests
 #   0xRadikal verified  1173 endpoints
 #   Epodonios           3509 endpoints, 559 shared with 0xRadikal
 # Shared or not, 0xRadikal's output is the one that survives our gates.
+#
+# Yield per run, measured on final survivors (not candidates) on 2026-09-29:
+#   0xRadikal   256/1326 = 19.3%   <- the only feed that earns its cost
+#   Epodonios    30/5153 =  0.6%   <- dropped 2026-09-29 on user request
+#   ebrasha       0/4502 =  0.0%   <- dropped 2026-09-29 on user request
+# Epodonios was previously re-added on request after 23d4d5f dropped it on the
+# same evidence; that verdict held, and this run's per_source table settled it
+# with final-survival numbers rather than candidate counts. ebrasha never
+# returned a single survivor: 41% of the run's input for nothing.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
-    # Re-added 2026-09-28 on user request. It was dropped in 23d4d5f after an
-    # A/B measured 5440 extra candidates yielding 37 FEWER final configs --
-    # more junk than signal. It is back on request, but A/B it again before
-    # assuming the earlier verdict still holds: upstream rotates constantly and
-    # the health-gate behaviour that sank it may not be the same today.
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
-    # Verified live 2026-09-28: 4558 vmess configs, currently reachable.
-    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/vmess_configs.txt",
     # Verified live 2026-09-28: 5771 vless configs, currently reachable.
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/Splitted-By-Protocol/vless.txt",
 )
