@@ -45,6 +45,17 @@ import requests
 # returned a single survivor: 41% of the run's input for nothing.
 DEFAULT_SOURCE_URLS = (
     "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+    # hamedcode/port-based-v2ray-configs, 2026-09-29. Per-protocol files, not
+    # a 127-file port split, so four fetches cover the feed. Unlike every
+    # source tried before it, this one parses clean: 13048 configs, 0 rejected
+    # by parse_endpoint. It also runs its own liveness pipeline upstream, so
+    # the contents are already filtered for reachable ports. Survival is still
+    # unmeasured -- upstream liveness has mispredicted this collector four
+    # times (see below) -- so treat the first full run as the verdict.
+    "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/vless.txt",
+    "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/vmess.txt",
+    "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/trojan.txt",
+    "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt",
     # Kept 0xRadikal: 1020 candidates -> 218 survived (21.4%), the only feed
     # that has ever earned its bandwidth.
     # Removed cbusifabcap 2026-09-29 after run 36559202167 measured it:
