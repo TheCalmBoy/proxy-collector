@@ -157,7 +157,7 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             outbound["flow"] = _first(params, "flow") or ""
             security = _first(params, "security", "tls")
             if security in ("tls", "reality"):
-                tls_options: dict[str, Any] = {"server_name": server_name}
+                tls_options: dict[str, Any] = {"enabled": True, "server_name": server_name}
                 # REALITY is not TLS with a flag on. It needs its own block
                 # carrying the server's public key, or the handshake never
                 # authenticates and the probe reports a dead proxy.
