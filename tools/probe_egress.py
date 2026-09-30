@@ -16,6 +16,7 @@ import json
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -393,6 +394,61 @@ def families_of(ips: list[Any]) -> str:
     return "dual"
 
 
+def _ephemeral_bounds() -> tuple[int, int]:
+    """Read the kernel's actual ephemeral port range, not a guess."""
+    try:
+        lo, hi = Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()
+        return int(lo), int(hi)
+    except (OSError, ValueError):
+        return 32768, 60999
+
+
+def _probe_range_free(base: int, count: int) -> bool:
+    """True when every port in base..base+count-1 can be bound right now.
+
+    The probe sockets are closed before sing-box starts, so this is only
+    "likely free": the kernel can hand one of these ports to an outbound
+    connection in the window between this check and the real bind.
+    """
+    held: list[socket.socket] = []
+    try:
+        for port in range(base, base + count):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            held.append(s)
+            s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        for s in held:
+            s.close()
+
+
+def _pick_inbound_base(count: int) -> int:
+    """Pick a listen-port base clear of the ephemeral range and of anything
+    already listening on this host.
+
+    The hardcoded `PORT_BASE + len(records)` this replaces allocated 285
+    listeners starting at 30000 while the kernel hands out ephemeral ports
+    from 32768. Every listener that lost that race reported curl exit 7 and
+    the proxy was recorded as dead, which is why the published health data
+    held only the first handful of configs by port order. The scheme split
+    that looked like a protocol bug was this, and it moved with the file
+    order, not the protocols.
+    """
+    lo, hi = _ephemeral_bounds()
+    candidates = [
+        int(os.getenv("PROBE_INBOUND_PORT_BASE", "15000")),
+        20000, 25000, 12000, 8000, 6000, 5000, 4000,
+    ]
+    for base in candidates:
+        if base + count > lo and base < hi:
+            continue  # overlaps the ephemeral range
+        if _probe_range_free(base, count):
+            return base
+    return int(os.getenv("PROBE_INBOUND_PORT_BASE", "15000"))
+
+
 def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
     inbounds: list[dict[str, Any]] = []
     outbounds: list[dict[str, Any]] = []
@@ -400,6 +456,10 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     records: list[dict[str, Any]] = []
     stats = {"input": len(uris), "supported": 0, "unsupported": 0}
     reasons: dict[str, int] = {}
+
+    # Resolve the base BEFORE allocating any inbound, so every listener is
+    # contiguous and outside the ephemeral range.
+    base_port = _pick_inbound_base(len(uris))
 
     for uri in uris:
         try:
@@ -411,7 +471,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
         identifier = _record_id(uri)
         inbound_tag = f"in-{identifier}"
         outbound_tag = f"proxy-{identifier}"
-        port = PORT_BASE + len(records)
+        port = base_port + len(records)
         inbound = {"type": "socks", "tag": inbound_tag, "listen": "127.0.0.1", "listen_port": port}
         outbound["tag"] = outbound_tag
         inbounds.append(inbound)
@@ -859,7 +919,9 @@ async def main() -> int:
             # is what a crash mid-session looks like: every later probe returns
             # curl exit 7. Confirm a listener answers before resuming, so the
             # run does not silently score every remaining proxy as dead.
-            probe_port = PORT_BASE
+            # Check a port this run actually allocated, not the old hardcoded
+            # 30000, which is no longer where any listener lives.
+            probe_port = records[0]["port"] if records else PORT_BASE
             if not await _listener_alive(probe_port):
                 print(f"restarted sing-box is not answering on {probe_port}; aborting.", file=sys.stderr)
                 raise RuntimeError("sing-box restarted without live listeners")
