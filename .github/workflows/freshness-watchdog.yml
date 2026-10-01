@@ -33,6 +33,11 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      # gh needs a token inside Actions for both `gh run list` (--check-active)
+      # and `gh workflow run` (the dispatches). The default GITHUB_TOKEN has
+      # the actions:write permission this job declares.
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
