@@ -299,25 +299,79 @@ class ScheduleOrderingTests(unittest.TestCase):
                     "makes the probe measure the previous hour again",
                 )
 
-    def test_probe_refuses_a_stale_pool(self):
-        """A cron gap is a promise; the staleness check is the enforcement.
+    def test_probe_notes_a_stale_pool_but_keeps_probing(self):
+        """A stale pool is a *note*, not a kill (2026-10-01 incident).
 
-        Without it, a skipped or failed :07 update produces a probe run that
-        fetches yesterday's pool, measures it, and publishes a health report
-        with a fresh generated_at -- describing configs that no longer exist.
+        The old contract hard-refused to probe when the pool was >120 min old
+        (MAX_POOL_AGE_MINUTES + sys.exit). That guard is what killed the run in
+        the incident (age=337 min -> probe aborted -> health index frozen for
+        hours -> the worker's join dropped configs and the subscription shrank).
+
+        Refusing was wrong once two things landed:
+          1. the probe does a rolling union (PREVIOUS_HEALTH) - the pool fetched
+             from gh-pages IS the last-published, still-served feed, so probing
+             it is the correct action even when hourly updates were skipped;
+          2. freshness-watchdog.yml re-collects a frozen pool on its own path,
+             so a genuinely stuck pipeline is recovered by dispatch, not by this
+             guard tripping.
+
+        So the probe must still *report* pool age (an unparseable pool is fatal
+        - the heredoc crashes on it regardless), but it must no longer sys.exit
+        on age. Refusing a stale pool is now a regression.
         """
         text = self.CONSUMER.read_text(encoding="utf-8")
-        self.assertIn("MAX_POOL_AGE_MINUTES", text)
+        # Age is still computed and reported...
+        self.assertIn("age=", text, "the pool-age note was removed; keep it")
         self.assertIn("enriched-configs.json", text)
-        for line in text.splitlines():
-            if "MAX_POOL_AGE_MINUTES" in line and ":" in line and "os.environ" not in line:
-                m = re.match(r"\s*MAX_POOL_AGE_MINUTES:\s*['\"]?(\d+)", line)
-                if m:
-                    self.assertGreaterEqual(
-                        int(m.group(1)), 60,
-                        "the staleness window must be well above the 30 min cron gap, "
-                        "or normal GitHub cron jitter fails the probe",
-                    )
+        # ...but it no longer aborts the run.
+        self.assertNotIn(
+            "REFUSING TO PROBE", text,
+            "probe-egress.yml must not hard-refuse a stale pool; the rolling "
+            "union plus the watchdog make refusing a foot-gun (2026-10-01)",
+        )
+        self.assertNotIn(
+            "sys.exit", text,
+            "the staleness step must not sys.exit; only an unparseable pool may "
+            "crash the run, and that is a parse error, not an age gate",
+        )
+
+    def test_probe_carry_over_is_wired(self):
+        """The rolling union needs its input: the previously-published index.
+
+        Without PREVIOUS_HEALTH the probe would still rewrite the index from
+        this run's pool alone and the incident (index freezing on churn) would
+        repeat. The Fetch step must download egress-health.json and the probe
+        step must point PREVIOUS_HEALTH at it.
+        """
+        text = self.CONSUMER.read_text(encoding="utf-8")
+        self.assertIn(
+            "egress-health.json", text,
+            "the Fetch step must download the previous health index for the union",
+        )
+        self.assertRegex(
+            text, r"PREVIOUS_HEALTH:\s*verify-output/previous-egress-health.json",
+            "the probe step must point PREVIOUS_HEALTH at the fetched index",
+        )
+
+    def test_watchdog_exists_and_dispatches_the_heavy_workflows(self):
+        """The non-cron trigger path: a cheap watchdog wakes the heavy jobs.
+
+        This is the actual skip-combat. A skipped hourly cron is recovered on
+        the next watchdog tick (~10 min) instead of the next hourly tick.
+        """
+        watchdog = self.WORKFLOWS / "freshness-watchdog.yml"
+        self.assertTrue(watchdog.is_file(), "freshness-watchdog.yml is missing")
+        text = watchdog.read_text(encoding="utf-8")
+        # Fires on a sub-hourly heartbeat, not hourly.
+        self.assertRegex(
+            text, r'cron:\s*"?\*/10 \* \* \* \*"?',
+            "the watchdog must tick every 10 minutes, not hourly",
+        )
+        # And it dispatches both heavy workflows by name.
+        self.assertIn("gh workflow run update.yml", text)
+        self.assertIn("gh workflow run probe-egress.yml", text)
+        self.assertIn("actions: write", text,
+                      "the watchdog needs the 'actions' permission to dispatch")
 
 
 if __name__ == "__main__":

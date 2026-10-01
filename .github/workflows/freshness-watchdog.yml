@@ -1,0 +1,84 @@
+name: Freshness Watchdog
+
+on:
+  schedule:
+    # 10-minute heartbeat. This tick costs ~1 minute of runner time (two
+    # curl fetches + one python call) and is free on a public repo, so the
+    # only limit is GitHub's per-repo concurrent-workflow count, which one
+    # small job never hits.
+    #
+    # This workflow exists because GitHub's free-tier schedule: crons on the
+    # two heavy workflows (update.yml :07, probe-egress.yml :37) are
+    # best-effort and get delayed or skipped under load. A skipped update
+    # freezes the pool; the stale-pool guard then freezes the health index;
+    # the worker's join drops configs and the served subscription shrinks
+    # for hours (the 2026-10-01 incident: 5 skipped hourly runs, health
+    # join collapsed 93 -> 71).
+    #
+    # The watchdog cannot stop the scheduler from skipping ticks. It gives
+    # the pipeline a second, independent trigger path: if the heavy cron
+    # misses a tick, the next watchdog tick detects the freeze and dispatches
+    # the heavy workflow itself. Worst case the pipeline degrades from
+    # "hourly" to "every ~40 min", instead of freezing.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # repository_dispatch is the non-cron trigger path (the 0xRadikal pattern):
+  # it wakes the heavy workflows without relying on their own schedule.
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the two published documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both are best-effort: a 404/missing document means "not published
+          # yet / skipped", which is exactly what the decision handles - a
+          # missing pool doc leads to "update", a missing health doc to "probe".
+          curl --silent --location \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/enriched-configs.json?ts=$(date +%s)" \
+            -o watch-pool.json || true
+          curl --silent --location \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)" \
+            -o watch-health.json || true
+
+      - name: Decide
+        id: decide
+        shell: bash
+        # Freshness thresholds:
+        #   pool stale     > 180 min -> the last hourly update is more than an
+        #                               hour-and-a-half out; re-collect now.
+        #   health stale   > 90 min  -> the pool is fresh but unmeasured; probe now.
+        # Both comfortably exceed the 30-min cron gap, so healthy runs never
+        # dispatch a duplicate; a single skipped tick trips on the next tick.
+        run: |
+          set -euo pipefail
+          # --check-active: if a dispatched update/probe is already queued or
+          # running (or one finished within the hour), don't dispatch a second
+          # one - the last hour's tick already fired the recovery.
+          out=$(python tools/freshness_watch.py --pool watch-pool.json --health watch-health.json --check-active)
+          echo "decision=$(echo "$out" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "reason=$(echo "$out" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
+          echo "$out"
+
+      - name: Dispatch update.yml
+        if: steps.decide.outputs.decision == 'update'
+        shell: bash
+        run: |
+          gh workflow run update.yml --ref main --field verify_limit=0
+          echo "update.yml dispatched: ${{ steps.decide.outputs.reason }}"
+
+      - name: Dispatch probe-egress.yml
+        if: steps.decide.outputs.decision == 'probe'
+        shell: bash
+        run: |
+          gh workflow run probe-egress.yml --ref main
+          echo "probe-egress.yml dispatched: ${{ steps.decide.outputs.reason }}"

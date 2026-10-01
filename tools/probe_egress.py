@@ -22,7 +22,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -818,6 +818,63 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
     return classification
 
 
+def merge_previous_health(
+    previous: dict[str, Any] | None,
+    measured: dict[str, Any],
+    pool_ids: set[str],
+    max_age_hours: int = 24,
+) -> tuple[dict[str, Any], int]:
+    """Rolling union: carry previously-measured rows forward into this run's
+    health index so one thin or skipped probe cannot freeze the index.
+
+    The probe only measures the pool that happens to exist at its own cron
+    moment, and the pool churns every hour. Overwriting the index with
+    this run's survivors alone means the index permanently trails the feed,
+    and the worker's (server, port) join drops every config the index missed.
+    Carrying forward closes that gap: a config that passed last run and is
+    still in the pool keeps its row even when this run's measurement did not
+    return an egress IP.
+
+    Rules (the union must never make things worse):
+      - only rows whose id is still in THIS run's pool are carried (a config
+        that left the pool is not in the feed either, so dropping its row is
+        correct, not loss);
+      - a row this run actually measured always wins - fresh beats stale;
+      - rows older than max_age_hours are dropped: beyond that the exit may
+        have moved and the row would claim a country/speed that no longer
+        holds (the worker's own document gate is also 24h);
+      - a missing or malformed previous index is a no-op, not an error - the
+        probe must still publish this run's measurements.
+    """
+    merged = dict(measured)
+    if not isinstance(previous, dict):
+        return merged, 0
+    configs = previous.get("configs")
+    if not isinstance(configs, dict):
+        return merged, 0
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    carried = 0
+    for rid, row in configs.items():
+        if rid in merged or rid not in pool_ids:
+            continue
+        if not isinstance(row, dict):
+            continue
+        updated_raw = row.get("updated_at")
+        if not isinstance(updated_raw, str):
+            continue
+        try:
+            updated = datetime.fromisoformat(updated_raw)
+        except ValueError:
+            continue
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        if updated < cutoff:
+            continue
+        merged[rid] = row
+        carried += 1
+    return merged, carried
+
+
 def _print_error_breakdown(results: list[dict[str, Any]], label: str) -> None:
     """Log what the failures actually were, so a bad run names its own cause."""
     counts: dict[str, int] = {}
@@ -1067,6 +1124,23 @@ async def main() -> int:
             "primary_country": classification.get("country"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    # Rolling union: fold the previously-published index back in for any pool
+    # member this run did not (re-)measure, so a thin or flaky probe cannot
+    # freeze the health index. Loaded from PREVIOUS_HEALTH when the workflow
+    # fetches it; absent or malformed is a no-op, and this run's measurements
+    # always win on conflict.
+    pool_ids = {r["id"] for r in records}
+    previous = None
+    prev_path = os.getenv("PREVIOUS_HEALTH")
+    if prev_path:
+        try:
+            previous = json.loads(Path(prev_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            previous = None
+    if previous:
+        health, carried = merge_previous_health(previous, health, pool_ids)
+        print(f"Carried {carried} previously-measured rows still in the pool")
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT / "egress-health.json"

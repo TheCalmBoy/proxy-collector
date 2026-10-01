@@ -80,6 +80,10 @@ jobs:
         # committed. This workflow is a separate job with a fresh checkout, so
         # the file has to be fetched. The only published copy lives on gh-pages,
         # which update.yml writes at the end of every successful run.
+        #
+        # The previous egress-health.json is fetched too (best-effort). The probe
+        # folds it back in as a rolling union so a thin/flaky run cannot freeze
+        # the index - it must not fail this step, hence `|| true`.
         shell: bash
         run: |
           set -euo pipefail
@@ -88,32 +92,57 @@ jobs:
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/enriched-configs.json?ts=$(date +%s)" \
             -o verify-output/enriched-configs.json
           test -s verify-output/enriched-configs.json
+          # Previous health index for the rolling union; 404 on the very first
+          # run is fine - the union simply has nothing to carry forward.
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)" \
+            -o verify-output/previous-egress-health.json || true
+          test -s verify-output/previous-egress-health.json || rm -f verify-output/previous-egress-health.json
           python - <<'PY'
           import json
           from pathlib import Path
 
           data = json.loads(Path("verify-output/enriched-configs.json").read_text())
           print(f"Fetched {len(data.get('configs', []))} verified configs from Phase 1")
+          prev = Path("verify-output/previous-egress-health.json")
+          if prev.exists() and prev.stat().st_size > 0:
+              try:
+                  print(f"Previous health index: {len(json.loads(prev.read_text()).get('configs', {}))} rows to carry forward")
+              except Exception:
+                  print("Previous health index unreadable; ignoring for the union")
+          else:
+              print("No previous health index to carry forward")
           PY
 
-      - name: Reject a stale pool
+      - name: Note a stale pool (non-fatal)
         # The :37 cron assumes the :07 update already republished. Crons are
         # best-effort on both sides, so a skipped or failed update used to look
         # exactly like a healthy run: the probe fetched yesterday's
         # enriched-configs.json, measured it, and published an egress-health.json
-        # with a fresh generated_at -- a health report describing a pool that no
-        # longer exists.
+        # with a fresh generated_at.
         #
-        # Fail loudly instead. The window is 2h because the normal gap is 30 min
-        # and a full update run is 10-23 min; 2h only trips when two consecutive
-        # hourly updates are missing, which is never healthy.
+        # This used to hard-fail (exit the step) at 120 min, which is what
+        # killed the run in the 2026-10-01 incident (age=337 min -> probe
+        # aborted, health index frozen for hours). That is now wrong for two
+        # reasons:
+        #
+        #   1. The probe now does a rolling union (PREVIOUS_HEALTH). The pool we
+        #      fetch from gh-pages IS the last-published, still-served feed, so
+        #      probing it is the correct action even when a couple of hourly
+        #      updates were skipped - it measures the real current feed and
+        #      carries forward the rest.
+        #   2. freshness-watchdog.yml now dispatches update.yml itself when the
+        #      pool is frozen >3h, so a genuinely stuck pipeline gets re-collected
+        #      by a separate path instead of by this guard tripping.
+        #
+        # So we report the age and let the probe run. The only thing that is
+        # truly fatal is a pool we cannot parse at all, which the heredoc would
+        # crash on regardless.
         shell: bash
-        env:
-          MAX_POOL_AGE_MINUTES: "120"
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, os, sys
+          import json
           from datetime import datetime, timezone
           from pathlib import Path
 
@@ -123,13 +152,13 @@ jobs:
           if produced.tzinfo is None:
               produced = produced.replace(tzinfo=timezone.utc)
           age_min = (datetime.now(timezone.utc) - produced).total_seconds() / 60
-          limit = float(os.environ["MAX_POOL_AGE_MINUTES"])
-          print(f"pool generated_at={generated_at} age={age_min:.1f} min (limit {limit:.0f})")
-          if age_min > limit:
-              sys.exit(
-                  f"REFUSING TO PROBE: enriched-configs.json is {age_min:.1f} min old.\n"
-                  f"The :07 update.yml run did not publish. Probing a stale pool would "
-                  f"publish an egress-health.json describing configs that are already gone."
+          print(f"pool generated_at={generated_at} age={age_min:.1f} min")
+          if age_min > 120:
+              print(
+                  f"NOTE: pool is {age_min:.0f} min old (>120). At least one hourly "
+                  f"update was skipped. Probing anyway - the rolling union carries "
+                  f"forward prior rows, and freshness-watchdog.yml will re-collect "
+                  f"if the pool stays frozen."
               )
           PY
 
@@ -138,6 +167,9 @@ jobs:
         env:
           WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
           WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
+          # Rolling union input: the previously-published index, fetched (best-
+          # effort) by the Fetch step. Unset/missing just skips the carry-over.
+          PREVIOUS_HEALTH: verify-output/previous-egress-health.json
         run: |
           # This step opens one socket per concurrent config, and the default
           # soft limit is ~1024. update.yml raises it; this workflow never did,
