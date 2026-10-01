@@ -2,24 +2,20 @@ name: Update Proxy Database
 
 on:
   schedule:
-    # Hourly at :07, and it must stay the FIRST of the two hourly crons.
+    # Every 30 minutes, and the probe no longer has its own cron: the probe
+    # workflow runs as a CHAIN of this run (a `workflow_run` trigger fires it
+    # the moment this run completes and hands it the verified pool as an
+    # artifact). That makes "update publishes, then probe measures" a real
+    # ordering instead of a cron-spacing bet.
     #
-    # probe-egress.yml fires at :37 and depends on the enriched-configs.json
-    # that THIS workflow publishes to gh-pages at the end of a successful run.
-    # Before (2026-09-29) these were "7,37" and "5,35": both ran twice an hour,
-    # the probe landed 2 min BEFORE each update, and their concurrency groups
-    # differ so nothing stopped the :35 probe from racing the :37 publish. Every
-    # probe therefore measured the previous hour's pool, and sometimes a
-    # half-written one.
-    #
-    # :07 rather than :00 on purpose. GitHub delays :00 the most, because every
-    # repo on Actions fires at :00. Twenty minutes of headroom before the :37
-    # probe absorbs that delay without the two jobs overlapping.
+    # :05 rather than :00 on purpose. GitHub delays :00 the most, because every
+    # repo on Actions fires at :00.
     #
     # GitHub crons are UTC and best-effort: a run can start late or be skipped
-    # under load. The gap between the two crons (30 min) is much larger than a
-    # full run (10-23 min), so a delayed run slips rather than collides.
-    - cron: "7 * * * *"
+    # under load. freshness-watchdog.yml (*/10 tick) is the recovery path - it
+    # dispatches this workflow when the pool freezes, and the chain then runs
+    # the probe automatically on completion.
+    - cron: "5,35 * * * *"
   workflow_dispatch:
     inputs:
       verify_limit:
@@ -77,6 +73,9 @@ on:
 
 permissions:
   contents: write
+  # The chained egress probe is dispatched at the end of a run via
+  # `gh workflow run`, which needs the actions:write scope on the job token.
+  actions: write
 
 concurrency:
   group: proxy-database-update
@@ -443,3 +442,24 @@ jobs:
           publish_dir: ./output
           force_orphan: true
           full_commit_message: "auto: update proxy database"
+
+      - name: Dispatch the chained egress probe
+        # The probe no longer runs on its own cron - it CHAINS off this run.
+        # Publishing to gh-pages just happened (step above), so when the probe
+        # starts and fetches gh-pages/enriched-configs.json it gets THIS
+        # run's pool, not the previous one. A couple of minutes of delay
+        # (runner pickup + install) is absorbed by probe-egress.yml's
+        # "Note a stale pool" step, which is non-fatal now.
+        #
+        # A `workflow_run` trigger was not viable: the egress worker 401s
+        # without its Bearer token, and workflow_run jobs cannot read the
+        # triggering workflow's secrets. `gh workflow run` (this job has
+        # actions:write) is the same mechanism freshness-watchdog.yml already
+        # uses, and the probe's own concurrency group serializes any overlap
+        # with a watchdog dispatch.
+        #
+        # Only schedule/dispatch runs chain - not a push or PR.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          gh workflow run probe-egress.yml --ref main
+          echo "chained probe dispatched for $(date -u +%H:%M:%SZ)"

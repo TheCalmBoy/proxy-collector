@@ -58,12 +58,14 @@ jobs:
       - name: Decide
         id: decide
         shell: bash
-        # Freshness thresholds:
-        #   pool stale     > 180 min -> the last hourly update is more than an
-        #                               hour-and-a-half out; re-collect now.
-        #   health stale   > 90 min  -> the pool is fresh but unmeasured; probe now.
-        # Both comfortably exceed the 30-min cron gap, so healthy runs never
-        # dispatch a duplicate; a single skipped tick trips on the next tick.
+        # Freshness thresholds (30-min chain cadence):
+        #   pool stale     > 50 min -> the chain missed at least one slot;
+        #                               re-collect now (which re-chains the probe).
+        #   health stale   > 70 min -> two slots ago there was a pool but no
+        #                               probe has published since.
+        # Both exceed the healthy ~30-min spacing plus a full run (10-25 min),
+        # so healthy chain runs never dispatch a duplicate; a missed slot
+        # trips on the next 10-min tick.
         run: |
           set -euo pipefail
           # --check-active: if a dispatched update/probe is already queued or

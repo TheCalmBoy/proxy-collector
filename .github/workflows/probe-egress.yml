@@ -1,28 +1,26 @@
 name: Probe proxy egress IPs
 
 on:
-  schedule:
-    # Hourly at :37, deliberately 30 min AFTER update.yml's :07 run.
-    #
-    # This workflow has no input and no shared state with update.yml. It fetches
-    # the pool from gh-pages:
-    #
-    #     gh-pages/enriched-configs.json
-    #
-    # which only the update.yml run produces. So the ordering IS the whole
-    # contract, and a cron cannot express it: the :37 probe is guaranteed to
-    # start after the :07 update's earliest start, and the update takes 10-23
-    # min, so the pool on gh-pages is already this hour's by the time it lands.
-    #
-    # Before (2026-09-29) this was "5,35" against update.yml's "7,37". Both ran
-    # twice an hour and the probe fired 2 min BEFORE each update, so it always
-    # measured the PREVIOUS hour's pool -- and at :35 it raced the :37 publish,
-    # which is a truncated-raw-file read. Their concurrency groups are separate
-    # (proxy-egress-probe vs proxy-database-update), so nothing serialized them.
-    #
-    # If you change this cron, also change update.yml's. The invariant is:
-    # update fires first, 30 min of gap, and the gap exceeds a full update run.
-    - cron: "37 * * * *"
+  # No cron of its own. This workflow is CHAINED: update.yml (every 30 min)
+  # dispatches it via `gh workflow run` the moment a build publishes to
+  # gh-pages, so the probe always measures the pool that was JUST published
+  # instead of the one from the previous scheduled slot. (2026-10-01)
+  #
+  # Why not a cron here: the old :37 hourly cron measured the previous slot's
+  # pool by design, and even a perfectly-ordered 30-min pair of crons would
+  # only measure a pool up to ~30 min old. Dispatching from the update job is
+  # strict ordering with no timing bet.
+  #
+  # Why not a `workflow_run` trigger: the egress worker 401s without its
+  # Bearer token, and workflow_run jobs cannot read the triggering workflow's
+  # secrets. `gh workflow run` (update.yml has actions:write) is the same
+  # proven mechanism freshness-watchdog.yml already uses, and this workflow's
+  # concurrency group (cancel-in-progress: false) serializes any overlap with
+  # a watchdog dispatch.
+  #
+  # This workflow still runs unattended: update.yml's every-30-min cron is the
+  # schedule, and freshness-watchdog.yml dispatches it (or update.yml) when
+  # the chain is broken.
   workflow_dispatch:
     inputs:
       probe_concurrency:

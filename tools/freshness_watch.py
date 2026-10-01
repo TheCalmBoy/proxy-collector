@@ -2,20 +2,19 @@
 
 The pipeline is two chained workflows:
 
-    update.yml (hourly :07)  -> publishes gh-pages/enriched-configs.json
-    probe-egress.yml (:37)   -> publishes gh-pages/egress-health.json
+    update.yml (every 30 min, :05/:35)  -> publishes gh-pages/enriched-configs.json
+      and dispatches probe-egress.yml at the end of a successful build,
+      which measures it and publishes gh-pages/egress-health.json.
 
-GitHub's free-tier ``schedule:`` crons are best-effort: an hourly tick can be
-delayed or skipped entirely. When update.yml is skipped, the pool freezes and
-probe-egress.yml's stale-pool guard refuses to run, so the health index freezes
-too - the worker's join then drops every config the index no longer covers and
-the served subscription visibly shrinks for hours.
+GitHub's free-tier ``schedule:`` crons are best-effort: a tick can be delayed
+or skipped entirely. When an update slot is skipped, nothing re-collects the
+pool and the chain (probe after publish) breaks with it - the health index
+freezes and the worker's join drops configs the index no longer covers.
 
 This module does not fix the scheduler. It adds a redundant trigger path: a
 cheap workflow (freshness-watchdog.yml) evaluates this decision every ~10
 minutes and dispatches the expensive workflow when its input is stale. A
-skipped hourly cron is recovered on the next watchdog tick instead of at the
-next hourly tick.
+skipped slot is recovered on the next watchdog tick instead of the next slot.
 
 The decision is a pure function of the two published documents so it can be
 unit-tested without a runner:
@@ -23,9 +22,9 @@ unit-tested without a runner:
     "update"  the pool itself is missing or older than --pool-stale-min.
               Re-collect first; the next tick will dispatch the probe once
               the fresh pool is out.
-    "probe"   the pool is fresh but the health index has not measured it yet
-              (health.generated_at < pool.generated_at) or the health index is
-              older than --health-stale-min.
+    "probe"   the health index is older than --health-stale-min, or the pool
+              was republished more than the grace window before the last
+              health measurement (the chain probe for that slot never ran).
     "none"    both are fresh; the tick is a no-op.
 """
 
@@ -74,10 +73,18 @@ def decide(
     pool_doc: Any,
     health_doc: Any,
     now: datetime | None = None,
-    pool_stale_min: float = 180.0,
-    health_stale_min: float = 90.0,
+    pool_stale_min: float = 50.0,
+    health_stale_min: float = 70.0,
+    probe_dispatch_grace_min: float = 30.0,
 ) -> Decision:
     """Pick the one workflow to run, if any.
+
+    Tuned to the 30-min chain (update.yml at :05/:35 dispatches probe-egress
+    at the end of each build). Healthy spacing is ~30 min, so a pool older
+    than 50 min means the chain missed at least one slot, and a health index
+    older than 70 min means no probe has landed since two slots ago. A full
+    probe run takes ~10-25 min, so the 70-min health threshold never trips on
+    a probe that is merely in flight.
 
     Order matters: a frozen pool always wins, because probing a pool that no
     update has produced since would only publish a health report describing
@@ -102,11 +109,18 @@ def decide(
 
     # Both exist and are young. The remaining case: the pool was republished
     # AFTER the health index was written - the current pool has not been
-    # measured yet. Compare stamps directly; both are tz-aware UTC ISO.
-    if pool_ts and health_ts and health_ts < pool_ts:
+    # measured yet (the chain probe for that slot never ran). Compare stamps
+    # directly; both are tz-aware UTC ISO.
+    #
+    # A probe run takes up to ~25 min, so a pool published up to 30 min before
+    # its probe's health lands is still healthy in-flight (the chain fired and
+    # is finishing). Only a lag past that grace means the chain dispatch for
+    # that slot never ran.
+    if pool_ts and health_ts and pool_ts - health_ts > timedelta(minutes=probe_dispatch_grace_min):
         return Decision(
             "probe",
-            "pool republished after the last health measurement",
+            "pool republished more than the grace window before the last "
+            "health measurement",
             pool_age, health_age,
         )
     return Decision("none", "feed and health index are fresh", pool_age, health_age)
@@ -128,9 +142,13 @@ def heavy_workflow_active() -> bool:
     The watchdog dispatches with ``gh workflow run``; a queued instance is
     not yet in the public branch, so without this check a stuck pipeline
     would pile up duplicate dispatches every 10 minutes. Also true when
-    either workflow already completed within the recent window - both heavy
-    runs take 10-25 minutes, so a check inside that window is always
-    redundant.
+    either workflow already completed within the last 20 min - both heavy
+    runs take 10-25 minutes and the chain cadence is 30 min, so a completed
+    run inside that window means the pipeline just fired.
+
+    Deliberately NOT true when an update completed >20 min ago but no probe
+    followed: on the 30-min chain that is exactly the broken state (the
+    dispatch step died after publish) the watchdog must recover.
     """
     try:
         out = subprocess.run(
@@ -148,7 +166,7 @@ def heavy_workflow_active() -> bool:
             if run.get("status") in ("queued", "in_progress"):
                 return True
             created = parse_generated_at(run, key="createdAt")
-            if created and now - created < timedelta(minutes=60):
+            if created and now - created < timedelta(minutes=20):
                 return True
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return False
@@ -161,8 +179,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="path to the downloaded enriched-configs.json")
     parser.add_argument("--health", default=None,
                         help="path to the downloaded egress-health.json")
-    parser.add_argument("--pool-stale-min", type=float, default=180.0)
-    parser.add_argument("--health-stale-min", type=float, default=90.0)
+    parser.add_argument("--pool-stale-min", type=float, default=50.0)
+    parser.add_argument("--health-stale-min", type=float, default=70.0)
     parser.add_argument(
         "--check-active",
         action="store_true",

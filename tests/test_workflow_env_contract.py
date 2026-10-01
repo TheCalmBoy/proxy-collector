@@ -231,7 +231,9 @@ class ScheduleOrderingTests(unittest.TestCase):
             if in_schedule:
                 if stripped and not stripped.startswith(("#", "-")):
                     break  # next key: workflow_dispatch:, permissions:, ...
-                if (m := re.search(r'cron:\s*"?([^"\n]+?)"?\s*$', stripped)):
+                # Only real `- cron: ...` list items count; schedule blocks
+                # carry explanatory comments that mention cron expressions.
+                if (m := re.search(r'^- cron:\s*"?([^"\n]+?)"?\s*$', stripped)):
                     fields = m.group(1).split()
                     self.assertEqual(
                         len(fields), 5,
@@ -246,58 +248,100 @@ class ScheduleOrderingTests(unittest.TestCase):
                         minutes.append(int(part))
         return minutes
 
-    def test_both_workflows_still_have_schedules(self):
+    def test_update_is_the_only_schedule(self):
+        """The chain contract (2026-10-01): update.yml is the schedule.
+
+        update.yml fires every 30 minutes and, at the end of a successful
+        build, dispatches probe-egress.yml with `gh workflow run`. That makes
+        "publish, then probe" a hard ordering - no cron-spacing bet, and the
+        probe measures the pool that was JUST published.
+
+        So update.yml must keep its schedule, and probe-egress.yml must NOT
+        have one of its own: two crons is exactly the old architecture that
+        let the probe measure the previous slot's pool.
+        """
         self.assertTrue(self.PRODUCER.is_file(), f"missing {self.PRODUCER}")
         self.assertTrue(self.CONSUMER.is_file(), f"missing {self.CONSUMER}")
-        for path in (self.PRODUCER, self.CONSUMER):
-            self.assertTrue(
-                self.schedule_crons(path),
-                f"{path.name} has no cron; the pipeline stopped running unattended",
-            )
-
-    def test_update_runs_exactly_once_per_hour(self):
+        self.assertTrue(
+            self.schedule_crons(self.PRODUCER),
+            "update.yml lost its schedule; the pipeline stopped running unattended",
+        )
         self.assertEqual(
-            self.schedule_crons(self.PRODUCER), [7],
-            "update.yml must publish the pool exactly once an hour",
+            self.schedule_crons(self.CONSUMER), [],
+            "probe-egress.yml has its own cron again; the chain (update.yml "
+            "dispatches it after publish) was broken",
         )
 
-    def test_probe_runs_exactly_once_per_hour(self):
+    def test_update_runs_every_30_minutes(self):
+        """The chain cadence: :05 and :35 of every hour.
+
+        :05 rather than :00 on purpose - GitHub delays :00 the most because
+        every repo on Actions fires at :00. The 30-min gap exceeds a full
+        build (10-23 min), so a delayed run slips or queues (concurrency
+        group, cancel-in-progress: false) rather than collides.
+        """
         self.assertEqual(
-            self.schedule_crons(self.CONSUMER), [37],
-            "probe-egress.yml must run exactly once an hour, after the update",
+            self.schedule_crons(self.PRODUCER), [5, 35],
+            "update.yml must run every 30 minutes to keep the chain cadence",
         )
 
-    def test_probe_never_fires_before_or_with_the_update(self):
-        """The regression itself: probe minute must be strictly after update's."""
-        update_minutes = self.schedule_crons(self.PRODUCER)
-        probe_minutes = self.schedule_crons(self.CONSUMER)
-        for probe in probe_minutes:
-            for update in update_minutes:
-                self.assertGreater(
-                    probe, update,
-                    f"probe-egress.yml fires at :{probe}02 before update.yml at "
-                    f":{update}02. It reads the pool update.yml publishes, so it "
-                    "measures the previous hour instead of this one",
-                )
+    def test_update_dispatches_the_probe(self):
+        """The chain itself: update.yml must dispatch probe-egress.yml.
+
+        Without this step the probe would only run when the watchdog's
+        10-minute tick happens to notice a stale health index, which is the
+        recovery path, not the pipeline.
+        """
+        text = self.PRODUCER.read_text(encoding="utf-8")
+        self.assertIn(
+            "gh workflow run probe-egress.yml", text,
+            "update.yml no longer dispatches the chained egress probe",
+        )
+        # The dispatch must be gated to scheduled/dispatched runs so push/PR
+        # builds (which publish nothing from source changes) don't spawn
+        # probes.
+        self.assertIn("github.event_name == 'schedule'", text)
+
+    def test_update_has_actions_permission_for_the_dispatch(self):
+        """`gh workflow run` needs the actions:write scope on the job token."""
+        text = self.PRODUCER.read_text(encoding="utf-8")
+        # The permissions block may carry explanatory comment lines between
+        # the two keys, so match the two keys independently under on:.
+        on_block = text.split("permissions:")[1].split("\njobs:")[0]
+        key_lines = [
+            l for l in on_block.splitlines()
+            if l.strip() and not l.lstrip().startswith("#")
+        ]
+        self.assertIn("contents: write", "\n".join(key_lines),
+                      "update.yml lost the contents:write permission it needs "
+                      "to publish")
+        self.assertIn(
+            "actions: write", "\n".join(key_lines),
+            "update.yml lost the actions:write permission the chained probe "
+            "dispatch needs",
+        )
 
     def test_gap_covers_a_full_update_run(self):
-        """30 min must exceed a 10-23 min run, or the two jobs overlap.
+        """The 30-min cadence must exceed a 10-23 min build, or two builds
+        overlap and race on verify-output/.
 
         The 10-23 min figure is measured: GH Actions run 36570401322 took
-        12:46:41 -> 12:53:14.
+        12:46:41 -> 12:53:14. (The probe no longer has its own cron - the chain
+        runs it from the end of the build - so this now guards the update
+        slots against themselves.)
         """
         update_minutes = self.schedule_crons(self.PRODUCER)
-        probe_minutes = self.schedule_crons(self.CONSUMER)
         worst_case_run_minutes = 25
-        for probe in probe_minutes:
-            for update in update_minutes:
-                gap = (probe - update) % 60
-                self.assertGreaterEqual(
-                    gap, worst_case_run_minutes,
-                    f"only {gap} min between update :{update}02 and probe :{probe}02; "
-                    f"an update can run {worst_case_run_minutes} min, so a slow run "
-                    "makes the probe measure the previous hour again",
-                )
+        slots = sorted(set(update_minutes))
+        for i, u in enumerate(slots):
+            nxt = slots[(i + 1) % len(slots)]
+            gap = (nxt - u) % 60 or 60
+            self.assertGreaterEqual(
+                gap, worst_case_run_minutes,
+                f"only {gap} min between update slots :{u}02 and :{nxt}02; a build "
+                f"can run {worst_case_run_minutes} min, so two builds would overlap "
+                "and race on verify-output/",
+            )
 
     def test_probe_notes_a_stale_pool_but_keeps_probing(self):
         """A stale pool is a *note*, not a kill (2026-10-01 incident).
