@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-Phase 2 Probe: Stability verification using cloudflare trace
+Phase 2 Probe: egress-IP stability verification
 - Reads enriched-configs.json from Phase 1
-- 10 x 30s stability checks via cloudflare.com/cdn-cgi/trace
-- Dynamic config classification
+- 1 initial round + 10 stability rounds at 30s spacing; each round asks the
+  egress Worker /ip through the config (egress IP, country, ffraud
+  classification) and probes Gemini from that same exit
+- Samples are deduped per config into unique IPs; one IP -> stable,
+  multi-IP -> dynamic-country / dynamic-elite (quality-gated)
+- Rolls the previous health index forward for pool members it did not
+  re-measure (merge_previous_health)
 - Outputs: egress-health.json
 """
 
@@ -30,9 +35,7 @@ ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 PORT_BASE = 30000
-SPEED_TEST_BYTES = 5_000_000
 MIN_DOWNLOAD_MB_S = 0.0005
-SPEED_CONSISTENCY_TOLERANCE = 0.25
 UTLS_FINGERPRINTS = {
     "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
     "random", "randomized",
@@ -278,34 +281,6 @@ def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
         return transport
     return None
 
-
-def _download_rate_mbps(payload_bytes: int, max_payload_bytes: int, starttransfer: float, total: float) -> float | None:
-    transfer_seconds = total - starttransfer
-    if payload_bytes <= 0 or payload_bytes > max_payload_bytes or transfer_seconds <= 0:
-        return None
-    return payload_bytes / 1_000_000 / transfer_seconds
-
-
-def _lowest_speed(*samples: float | None) -> float | None:
-    valid = [sample for sample in samples if sample is not None and sample > 0]
-    return min(valid) if valid else None
-
-
-def _speed_is_consistent(first: float | None, second: float | None) -> bool:
-    if first is None or second is None or not first or not second:
-        return False
-    return not (abs(first - second) / max(first, second) > SPEED_CONSISTENCY_TOLERANCE)
-
-
-def _speed_retests(first: float | None, second: float | None) -> int:
-    return sum(sample is not None for sample in (first, second))
-
-
-def _valid_speed(first: float | None, second: float | None) -> float | None:
-    speed = _lowest_speed(first, second)
-    if speed is None or speed < MIN_DOWNLOAD_MB_S:
-        return None
-    return round(speed, 6)
 
 
 def _tag(uri: str) -> str:
@@ -618,11 +593,14 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
 async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
     """Ask the Worker which IP this config egresses from.
 
-    This was a 5 MB download with SPEED_TEST_BYTES, which made no sense
-    here: Phase 1 already measures speed (Stage 3, writing to /dev/null) and
-    a config only reaches Phase 2 if it passed. Downloading 5 MB again per
-    config per round is what exhausted the proxies, not a property of the
-    configs. An IP check needs a few hundred bytes, so request those.
+    Phase 1 already measures real throughput (Stage 3's 5 MB transfer), and
+    a config only reaches Phase 2 if it passed. This is deliberately a tiny
+    /ip round trip: re-downloading megabytes per config per round is what
+    exhausted the proxies, not a property of the configs. The curl metric on
+    that small body yields download_mb_s -- a first-byte/throughput figure on
+    a few-hundred-byte response, NOT a speed verdict. Phase 1's Stage 3 is
+    the only real throughput measurement; the subscription worker labels and
+    ranks on Stage 3 and does not read the health index's download_mb_s.
     """
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{record["port"]}"',
@@ -1104,11 +1082,12 @@ async def main() -> int:
             "server": record["server"],
             "server_port": record.get("server_port"),
             "classification": classification,
-            # The subscription worker gates every proxy on
-            # healthById[id].download_mb_s (src/index.js:429), so this has to
-            # be published under that exact name. It was published as
-            # "speed_mb_s", the worker read it as absent, and every proxy
-            # looked unverified.
+            # download_mb_s is the AVERAGE of the probe's per-round tiny-/ip
+            # throughput figure -- a latency-ish number, NOT a verified speed.
+            # The subscription worker does NOT read it: it labels and ranks on
+            # Phase 1's Stage 3 (stages.download.speed_mb_s) and gates on
+            # membership. It is kept here only for a human opening the health
+            # index to see "roughly how fast did the IP check feel".
             "download_mb_s": round(avg_speed, 3),
             # Gemini reputation, aggregated over every round this config was
             # probed. status is "clean" | "flagged" | "unknown" -- three
