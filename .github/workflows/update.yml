@@ -89,6 +89,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # Full depth: peaceiris/actions-gh-pages side-clones and pushes the
+          # gh-pages branch; with a shallow checkout it intermittently fails
+          # with "No such remote: 'origin'" (run 36910739610).
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
