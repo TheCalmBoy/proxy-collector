@@ -2,10 +2,11 @@ name: Freshness Watchdog
 
 on:
   schedule:
-    # 10-minute heartbeat. This tick costs ~1 minute of runner time (two
+    # 5-minute heartbeat. This tick costs ~1 minute of runner time (two
     # curl fetches + one python call) and is free on a public repo, so the
     # only limit is GitHub's per-repo concurrent-workflow count, which one
-    # small job never hits.
+    # small job never hits. Decision thresholds (50/70 min) are far above the
+    # healthy cadence, so the extra ticks just no-op in under a second.
     #
     # This workflow exists because GitHub's free-tier schedule: crons on the
     # two heavy workflows (update.yml :07, probe-egress.yml :37) are
@@ -20,7 +21,7 @@ on:
     # misses a tick, the next watchdog tick detects the freeze and dispatches
     # the heavy workflow itself. Worst case the pipeline degrades from
     # "hourly" to "every ~40 min", instead of freezing.
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -65,12 +66,12 @@ jobs:
         #                               probe has published since.
         # Both exceed the healthy ~30-min spacing plus a full run (10-25 min),
         # so healthy chain runs never dispatch a duplicate; a missed slot
-        # trips on the next 10-min tick.
+        # trips on the next 5-min tick.
         run: |
           set -euo pipefail
           # --check-active: if a dispatched update/probe is already queued or
-          # running (or one finished within the hour), don't dispatch a second
-          # one - the last hour's tick already fired the recovery.
+          # running (or one finished within the last 20 min), don't dispatch a
+          # second one - the recent tick already fired the recovery.
           out=$(python tools/freshness_watch.py --pool watch-pool.json --health watch-health.json --check-active)
           echo "decision=$(echo "$out" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "reason=$(echo "$out" | cut -d' ' -f2-)" >> "$GITHUB_OUTPUT"
