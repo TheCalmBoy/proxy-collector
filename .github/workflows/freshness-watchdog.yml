@@ -1,35 +1,23 @@
 name: Freshness Watchdog
 
 on:
-  schedule:
-    # 10-minute heartbeat. This tick costs ~1 minute of runner time (two
-    # curl fetches + one python call) and is free on a public repo. Both
-    # decision thresholds (30 / 10 min) exceed one 10-min cadence, so a
-    # healthy chain never dispatches a duplicate; a missed slot is caught on
-    # the next tick.
-    #
-    # This workflow exists because GitHub's free-tier schedule: crons on the
-    # two heavy workflows are best-effort and get delayed or skipped under
-    # load. A skipped update freezes the pool; the stale-pool guard then
-    # freezes the health index; the worker's join drops configs and the
-    # served subscription shrinks for hours (the 2026-10-01 incident: 5
-    # skipped hourly runs, health join collapsed 93 -> 71).
-    #
-    # The watchdog cannot stop the scheduler from skipping ticks. It gives
-    # the pipeline a second, independent trigger path: if the heavy cron
-    # misses a tick, the next watchdog tick detects the freeze and dispatches
-    # the heavy workflow itself. Worst case the pipeline degrades from
-    # "every 30 min" to "every ~40 min", instead of freezing.
-    - cron: "*/10 * * * *"
-  # External heartbeat path (0xRadikal pattern): a Cloudflare Worker cron POSTs
-  # to /dispatches every 5 minutes. This is the trigger that cannot be skipped
-  # by GitHub's best-effort scheduler -- the 2026-10-01 freeze happened because
-  # the ONLY waking paths (schedule: on update, schedule: here) both lived on
-  # the same flaky scheduler. repository_dispatch wakes this job on any
-  # external beat; the freshness gate below still no-ops when the pool is
-  # fresh, so the extra trigger costs nothing.
+  # NO schedule: here. This watchdog is now woken ONLY by the external
+  # Cloudflare heartbeat -- the single clock for the whole pipeline.
+  # heartbeat/wrangler.jsonc schedules the Worker every 5 minutes; it POSTs
+  # a repository_dispatch(heartbeat) that lands here. The two GitHub
+  # schedule: crons (this */10 and update.yml's */30) were removed: a CF
+  # clock plus a flaky GitHub clock meant double-runs and stacked queued
+  # probes. One clock, one path.
+  #
+  # history (2026-10-01 freeze): GitHub's free-tier schedule: crons skipped
+  # ticks, so the pipeline's only waking paths were both on the same flaky
+  # scheduler. The external beat below is the trigger that cannot be skipped
+  # by GitHub; the freshness gate still no-ops when the pool is fresh, so
+  # every 5-min beat that has nothing to do costs ~1 free runner minute.
   repository_dispatch:
     types: [heartbeat]
+  # Manual wake only: a human can still dispatch this directly. It does not
+  # fire on its own, so it does not add a second clock.
   workflow_dispatch: {}
 
 permissions:

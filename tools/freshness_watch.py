@@ -180,8 +180,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="path to the downloaded enriched-configs.json")
     parser.add_argument("--health", default=None,
                         help="path to the downloaded egress-health.json")
-    parser.add_argument("--pool-stale-min", type=float, default=30.0)
-    parser.add_argument("--health-stale-min", type=float, default=10.0)
+    # Must match decide()'s defaults (20 / 5). The workflow calls this with
+    # neither flag, so a drifted argparse default silently re-sets the cadence
+    # (the 30/10 here is what made beats fall through between 5-min probes).
+    parser.add_argument("--pool-stale-min", type=float, default=20.0)
+    parser.add_argument("--health-stale-min", type=float, default=5.0)
     parser.add_argument(
         "--check-active",
         action="store_true",

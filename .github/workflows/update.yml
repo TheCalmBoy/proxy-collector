@@ -1,21 +1,14 @@
 name: Update Proxy Database
 
 on:
-  schedule:
-    # Every 30 minutes, and the probe no longer has its own cron: the probe
-    # workflow runs as a CHAIN of this run (a `workflow_run` trigger fires it
-    # the moment this run completes and hands it the verified pool as an
-    # artifact). That makes "update publishes, then probe measures" a real
-    # ordering instead of a cron-spacing bet.
-    #
-    # :05 rather than :00 on purpose. GitHub delays :00 the most, because every
-    # repo on Actions fires at :00.
-    #
-    # GitHub crons are UTC and best-effort: a run can start late or be skipped
-    # under load. freshness-watchdog.yml (*/10 tick) is the recovery path - it
-    # dispatches this workflow when the pool freezes, and the chain then runs
-    # the probe automatically on completion.
-    - cron: "5,35 * * * *"
+  # NO schedule: here. The only activator is the external Cloudflare heartbeat
+  # (heartbeat/wrangler.jsonc crons */5) -> repository_dispatch(heartbeat) on
+  # freshness-watchdog.yml -> the watchdog dispatches THIS workflow when the
+  # pool is >20 min old. GitHub's free-tier crons skipped ticks on
+  # 2026-10-01 and were removed entirely: two clocks (CF heartbeat + GitHub
+  # schedule) produced double-runs and queue stacks. One clock, one path.
+  # The probe still chains off this run via `gh workflow run` (strict
+  # publish-then-probe ordering).
   # External heartbeat path (0xRadikal pattern): the Cloudflare cron wakes the
   # watchdog, and any external operator can wake this workflow directly by
   # POSTing to /dispatches. This path cannot be skipped by GitHub's
@@ -485,9 +478,10 @@ jobs:
         # uses, and the probe's own concurrency group serializes any overlap
         # with a watchdog dispatch.
         #
-        # schedule, manual, and external (repository_dispatch) runs chain -
-        # not a push or PR.
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch'
+        # Heartbeat-dispatched and manual runs chain - not a push or PR.
+        # (No schedule: trigger any more: the Cloudflare heartbeat is the
+        # only activator, so repository_dispatch is the expected event.)
+        if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

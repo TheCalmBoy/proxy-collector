@@ -45,8 +45,12 @@ jobs:
       # the runner: 99/174 died with curl exit 35 (TLS handshake failure) and
       # 50 with exit 97 (proxy handshake rejected), which is local resource
       # exhaustion masquerading as dead proxies. Phase 1 uses 750 sockets for
-      # cheap one-byte CONNECTs; phase 2 moves real payload, so it gets 50.
-      PROBE_CONCURRENCY: ${{ inputs.probe_concurrency || '50' }}
+      # cheap one-byte CONNECTs; phase 2 moves real payload, so it gets fewer.
+      # 100 (up from 50): the stability loop's 9s/round is a fan-out floor -
+      # 347 proxies / 50 concurrent = 7 waves of the slowest residential exit.
+      # 100 cuts that to ~4 waves (~5s work/round). Same request count, same
+      # 19 rounds; only more of them run at once.
+      PROBE_CONCURRENCY: ${{ inputs.probe_concurrency || '100' }}
       RETEST_DELAY_SECONDS: "300"
 
     steps:
