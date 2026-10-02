@@ -12,20 +12,24 @@ pool and the chain (probe after publish) breaks with it - the health index
 freezes and the worker's join drops configs the index no longer covers.
 
 This module does not fix the scheduler. It adds a redundant trigger path: a
-cheap workflow (freshness-watchdog.yml) evaluates this decision every ~10
-minutes and dispatches the expensive workflow when its input is stale. A
-skipped slot is recovered on the next watchdog tick instead of the next slot.
+cheap workflow (freshness-watchdog.yml) evaluates this decision every 10
+minutes (GitHub schedule plus the external Cloudflare heartbeat, both feeding
+the same gate) and dispatches the expensive workflow when its input is stale.
+A missed slot is recovered on the next watchdog tick instead of the next slot.
 
 The decision is a pure function of the two published documents so it can be
 unit-tested without a runner:
 
-    "update"  the pool itself is missing or older than --pool-stale-min.
-              Re-collect first; the next tick will dispatch the probe once
-              the fresh pool is out.
-    "probe"   the health index is older than --health-stale-min, or the pool
-              was republished more than the grace window before the last
-              health measurement (the chain probe for that slot never ran).
+    "update"  the pool itself is missing or older than --pool-stale-min
+              (default 30). The update re-collects AND chains its own probe,
+              so one update covers both.
+    "probe"   the health index is older than --health-stale-min (default 10)
+              while the pool is fresh: the chain probe for the current pool
+              never ran.
     "none"    both are fresh; the tick is a no-op.
+
+The two checks are independent: the pool check gates the re-collect, the
+health check gates the probe. Update wins when both are stale.
 """
 
 from __future__ import annotations
@@ -73,23 +77,41 @@ def decide(
     pool_doc: Any,
     health_doc: Any,
     now: datetime | None = None,
-    pool_stale_min: float = 50.0,
-    health_stale_min: float = 70.0,
-    probe_dispatch_grace_min: float = 30.0,
+    pool_stale_min: float = 30.0,
+    health_stale_min: float = 10.0,
 ) -> Decision:
     """Pick the one workflow to run, if any.
 
-    Tuned to the 30-min chain (update.yml at :05/:35 dispatches probe-egress
-    at the end of each build). Healthy spacing is ~30 min, so a pool older
-    than 50 min means the chain missed at least one slot, and a health index
-    older than 70 min means no probe has landed since two slots ago. A full
-    probe run takes ~10-25 min, so the 70-min health threshold never trips on
-    a probe that is merely in flight.
+    Two independent freshness checks, the watchdog's whole job:
 
-    Order matters: a frozen pool always wins, because probing a pool that no
-    update has produced since would only publish a health report describing
-    the same frozen feed. update.yml runs first; the next tick sees the fresh
-    pool and dispatches the probe.
+    1. Pool (the published pool document) older than ``pool_stale_min``
+       (default 30 min) -> run ``update``. A re-collect publishes a fresh pool
+       AND chains the probe at the end of the build, so one update covers
+       both the pool and its measurement.
+
+    2. Health (the probe's published output) older than ``health_stale_min``
+       (default 10 min) -> run ``probe``. This fires when the pool is fresh
+       but the measurement is not: the chain probe for the current pool never
+       landed, or the probe simply has not ticked in the last 10 min.
+
+    The two checks are evaluated in order, so a frozen pool always wins (a
+    probe of a stale pool would only publish a report about a pool nobody is
+    serving). They are independent and both run every tick: a fresh pool with
+    a stale health dispatches only the probe; a stale pool dispatches the
+    update (which chains its own probe) and the health check is re-evaluated
+    on the next tick once the fresh pool is out.
+
+    The previous "pool republished after the last measurement" grace case is
+    gone: under a 10-min health threshold, any pool older than its own
+    measurement is already >10 min newer than the health index, so the health
+    check above catches it directly. There is no separate grace window.
+
+    Args:
+        pool_doc:  parsed enriched-configs.json (or None on fetch/parse failure).
+        health_doc: parsed egress-health.json (or None).
+        now:       the clock to measure age against (injected for tests).
+        pool_stale_min: pool age (minutes) at which to re-collect (default 30).
+        health_stale_min: health age (minutes) at which to re-probe (default 10).
     """
     now = now or datetime.now(timezone.utc)
     pool_ts = parse_generated_at(pool_doc)
@@ -107,22 +129,6 @@ def decide(
         return Decision("probe", f"health index {detail}",
                         pool_age, health_age)
 
-    # Both exist and are young. The remaining case: the pool was republished
-    # AFTER the health index was written - the current pool has not been
-    # measured yet (the chain probe for that slot never ran). Compare stamps
-    # directly; both are tz-aware UTC ISO.
-    #
-    # A probe run takes up to ~25 min, so a pool published up to 30 min before
-    # its probe's health lands is still healthy in-flight (the chain fired and
-    # is finishing). Only a lag past that grace means the chain dispatch for
-    # that slot never ran.
-    if pool_ts and health_ts and pool_ts - health_ts > timedelta(minutes=probe_dispatch_grace_min):
-        return Decision(
-            "probe",
-            "pool republished more than the grace window before the last "
-            "health measurement",
-            pool_age, health_age,
-        )
     return Decision("none", "feed and health index are fresh", pool_age, health_age)
 
 
@@ -142,11 +148,10 @@ def heavy_workflow_active() -> bool:
     The watchdog dispatches with ``gh workflow run``; a queued instance is
     not yet in the public branch, so without this check a stuck pipeline
     would pile up duplicate dispatches every 10 minutes. Also true when
-    either workflow already completed within the last 20 min - both heavy
-    runs take 10-25 minutes and the chain cadence is 30 min, so a completed
-    run inside that window means the pipeline just fired.
+    either workflow already completed within the last 30 min - both heavy
+    runs take 10-25 minutes and the chain cadence is 30 min, so a completed run inside that window means the pipeline just fired.
 
-    Deliberately NOT true when an update completed >20 min ago but no probe
+    Deliberately NOT true when an update completed >30 min ago but no probe
     followed: on the 30-min chain that is exactly the broken state (the
     dispatch step died after publish) the watchdog must recover.
     """
@@ -166,7 +171,7 @@ def heavy_workflow_active() -> bool:
             if run.get("status") in ("queued", "in_progress"):
                 return True
             created = parse_generated_at(run, key="createdAt")
-            if created and now - created < timedelta(minutes=20):
+            if created and now - created < timedelta(minutes=30):
                 return True
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return False
@@ -179,8 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="path to the downloaded enriched-configs.json")
     parser.add_argument("--health", default=None,
                         help="path to the downloaded egress-health.json")
-    parser.add_argument("--pool-stale-min", type=float, default=50.0)
-    parser.add_argument("--health-stale-min", type=float, default=70.0)
+    parser.add_argument("--pool-stale-min", type=float, default=30.0)
+    parser.add_argument("--health-stale-min", type=float, default=10.0)
     parser.add_argument(
         "--check-active",
         action="store_true",

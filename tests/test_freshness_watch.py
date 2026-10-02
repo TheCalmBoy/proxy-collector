@@ -36,12 +36,18 @@ class TestParseGeneratedAt(unittest.TestCase):
 
 
 class TestDecide(unittest.TestCase):
+    """decide() is pure timestamp math: pool > 30 min -> update, else
+    health > 10 min -> probe, else none. Update wins when both are stale.
+    (In-flight dedup for a probe that is still running lives in the
+    --check-active / heavy_workflow_active() guard, not in decide().)"""
+
     def test_both_missing_wants_update(self):
         d = freshness_watch.decide(None, None, now=NOW)
         self.assertEqual("update", d.action)
 
     def test_fresh_pool_and_fresh_health_is_noop(self):
-        d = freshness_watch.decide(_doc(25), _doc(10), now=NOW)
+        # pool 25 (<= 30), health 8 (<= 10): both fresh.
+        d = freshness_watch.decide(_doc(25), _doc(8), now=NOW)
         self.assertEqual("none", d.action)
 
     def test_stale_pool_wants_update_even_if_health_is_fresh(self):
@@ -58,35 +64,30 @@ class TestDecide(unittest.TestCase):
         d = freshness_watch.decide(_doc(30), None, now=NOW)
         self.assertEqual("probe", d.action)
 
-    def test_pool_republished_after_last_measurement_wants_probe(self):
-        # Both are young, but the pool is 35 min NEWER than the health index -
-        # more than one chain slot, so that slot's chain dispatch died.
+    def test_fresh_pool_health_past_10min_wants_probe(self):
+        # pool is fresh (5 min) but the measurement is 40 min old: the chain
+        # probe for the current pool never ran.
         d = freshness_watch.decide(_doc(5), _doc(40), now=NOW)
         self.assertEqual("probe", d.action)
 
-    def test_pool_within_grace_of_last_measurement_is_noop(self):
-        # The pool published 25 min after the last health index: the chain
-        # probe for that pool is still in flight (a run takes up to ~25 min).
-        # The watchdog must not re-dispatch on top of the chain.
-        d = freshness_watch.decide(_doc(5), _doc(30), now=NOW)
+    def test_stale_pool_wins_over_stale_health(self):
+        # Both past threshold: update wins (its chained probe covers the
+        # measurement; the probe check re-fires next tick if needed).
+        d = freshness_watch.decide(_doc(40), _doc(45), now=NOW)
+        self.assertEqual("update", d.action)
+
+    def test_pool_exact_30min_health_exact_10min_is_noop(self):
+        # "> limit" is strict: landing exactly on the boundary is fresh.
+        d = freshness_watch.decide(_doc(30), _doc(10), now=NOW)
         self.assertEqual("none", d.action)
 
-    def test_health_newer_than_pool_is_noop(self):
-        d = freshness_watch.decide(_doc(40), _doc(20), now=NOW)
-        self.assertEqual("none", d.action)
+    def test_pool_just_over_30min_wants_update(self):
+        d = freshness_watch.decide(_doc(31), _doc(5), now=NOW)
+        self.assertEqual("update", d.action)
 
-    def test_exact_stale_boundary_is_not_stale(self):
-        # pool exactly 50 min / health exactly 70 min: "> limit" is strict,
-        # a healthy chain run landing on the boundary must not dispatch.
-        d = freshness_watch.decide(_doc(50), _doc(70), now=NOW)
-        self.assertEqual("none", d.action)
-
-    def test_momentarily_in_flight_probe_is_not_stale(self):
-        # Chain in flight: the pool published 20 min ago (build just finished),
-        # the previous slot's health is 45 min old. A probe for this slot is
-        # either queued or finishing - the watchdog must stay silent.
-        d = freshness_watch.decide(_doc(20), _doc(45), now=NOW)
-        self.assertEqual("none", d.action)
+    def test_health_just_over_10min_wants_probe(self):
+        d = freshness_watch.decide(_doc(20), _doc(11), now=NOW)
+        self.assertEqual("probe", d.action)
 
 
 class TestLoad(unittest.TestCase):

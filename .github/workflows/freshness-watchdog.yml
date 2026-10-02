@@ -2,26 +2,25 @@ name: Freshness Watchdog
 
 on:
   schedule:
-    # 5-minute heartbeat. This tick costs ~1 minute of runner time (two
-    # curl fetches + one python call) and is free on a public repo, so the
-    # only limit is GitHub's per-repo concurrent-workflow count, which one
-    # small job never hits. Decision thresholds (50/70 min) are far above the
-    # healthy cadence, so the extra ticks just no-op in under a second.
+    # 10-minute heartbeat. This tick costs ~1 minute of runner time (two
+    # curl fetches + one python call) and is free on a public repo. Both
+    # decision thresholds (30 / 10 min) exceed one 10-min cadence, so a
+    # healthy chain never dispatches a duplicate; a missed slot is caught on
+    # the next tick.
     #
     # This workflow exists because GitHub's free-tier schedule: crons on the
-    # two heavy workflows (update.yml :07, probe-egress.yml :37) are
-    # best-effort and get delayed or skipped under load. A skipped update
-    # freezes the pool; the stale-pool guard then freezes the health index;
-    # the worker's join drops configs and the served subscription shrinks
-    # for hours (the 2026-10-01 incident: 5 skipped hourly runs, health
-    # join collapsed 93 -> 71).
+    # two heavy workflows are best-effort and get delayed or skipped under
+    # load. A skipped update freezes the pool; the stale-pool guard then
+    # freezes the health index; the worker's join drops configs and the
+    # served subscription shrinks for hours (the 2026-10-01 incident: 5
+    # skipped hourly runs, health join collapsed 93 -> 71).
     #
     # The watchdog cannot stop the scheduler from skipping ticks. It gives
     # the pipeline a second, independent trigger path: if the heavy cron
     # misses a tick, the next watchdog tick detects the freeze and dispatches
     # the heavy workflow itself. Worst case the pipeline degrades from
-    # "hourly" to "every ~40 min", instead of freezing.
-    - cron: "*/5 * * * *"
+    # "every 30 min" to "every ~40 min", instead of freezing.
+    - cron: "*/10 * * * *"
   # External heartbeat path (0xRadikal pattern): a Cloudflare Worker cron POSTs
   # to /dispatches every 5 minutes. This is the trigger that cannot be skipped
   # by GitHub's best-effort scheduler -- the 2026-10-01 freeze happened because
@@ -68,14 +67,15 @@ jobs:
       - name: Decide
         id: decide
         shell: bash
-        # Freshness thresholds (30-min chain cadence):
-        #   pool stale     > 50 min -> the chain missed at least one slot;
-        #                               re-collect now (which re-chains the probe).
-        #   health stale   > 70 min -> two slots ago there was a pool but no
-        #                               probe has published since.
-        # Both exceed the healthy ~30-min spacing plus a full run (10-25 min),
-        # so healthy chain runs never dispatch a duplicate; a missed slot
-        # trips on the next 5-min tick.
+        # Freshness thresholds (two independent checks, 10-min cadence):
+        #   pool stale     > 30 min -> the chain missed a slot; re-collect
+        #                               now (which re-chains its own probe).
+        #   health stale   > 10 min -> the current pool has not been measured;
+        #                               dispatch the probe on its own.
+        # When both are stale, update wins (its chained probe covers it; the
+        # probe check re-fires next tick if the chain dispatch dies). The
+        # --check-active guard skips a dispatch while a heavy run is
+        # queued/running or finished within the last 30 min.
         run: |
           set -euo pipefail
           # --check-active: if a dispatched update/probe is already queued or
