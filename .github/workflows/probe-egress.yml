@@ -185,7 +185,10 @@ jobs:
           # broken proxies.
           ulimit -n 65535 || echo "warning: could not raise fd limit"
           ulimit -n
-          python tools/probe_egress.py
+          # -u: the probe prints phase-level timing anchors ([t0]-[t3]); when
+          # stdout is block-buffered (no TTY) every line dumps at step end and
+          # the bottleneck is invisible.
+          python -u tools/probe_egress.py
 
       - name: Upload sing-box log
         # Always uploaded and not if-guarded. When sing-box dies mid-run every

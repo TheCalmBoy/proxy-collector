@@ -1145,10 +1145,18 @@ async def main() -> int:
                 raise RuntimeError("sing-box restarted without live listeners")
 
         # Initial speed test via Worker
-        print("Running initial speed test via Worker...")
+        # Timing anchors: the step has taken ~5m40s with no per-phase
+        # timestamps, and the process stdout is block-buffered (no -u), so
+        # without these the log dumps everything at step end and the
+        # bottleneck is invisible. Each phase prints its own elapsed
+        # seconds as it finishes.
+        phase_started = time.monotonic()
+        print(f"[t0] probe step started ({len(records)} configs)", flush=True)
+        print("Running initial speed test via Worker...", flush=True)
         first = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r in records))
         ok = sum(1 for r in first if r.get("ok"))
-        print(f"Initial: {ok}/{len(records)} returned an IP")
+        print(f"Initial: {ok}/{len(records)} returned an IP", flush=True)
+        print(f"[t1] initial round done in {time.monotonic() - phase_started:.0f}s", flush=True)
         # Without this the run only ever reports "0/N returned an IP", which
         # says nothing about why. Print the dominant failure so the cause is
         # visible in the log instead of requiring a local reproduction.
@@ -1205,12 +1213,15 @@ async def main() -> int:
                     if hosting_history[rid]:
                         hosting_history[rid].append(hosting_history[rid][-1])
 
+        print(f"[t2] stability loop done in {time.monotonic() - phase_started:.0f}s total", flush=True)
+
         # Final speed test via Worker
-        print("Running final speed test via Worker...")
+        print("Running final speed test via Worker...", flush=True)
         await _ensure_core()
         final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r, _ in live))
         ok = sum(1 for r in final if r.get("ok"))
-        print(f"Final: {ok}/{len(live)} returned an IP")
+        print(f"Final: {ok}/{len(live)} returned an IP", flush=True)
+        print(f"[t3] final round done in {time.monotonic() - phase_started:.0f}s total", flush=True)
         _print_error_breakdown(final, "Final")
 
         for r in final:
