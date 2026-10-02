@@ -22,6 +22,15 @@ on:
     # the heavy workflow itself. Worst case the pipeline degrades from
     # "hourly" to "every ~40 min", instead of freezing.
     - cron: "*/5 * * * *"
+  # External heartbeat path (0xRadikal pattern): a Cloudflare Worker cron POSTs
+  # to /dispatches every 5 minutes. This is the trigger that cannot be skipped
+  # by GitHub's best-effort scheduler -- the 2026-10-01 freeze happened because
+  # the ONLY waking paths (schedule: on update, schedule: here) both lived on
+  # the same flaky scheduler. repository_dispatch wakes this job on any
+  # external beat; the freshness gate below still no-ops when the pool is
+  # fresh, so the extra trigger costs nothing.
+  repository_dispatch:
+    types: [heartbeat]
   workflow_dispatch: {}
 
 permissions:

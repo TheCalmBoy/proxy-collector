@@ -16,6 +16,13 @@ on:
     # dispatches this workflow when the pool freezes, and the chain then runs
     # the probe automatically on completion.
     - cron: "5,35 * * * *"
+  # External heartbeat path (0xRadikal pattern): the Cloudflare cron wakes the
+  # watchdog, and any external operator can wake this workflow directly by
+  # POSTing to /dispatches. This path cannot be skipped by GitHub's
+  # best-effort scheduler, which is the only reason the pipeline froze on
+  # 2026-10-01.
+  repository_dispatch:
+    types: [update-now, update-proxy-database]
   workflow_dispatch:
     inputs:
       verify_limit:
@@ -463,8 +470,9 @@ jobs:
         # uses, and the probe's own concurrency group serializes any overlap
         # with a watchdog dispatch.
         #
-        # Only schedule/dispatch runs chain - not a push or PR.
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        # schedule, manual, and external (repository_dispatch) runs chain -
+        # not a push or PR.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'repository_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
