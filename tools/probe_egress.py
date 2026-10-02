@@ -1195,11 +1195,23 @@ async def main() -> int:
         if not live:
             print("No config returned an IP in the initial round; skipping stability checks.")
             return 1
+        round_times = []
         for i in range(STABILITY_INTERVALS):
+            round_started = time.monotonic()
             await asyncio.sleep(STABILITY_INTERVAL_SECONDS)
             print(f"Stability check {i+1}/{STABILITY_INTERVALS}...")
             await _ensure_core()
             results = await _run_stability_check([r for r, _ in live])
+            round_elapsed = time.monotonic() - round_started
+            round_times.append(round_elapsed)
+            # Per-round wall time: each round is a full fan-out of Cloudflare
+            # trace requests through every live proxy, so its cost is dominated
+            # by that work, not the interval sleep. Printing it per round (with
+            # -u flushing the step live) makes a slow round visible the moment
+            # it happens instead of only in the dumped-at-end log.
+            print(f"[round {i+1}] {round_elapsed:.1f}s "
+                  f"({len(live)} proxies, {STABILITY_INTERVAL_SECONDS}s wait)",
+                  flush=True)
             for j, r in enumerate(results):
                 rid = live[j][0]["id"]
                 if r.get("ok"):
@@ -1212,6 +1224,11 @@ async def main() -> int:
                         fraud_history[rid].append(fraud_history[rid][-1])
                     if hosting_history[rid]:
                         hosting_history[rid].append(hosting_history[rid][-1])
+        if round_times:
+            avg = sum(round_times) / len(round_times)
+            print(f"[rounds] {len(round_times)} rounds, avg {avg:.1f}s, "
+                  f"min {min(round_times):.1f}s, max {max(round_times):.1f}s, "
+                  f"total {sum(round_times):.0f}s", flush=True)
 
         print(f"[t2] stability loop done in {time.monotonic() - phase_started:.0f}s total", flush=True)
 
