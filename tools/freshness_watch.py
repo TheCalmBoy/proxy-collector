@@ -1,35 +1,36 @@
 """Freshness watchdog: one decision per tick, computed from two timestamps.
 
+The external Cloudflare heartbeat (proxy-pipeline-heartbeat) is the ONLY clock
+that fires the pipeline. It POSTs a ``repository_dispatch`` (event_type=
+heartbeat) to the watchdog every 5 minutes; this module is the watchdog's brain.
+No GitHub ``schedule:`` cron fires update.yml or probe-egress.yml any more -
+the GitHub free-tier scheduler stopped ticking on 2026-10-01 and is no longer
+trusted as a wake source, so everything is driven off the external beat.
+
 The pipeline is two chained workflows:
 
-    update.yml (every 30 min, :05/:35)  -> publishes gh-pages/enriched-configs.json
+    update.yml    -> publishes gh-pages/enriched-configs.json
       and dispatches probe-egress.yml at the end of a successful build,
-      which measures it and publishes gh-pages/egress-health.json.
+      which measures the just-published pool and publishes
+      gh-pages/egress-health.json.
 
-GitHub's free-tier ``schedule:`` crons are best-effort: a tick can be delayed
-or skipped entirely. When an update slot is skipped, nothing re-collects the
-pool and the chain (probe after publish) breaks with it - the health index
-freezes and the worker's join drops configs the index no longer covers.
-
-This module does not fix the scheduler. It adds a redundant trigger path: a
-cheap workflow (freshness-watchdog.yml) evaluates this decision every 10
-minutes (GitHub schedule plus the external Cloudflare heartbeat, both feeding
-the same gate) and dispatches the expensive workflow when its input is stale.
-A missed slot is recovered on the next watchdog tick instead of the next slot.
-
-The decision is a pure function of the two published documents so it can be
-unit-tested without a runner:
+The heartbeat is a 5-minute pulse; the watchdog turns it into the two-step
+cycle the user wants: a database update ~every 20 min, and a probe right after
+each update, then a probe on the current pool ~every 5 min until the next
+update. That is exactly two freshness thresholds:
 
     "update"  the pool itself is missing or older than --pool-stale-min
-              (default 30). The update re-collects AND chains its own probe,
-              so one update covers both.
-    "probe"   the health index is older than --health-stale-min (default 10)
-              while the pool is fresh: the chain probe for the current pool
-              never ran.
+              (default 20). The update re-collects AND chains its own probe,
+              so one update covers the pool and its first measurement.
+    "probe"   the pool is fresh (< pool_stale) but the health index is older
+              than --health-stale-min (default 5): re-measure the current pool.
+              Because the beat is 5 min and a probe takes ~5 min, this yields
+              the densest probe cadence the heartbeat allows (~every 5-10 min).
     "none"    both are fresh; the tick is a no-op.
 
-The two checks are independent: the pool check gates the re-collect, the
-health check gates the probe. Update wins when both are stale.
+The two checks are independent; update wins when both are stale (its chained
+probe covers the measurement). In-flight dedup so two beats never stack a
+second heavy run lives in heavy_workflow_active() / --check-active, not here.
 """
 
 from __future__ import annotations
@@ -77,22 +78,22 @@ def decide(
     pool_doc: Any,
     health_doc: Any,
     now: datetime | None = None,
-    pool_stale_min: float = 30.0,
-    health_stale_min: float = 10.0,
+    pool_stale_min: float = 20.0,
+    health_stale_min: float = 5.0,
 ) -> Decision:
     """Pick the one workflow to run, if any.
 
     Two independent freshness checks, the watchdog's whole job:
 
     1. Pool (the published pool document) older than ``pool_stale_min``
-       (default 30 min) -> run ``update``. A re-collect publishes a fresh pool
+       (default 20 min) -> run ``update``. A re-collect publishes a fresh pool
        AND chains the probe at the end of the build, so one update covers
        both the pool and its measurement.
 
     2. Health (the probe's published output) older than ``health_stale_min``
-       (default 10 min) -> run ``probe``. This fires when the pool is fresh
+       (default 5 min) -> run ``probe``. This fires when the pool is fresh
        but the measurement is not: the chain probe for the current pool never
-       landed, or the probe simply has not ticked in the last 10 min.
+       landed, or the probe simply has not ticked in the last 5 min.
 
     The two checks are evaluated in order, so a frozen pool always wins (a
     probe of a stale pool would only publish a report about a pool nobody is
@@ -101,17 +102,12 @@ def decide(
     update (which chains its own probe) and the health check is re-evaluated
     on the next tick once the fresh pool is out.
 
-    The previous "pool republished after the last measurement" grace case is
-    gone: under a 10-min health threshold, any pool older than its own
-    measurement is already >10 min newer than the health index, so the health
-    check above catches it directly. There is no separate grace window.
-
     Args:
         pool_doc:  parsed enriched-configs.json (or None on fetch/parse failure).
         health_doc: parsed egress-health.json (or None).
         now:       the clock to measure age against (injected for tests).
-        pool_stale_min: pool age (minutes) at which to re-collect (default 30).
-        health_stale_min: health age (minutes) at which to re-probe (default 10).
+        pool_stale_min: pool age (minutes) at which to re-collect (default 20).
+        health_stale_min: health age (minutes) at which to re-probe (default 5).
     """
     now = now or datetime.now(timezone.utc)
     pool_ts = parse_generated_at(pool_doc)
@@ -143,35 +139,35 @@ def load(path: str | None) -> Any:
 
 
 def heavy_workflow_active() -> bool:
-    """True if update.yml or probe-egress.yml has a queued/running instance.
+    """True if update.yml or probe-egress.yml has a queued or running instance.
 
-    The watchdog dispatches with ``gh workflow run``; a queued instance is
-    not yet in the public branch, so without this check a stuck pipeline
-    would pile up duplicate dispatches every 10 minutes. Also true when
-    either workflow already completed within the last 30 min - both heavy
-    runs take 10-25 minutes and the chain cadence is 30 min, so a completed run inside that window means the pipeline just fired.
+    This is the only dedup the watchdog needs. The heartbeat is a 5-minute
+    pulse, so the freshness thresholds (pool > 20 -> update, else health > 5
+    -> probe) are what set the cadence; a "completed within N minutes" window
+    would instead freeze that cadence for N minutes after every run, which is
+    exactly wrong for a 5-min probe rhythm. Instead: if a heavy run is already
+    queued or in_progress, do not dispatch a second one - the two workflows'
+    ``concurrency`` groups (cancel-in-progress: false) serialize any overlap
+    anyway, so a queued duplicate just waits behind the live run and no-ops
+    once the pool/health is fresh.
 
-    Deliberately NOT true when an update completed >30 min ago but no probe
-    followed: on the 30-min chain that is exactly the broken state (the
-    dispatch step died after publish) the watchdog must recover.
+    Deliberately NOT true for a run that already completed: a failed or
+    finished probe leaves the health index stale, and the very next beat must
+    be free to re-dispatch it - that is the recovery path for a broken chain.
     """
     try:
         out = subprocess.run(
             ["gh", "run", "list", "--limit", "8", "--json",
-             "name", "status", "createdAt"],
+             "name", "status"],
             capture_output=True, text=True, timeout=30,
         )
         if out.returncode != 0:
             return False  # fail open: dispatch rather than block recovery
-        now = datetime.now(timezone.utc)
         for run in json.loads(out.stdout or "[]"):
             if run.get("name") not in ("Update Proxy Database",
                                        "Probe proxy egress IPs"):
                 continue
             if run.get("status") in ("queued", "in_progress"):
-                return True
-            created = parse_generated_at(run, key="createdAt")
-            if created and now - created < timedelta(minutes=30):
                 return True
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return False

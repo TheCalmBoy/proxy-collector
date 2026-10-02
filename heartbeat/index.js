@@ -5,8 +5,8 @@
 // supposed to recover it lived on the same scheduler, so a second GitHub
 // cron could not back it up. This Worker lives on Cloudflare's cron -- a
 // different platform -- and POSTs one repository_dispatch to the watchdog
-// every 5 minutes. The watchdog's freshness gate does the rest (pool >50
-// min -> update, health >70 min -> probe, both fresh -> no-op), so this
+// every 5 minutes. The watchdog's freshness gate does the rest (pool >30
+// min -> update, health >10 min -> probe, both fresh -> no-op), so this
 // handler is deliberately stateless: one POST, no decisions.
 //
 // Secrets: GITHUB_TOKEN -- a classic PAT with the `workflow` scope (or a
@@ -22,6 +22,11 @@ async function beat(env) {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${env.GITHUB_TOKEN}`,
       "content-type": "application/json",
+      // GitHub's API refuses any request without a User-Agent (403:
+      // "Request forbidden by administrative rules"). Cloudflare's fetch
+      // does not send one by default, and the first ~35 scheduled beats
+      // all died on this before the tail caught it.
+      "user-agent": "proxy-pipeline-heartbeat (Cloudflare Worker)",
     },
     body: JSON.stringify({ event_type: "heartbeat" }),
   });
@@ -33,6 +38,7 @@ async function beat(env) {
     // retry.
     console.error(`heartbeat dispatch failed: ${res.status} ${text.slice(0, 200)}`);
   }
+  return res.status;
 }
 
 export default {
@@ -40,10 +46,15 @@ export default {
     await beat(env);
   },
   async fetch(request, env) {
-    // Dashboard/manual trigger: fire one beat immediately.
+    // Dashboard/manual trigger: fire one beat immediately. The status is
+    // GitHub's, not a blanket success -- a "beat sent" that hid a 403 is
+    // how this stayed broken for hours.
     if (request.method === "POST") {
-      await beat(env);
-      return new Response("beat sent", { status: 202 });
+      const status = await beat(env);
+      return new Response(
+        status === 204 ? "beat sent" : `dispatch failed: HTTP ${status}`,
+        { status: status === 204 ? 202 : 502 },
+      );
     }
     return new Response(
       "proxy-pipeline-heartbeat: POST to fire a beat",

@@ -314,6 +314,21 @@ jobs:
           PYTHONUNBUFFERED: '1'
         run: python -u main.py
 
+      - name: Fetch rejected-endpoint denylist from previous probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          # verify.py's reject filter reads verify-output/rejected-endpoints.json
+          # on THIS runner (OUTPUT default); the published copy is written by
+          # the probe's rolling union. 404 on the first cycle is fine - an
+          # empty denylist is a no-op in the filter.
+          mkdir -p verify-output
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/rejected-endpoints.json?ts=$(date +%s)" \
+            -o verify-output/rejected-endpoints.json || true
+          test -s verify-output/rejected-endpoints.json || rm -f verify-output/rejected-endpoints.json
+          echo "Denylist entries: $(python -c "import json,pathlib; p=pathlib.Path('verify-output/rejected-endpoints.json'); print(len(json.loads(p.read_text()).get('endpoints',[]))) if p.exists() else print(0)")"
+
       - name: Run verification (TCP/UDP/download/HTTPS)
         shell: bash
         env:

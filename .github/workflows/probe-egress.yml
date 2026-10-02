@@ -96,6 +96,12 @@ jobs:
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)" \
             -o verify-output/previous-egress-health.json || true
           test -s verify-output/previous-egress-health.json || rm -f verify-output/previous-egress-health.json
+          # Previous denylist for the rolling union; 404 on the very first
+          # run is fine - merge_rejected() treats an absent list as a no-op.
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/rejected-endpoints.json?ts=$(date +%s)" \
+            -o verify-output/previous-rejected-endpoints.json || true
+          test -s verify-output/previous-rejected-endpoints.json || rm -f verify-output/previous-rejected-endpoints.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -168,6 +174,10 @@ jobs:
           # Rolling union input: the previously-published index, fetched (best-
           # effort) by the Fetch step. Unset/missing just skips the carry-over.
           PREVIOUS_HEALTH: verify-output/previous-egress-health.json
+          # Same pattern for the rejected-endpoint denylist (48h TTL); the
+          # probe folds it back in so a rejected endpoint stays out of
+          # verify's Stage 1-3 even on runs where it was not re-measured.
+          PREVIOUS_REJECTED: verify-output/previous-rejected-endpoints.json
         run: |
           # This step opens one socket per concurrent config, and the default
           # soft limit is ~1024. update.yml raises it; this workflow never did,
@@ -217,6 +227,38 @@ jobs:
                 await github.rest.repos.createOrUpdateFileContents({
                   owner, repo, path: 'egress-health.json', branch: 'gh-pages', sha,
                   message: 'auto: publish proxy egress health', content,
+                });
+                break;
+              } catch (error) {
+                if (error.status !== 409 || attempt === 3) throw error;
+              }
+            }
+
+      # The rejected-endpoint denylist is published the same way so the NEXT
+      # update.yml run can fetch it and feed it to verify.py's reject filter.
+      # Without this the denylist would live only on the probe runner and
+      # never reach verify, so a rejected endpoint would be re-verified on the
+      # very next cycle. Best-effort: a 404 on the very first run is fine.
+      - name: Publish merged rejected-endpoint denylist
+        if: success() && hashFiles('probe-output/rejected-endpoints.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = Buffer.from(fs.readFileSync('probe-output/rejected-endpoints.json')).toString('base64');
+            const { owner, repo } = context.repo;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              let sha;
+              try {
+                const existing = await github.rest.repos.getContent({ owner, repo, path: 'rejected-endpoints.json', ref: 'gh-pages' });
+                sha = existing.data.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path: 'rejected-endpoints.json', branch: 'gh-pages', sha,
+                  message: 'auto: publish proxy egress denylist', content,
                 });
                 break;
               } catch (error) {

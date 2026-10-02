@@ -41,8 +41,13 @@ UTLS_FINGERPRINTS = {
     "random", "randomized",
 }
 # Stability check config
-STABILITY_INTERVALS = 10
-STABILITY_INTERVAL_SECONDS = 30
+# 20 IP requests in ~114 s (initial round + 19 re-checks at 6 s intervals),
+# down from 11 requests in 300 s: the probe now runs off a 5-min heartbeat,
+# so a long stability window was the dominant cost and barely added signal -
+# an exit that rotates between 5-min probes is caught cross-run by
+# `ip_changed` (compared against the previous published health index) instead.
+STABILITY_INTERVALS = 19
+STABILITY_INTERVAL_SECONDS = 6
 CLOUDFLARE_TRACE_URL = "https://cloudflare.com/cdn-cgi/trace"
 
 # Dynamic config thresholds
@@ -307,6 +312,62 @@ def _feed_id(uri: str) -> str | None:
 
 def _record_id(uri: str) -> str:
     return _feed_id(uri) or _tag(uri)
+
+
+def _previous_last_ips(previous: Any) -> dict[str, str]:
+    """rid -> last observed IP in the previously-published health index.
+
+    New rows carry ``last_ip`` directly; older rows fall back to the tail of
+    ``unique_ips`` (the per-round observation list). Used for cross-run IP
+    change detection. Absent/malformed -> empty mapping, not an error.
+    """
+    out: dict[str, str] = {}
+    if not isinstance(previous, dict):
+        return out
+    configs = previous.get("configs")
+    if not isinstance(configs, dict):
+        return out
+    for rid, row in configs.items():
+        if not isinstance(row, dict):
+            continue
+        ip = row.get("last_ip")
+        if not isinstance(ip, str) or not ip:
+            ips = row.get("unique_ips")
+            ip = ips[-1] if isinstance(ips, list) and ips else None
+        if isinstance(ip, str) and ip:
+            out[rid] = ip
+    return out
+
+
+def apply_ip_change_flags(
+    health: dict[str, dict[str, Any]],
+    previous_last_ips: dict[str, str],
+) -> int:
+    """Flag rows whose egress IP moved since the previous published run.
+
+    The probe window is ~2 min; an exit that rotates slower than that shows
+    up only HERE, run-to-run, so this is the only place a 5-min-cadence
+    pipeline can still catch the slow rotators. ``ip_changed`` is None when
+    there is nothing to compare (first-ever measurement or a row with no
+    previous IP) - "no evidence of a change" is not "proved stable".
+    Returns the number of rows flagged changed.
+    """
+    changed = 0
+    for rid, row in health.items():
+        if not isinstance(row, dict):
+            continue
+        last = row.get("last_ip")
+        prev = previous_last_ips.get(rid)
+        if isinstance(last, str) and last and isinstance(prev, str) and prev:
+            if prev != last:
+                row["ip_changed"] = True
+                row["previous_ip"] = prev
+                changed += 1
+            else:
+                row["ip_changed"] = False
+        else:
+            row["ip_changed"] = None
+    return changed
 
 
 # Every check reports the egress address, so the family can be read straight
@@ -796,6 +857,86 @@ def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], 
     return classification
 
 
+# How long an endpoint stays on the rejected list before it is re-tested.
+# A reject is not a permanent verdict: the source's egress behaviour can
+# change, and re-measuring every 48 h is cheap insurance against a stale
+# reject pinning a good endpoint out of the pool forever. Below that the
+# rolling union keeps it out of Stage 1-3 so the pipeline stops spending
+# 8+ min per cycle on endpoints it already knows will rotate.
+REJECTED_TTL_HOURS = float(os.getenv("PROBE_REJECTED_TTL_HOURS", "48"))
+
+
+def _load_previous_rejected(path: str | None) -> dict[str, dict[str, Any]]:
+    """Read the previous rejected-endpoints.json; None on any failure.
+
+    Missing/malformed is a no-op: the denylist is an optimisation, so a
+    corrupt or absent input must never block a probe. Returns a
+    (server, port) -> entry mapping, keyed the same way the writer does,
+    so a merge can compare entries by endpoint.
+    """
+    if not path:
+        return {}
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = doc.get("endpoints") if isinstance(doc, dict) else doc
+    if not isinstance(entries, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        server = e.get("server")
+        port = e.get("server_port")
+        if not isinstance(server, str):
+            continue
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            continue
+        out[f"{server}:{port}"] = e
+    return out
+
+
+def merge_rejected(
+    previous: dict[str, dict[str, Any]],
+    current: dict[str, dict[str, Any]],
+    ttl_hours: float = REJECTED_TTL_HOURS,
+) -> dict[str, dict[str, Any]]:
+    """Union of the previous and current rejects; a current reject always
+    wins (its timestamp is fresh) and stale entries drop off.
+
+    Mirrors the health rolling union: a config that got re-measured this
+    run and is no longer rejected drops out of the list, one that was
+    rejected previously but not this run is kept while its TTL still
+    holds, and any entry past the TTL is dropped so the endpoint gets
+    re-tested. The union is what stops the pipeline from oscillating -
+    an endpoint that is skipped out of the pool would otherwise never
+    be measured again, so the memory of its reject would evaporate the
+    next cycle and it would be re-tested despite its TTL.
+    """
+    merged = dict(previous)
+    merged.update(current)
+    now = datetime.now(timezone.utc)
+    cutoff = timedelta(hours=ttl_hours)
+    out: dict[str, dict[str, Any]] = {}
+    for key, entry in merged.items():
+        stamp = entry.get("rejected_at")
+        kept = True
+        if isinstance(stamp, str):
+            try:
+                ts = datetime.fromisoformat(stamp)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                kept = (now - ts) <= cutoff
+            except ValueError:
+                kept = True  # malformed stamp: trust the entry rather than drop it
+        if kept:
+            out[key] = entry
+    return out
+
+
 def merge_previous_health(
     previous: dict[str, Any] | None,
     measured: dict[str, Any],
@@ -851,6 +992,48 @@ def merge_previous_health(
         merged[rid] = row
         carried += 1
     return merged, carried
+
+
+def _record_reject(
+    rejected: dict[str, dict[str, Any]],
+    records_by_id: dict[str, dict[str, Any]],
+    rid: str,
+    reason: str,
+) -> None:
+    """Add a (server, port) to this run's rejected set, deduped by endpoint.
+
+    A source endpoint can appear under several credentials in the same pool,
+    so several rids can map to one endpoint; the first reason wins (it is
+    cosmetic - verify.py matches on the endpoint key, not the reason) and the
+    timestamp is simply the current run. An endpoint that cannot be resolved
+    to a concrete server:port is not recorded - a denylist entry that cannot
+    be matched is dead weight.
+    """
+    record = records_by_id.get(rid)
+    if not record:
+        return
+    server = record.get("server")
+    port = record.get("server_port")
+    if not isinstance(server, str) or not server:
+        return
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return
+    key = f"{server}:{port}"
+    entry = rejected.get(key)
+    if entry is None:
+        rejected[key] = {
+            "server": server,
+            "server_port": port,
+            "scheme": record.get("scheme"),
+            "reason": reason,
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+        }
+    else:
+        # Same endpoint rejected under more than one credential this run:
+        # refresh the stamp so its TTL tracks the most recent observation.
+        entry["rejected_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _print_error_breakdown(results: list[dict[str, Any]], label: str) -> None:
@@ -1051,9 +1234,15 @@ async def main() -> int:
     # Build egress-health.json with classifications
     print("Classifying configs...")
     health = {}
+    records_by_id = {r["id"]: r for r in records}
+    rejected: dict[str, dict[str, Any]] = {}
     for rid in sorted(ip_history.keys()):
         ips = ip_history[rid]
         if not ips:
+            # No egress IP in any round. This is NOT recorded on the denylist:
+            # a "no IP" can be the proxy being dead OR this runner being
+            # saturated (descriptor/port race) and the config never actually
+            # got a chance. Only a *confirmed* verdict (below) is a safe deny.
             continue
 
         classification = _classify_dynamic(
@@ -1064,8 +1253,16 @@ async def main() -> int:
             hosting_history[rid],
         )
 
-        # Only include non-rejected configs
+        # Only include non-rejected configs. A reject here is a confirmed
+        # property of the endpoint (it returned IPs, and they rotated across
+        # countries or it carried a high fraud score across the whole
+        # 5-minute stability window) - not a runner artifact. Those endpoints
+        # pass Phase 1's Stage 3 and get published into the pool only to be
+        # rejected again every cycle, so record the endpoint and let Phase 1
+        # stop spending Stages 1-3 on it until its TTL expires.
         if classification["subgroup"] == "rejected":
+            _record_reject(rejected, records_by_id, rid,
+                           f"egress-{classification['type']}")
             continue
 
         # Calculate final metrics
@@ -1077,6 +1274,10 @@ async def main() -> int:
         if not record:
             continue
 
+        # `rid` (the dict key) is the config's stable name: sha256(uri)-derived,
+        # so the same config resolves to the same key on every run - the
+        # deterministic, non-random "naming system" used to track a config's
+        # egress IP across the 5-min probes (see `ip_changed` below).
         health[rid] = {
             "scheme": record["scheme"],
             "server": record["server"],
@@ -1095,6 +1296,12 @@ async def main() -> int:
             # rendered as "clean" downstream.
             "gemini": _gemini_verdict(gemini_history.get(rid, [])),
             "ip_count": len(ips),
+            # Every IP observed this run, round by round: the first entry is
+            # the initial round, the rest are the stability re-checks.
+            # `last_ip` is the most recent observation, the value a cross-run
+            # ip_changed flag compares against.
+            "ip_history": list(ips),
+            "last_ip": ips[-1],
             "unique_ips": ips,
             # Which address family this exit actually presents. A v6-only exit
             # behaves differently from a v4 one behind a dual-stack client, and
@@ -1121,6 +1328,17 @@ async def main() -> int:
         health, carried = merge_previous_health(previous, health, pool_ids)
         print(f"Carried {carried} previously-measured rows still in the pool")
 
+    # Cross-run IP tracking: flag rows whose egress IP moved since the
+    # previous published index. The in-run stability window is only ~2 min,
+    # so an exit that rotates slower than that (between two 5-min probes) is
+    # visible ONLY here, run-to-run - this is the mechanism that keeps the
+    # "one bad IP and fail" rule honest at the new cadence. Runs without a
+    # previous index (first probe, or fetch failure) leave ip_changed as None
+    # rather than claiming "no change".
+    changed = apply_ip_change_flags(health, _previous_last_ips(previous))
+    if changed:
+        print(f"IP changed since last run: {changed} configs")
+
     OUTPUT.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT / "egress-health.json"
     output_path.write_text(json.dumps({
@@ -1128,7 +1346,26 @@ async def main() -> int:
         "configs": health,
     }, indent=2))
 
+    # Rolling union of the rejected-endpoint denylist: fold the previous
+    # published list back in (loaded from PREVIOUS_REJECTED when the workflow
+    # fetches it) so a rejected endpoint stays out of Phase 1's Stage 1-3
+    # until its TTL expires, even on a run where it was not re-measured. An
+    # endpoint that was re-measured and is no longer rejected drops off
+    # automatically because it is absent from this run's `rejected` set and its
+    # carried entry ages out. Absent/malformed previous is a no-op.
+    prev_rejected_path = os.getenv("PREVIOUS_REJECTED")
+    prev_rejected = _load_previous_rejected(prev_rejected_path)
+    merged_rejected = merge_rejected(prev_rejected, rejected)
+    rejected_path = OUTPUT / "rejected-endpoints.json"
+    rejected_path.write_text(json.dumps({
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "endpoints": [merged_rejected[k] for k in sorted(merged_rejected)],
+    }, indent=2))
+
+    carried = sum(1 for k in merged_rejected if k not in rejected)
     print(f"Done. Published {len(health)} configs to {output_path}")
+    print(f"  Denied: {len(merged_rejected)} endpoints on the denylist "
+          f"({len(rejected)} confirmed this run, {carried} carried forward)")
 
     # Stats
     stable = sum(1 for c in health.values() if c["classification"]["type"] == "stable")

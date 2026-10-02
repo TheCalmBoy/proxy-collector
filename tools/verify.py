@@ -41,6 +41,138 @@ WORKER_TOKEN = os.environ.get("WORKER_TOKEN", "")
 SING_BOX = os.getenv("SING_BOX", "sing-box")
 OUTPUT = Path(os.getenv("VERIFY_OUTPUT", "verify-output"))
 
+# Rejected-endpoint denylist. The probe (egress-health) only records CONFIRMED
+# rejects on this list: endpoints that returned egress IPs in the stability
+# window but rotated across countries or carried a high fraud score. The
+# worker drops those configs on the missing health row, and until now the
+# pipeline re-ran Stages 1-3 on them every 30 min only to have the probe
+# reject them again. The probe publishes `rejected-endpoints.json` to
+# gh-pages; this stage reads it and prunes the matching (server, port) BEFORE
+# any network testing. Entries carry a timestamp and a TTL so a rejected
+# endpoint ages out and gets re-tested instead of being blacklisted forever.
+# Deliberately NOT on this list: "no egress IP at all" - that conflates a dead
+# proxy with a saturated runner (exit-7 race), and writing a mass 48h denylist
+# from a flaky probe would shrink the pool for two days.
+REJECTED_ENDPOINTS_PATH = OUTPUT / "rejected-endpoints.json"
+REJECTED_ENDPOINTS_TTL_HOURS = float(
+    os.getenv("VERIFY_REJECTED_TTL_HOURS", "48")
+)
+
+
+def load_rejected_endpoints(
+    path: Path | None = None,
+    now: datetime | None = None,
+    ttl_hours: float = REJECTED_ENDPOINTS_TTL_HOURS,
+) -> set[tuple[str, int]]:
+    """The set of (server, port) currently on the denylist.
+
+    A missing/unreadable/corrupt file is a no-op (return an empty set): a
+    denylist problem must never block a verification run. An entry that has
+    aged past ``ttl_hours`` is dropped so a stale reject cannot pin an endpoint
+    out of the pool forever - the source's egress behaviour can change, and a
+    48h re-test is the cheapest honest way to find that.
+
+    Each entry is expected to carry ``server`` (str), ``server_port`` (int) and
+    ``rejected_at`` (ISO-8601). Anything that cannot be parsed as such is
+    ignored, not trusted - a malformed entry should degrade to "don't skip",
+    never to "skip the wrong endpoint".
+    """
+    path = path or REJECTED_ENDPOINTS_PATH
+    now = now or datetime.now(timezone.utc)
+    if not path.exists():
+        return set()
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return set()
+    entries = doc.get("endpoints") if isinstance(doc, dict) else doc
+    if not isinstance(entries, list):
+        return set()
+    out: set[tuple[str, int]] = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        server = e.get("server")
+        port = e.get("server_port")
+        if not isinstance(server, str) or not server:
+            continue
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            continue
+        stamp = e.get("rejected_at")
+        if isinstance(stamp, str):
+            try:
+                ts = datetime.fromisoformat(stamp)
+            except ValueError:
+                ts = None
+            if ts is not None:
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if (now - ts).total_seconds() > ttl_hours * 3600:
+                    continue
+        # No parseable timestamp -> treat as still in force (conservative:
+        # the probe wrote it, so trust it), but still require the endpoint.
+        out.add((server, port))
+    return out
+
+
+def filter_rejected_endpoints(
+    config: dict,
+    records: list[dict[str, Any]],
+    rejected: set[tuple[str, int]],
+) -> tuple[dict, list[dict[str, Any]]]:
+    """Drop records whose endpoint is on the denylist, and prune their
+    sing-box inbounds/outbounds/rules so the config stays valid.
+
+    Mirrors ``dedupe_endpoints``: a leftover route rule pointing at a removed
+    inbound makes sing-box refuse to start, so the three lists must be pruned
+    together. Matching is on (server, server_port) only - the exact endpoint
+    key the probe recorded - so it is protocol- and credential-agnostic. An
+    empty denylist is a no-op that returns the inputs unchanged.
+    """
+    if not rejected:
+        return config, records
+
+    def endpoint_key(record: dict[str, Any]) -> tuple[str, int] | None:
+        server = record.get("server")
+        port = record.get("server_port")
+        if not isinstance(server, str) or not server:
+            return None
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return None
+        return (server, port)
+
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    for record in records:
+        if endpoint_key(record) in rejected:
+            dropped += 1
+            continue
+        kept.append(record)
+
+    if dropped:
+        print(f"Reject-filter: {dropped}/{len(records)} configs skipped (denylist)")
+        kept_ids = {record["id"] for record in kept}
+        config = dict(config)
+        config["inbounds"] = [
+            ib for ib in config["inbounds"]
+            if ib["tag"].removeprefix("in-") in kept_ids
+        ]
+        config["outbounds"] = [
+            ob for ob in config["outbounds"]
+            if ob["tag"] == config.get("route", {}).get("final")
+            or ob["tag"].removeprefix("proxy-") in kept_ids
+        ]
+        config["route"] = dict(config["route"])
+        config["route"]["rules"] = [
+            rule for rule in config["route"]["rules"]
+            if rule["inbound"][0].removeprefix("in-") in kept_ids
+        ]
+    return config, kept
+
 
 def _sibling_source_map() -> Path | None:
     """Locate the collector's source_map.json relative to the input, or None.
@@ -1400,6 +1532,21 @@ async def main() -> int:
     # the same server:port with different UUIDs, and testing each one repeats
     # the same socket work.
     config, records = dedupe_endpoints(config, records)
+
+    # Drop endpoints the last probe confirmed are broken (rotating-egress or
+    # high-fraud egress). The rolling union means these are endpoints the
+    # pipeline has already spent Stages 1-3 on this very cycle and the probe
+    # rejected them; re-testing now would just re-publish them and the probe
+    # would reject them again. TTL is enforced at load time so a stale reject
+    # ages out.
+    rejected = load_rejected_endpoints()
+    config, records = filter_rejected_endpoints(config, records, rejected)
+    if not records:
+        print("All supported configs are on the rejected-endpoints denylist; "
+              "nothing to verify this run. The denylist has a 48h TTL, so "
+              "endpoints will age out and be re-tested on a later run.",
+              file=sys.stderr)
+        return 0
 
     print(f"Starting sing-box with {len(records)} configs...")
     sing_box_proc = await _run_sing_box(config)
