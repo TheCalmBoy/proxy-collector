@@ -406,10 +406,13 @@ class ScheduleOrderingTests(unittest.TestCase):
         watchdog = self.WORKFLOWS / "freshness-watchdog.yml"
         self.assertTrue(watchdog.is_file(), "freshness-watchdog.yml is missing")
         text = watchdog.read_text(encoding="utf-8")
-        # Fires on a sub-hourly heartbeat, not hourly.
+        # Fires on a sub-hourly heartbeat, not hourly. 10-min cadence: both
+        # decision thresholds (pool>30, health>10) exceed one tick, so a
+        # healthy chain never dispatches a duplicate; a missed slot is caught
+        # on the next tick.
         self.assertRegex(
-            text, r'cron:\s*"?\*/5 \* \* \* \*"?',
-            "the watchdog must tick every 5 minutes, not hourly",
+            text, r'cron:\s*"?(\*/10) \* \* \* \*"?',
+            "the watchdog must tick every 10 minutes, not hourly",
         )
         # And it dispatches both heavy workflows by name.
         self.assertIn("gh workflow run update.yml", text)
