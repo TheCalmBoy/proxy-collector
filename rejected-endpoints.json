@@ -1,6 +1,13 @@
 {
-  "generated_at": "2026-10-03T19:06:09.987227+00:00",
+  "generated_at": "2026-10-03T19:10:15.814758+00:00",
   "endpoints": [
+    {
+      "server": "185.164.175.81",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-03T19:10:15.807056+00:00"
+    },
     {
       "server": "82.110.60.9",
       "server_port": 19999,
