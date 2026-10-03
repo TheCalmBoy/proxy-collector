@@ -1,0 +1,8 @@
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform101.golnamakcert.top:80?&type=ws&headerType=none&host=platform101.halalkhor.info&path=%2Fplatform101#CL-DC-AS20473-2C99B342
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform102.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform102&host=platform102.halalkhor.info#CL-DC-AS20473-7AA1396C
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform106.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform106&host=platform106.halalkhor.info#CL-DC-AS20473-40C56877
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform107.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform107&host=platform107.halalkhor.info&sni=platform107.golnamakcert.top#CL-DC-AS20473-AEF89783
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform108.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform108&host=platform108.halalkhor.info&encryption=none#CL-DC-AS20473-B35FCF7C
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform115.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform115&host=platform115.halalkhor.info&sni=platform115.halalkhor.info#CL-DC-AS20473-B2CB6C40
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform117.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform117&host=platform117.halalkhor.info#CL-DC-AS20473-83C9DB20
+vless://e13cf851-b4fd-413b-8d49-146e6eb8e5d4@platform118.golnamakcert.top:80?security=none&type=ws&path=%2Fplatform118&host=platform118.halalkhor.info#CL-DC-AS20473-8C1AC92D

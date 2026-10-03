@@ -1,0 +1,2 @@
+ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpCcW5xVG9paDBQYlU=@51.255.13.232:8388#PT-DC-AS16276-0760AF6E
+vless://bc659d88-a1e0-4c65-a49a-7b51b26a7a7f@31.77.227.10:52006?alpn=h2,http/1.1&encryption=none&flow=xtls-rprx-vision&security=tls&sni=fr.setlisting.ru&type=tcp#FR-RES-AS198364-872C4570
