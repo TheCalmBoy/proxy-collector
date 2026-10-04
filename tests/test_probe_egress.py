@@ -53,6 +53,31 @@ class ParseProxyUriTests(unittest.TestCase):
         self.assertEqual(outbound["password"], "secret")
         self.assertEqual(outbound["tls"]["server_name"], "front.example")
 
+    def test_tls_blocks_are_enabled(self):
+        # Regression: sing-box 1.14 returns a NIL tls client for a tls block
+        # without enabled=true (NewClientWithOptions), and the first
+        # handshake then segfaults the whole sing-box process, killing all
+        # 352 local listeners (curl exit 7 across the entire probe run).
+        # Every scheme that carries a tls block must mark it enabled.
+        uris = [
+            "trojan://secret@example.com:443?sni=front.example#node",
+            "vless://abcd@example.com:443?security=tls&sni=front.example&encryption=none#node",
+            "https://secret@example.com:443#node",
+            "vmess://" + base64.urlsafe_b64encode(
+                json.dumps({
+                    "add": "example.com", "port": "443", "id": "user-id",
+                    "aid": "0", "scy": "auto", "tls": "tls", "sni": "cdn.example",
+                }).encode()
+            ).decode(),
+        ]
+        for uri in uris:
+            outbound = parse_proxy_uri(uri)
+            self.assertIn("tls", outbound, f"no tls block for {uri}")
+            self.assertTrue(
+                outbound["tls"].get("enabled"),
+                f"{outbound['type']} tls block missing enabled=true: {outbound['tls']}",
+            )
+
     def test_unknown_protocol_is_counted_not_guessed(self):
         with self.assertRaises(UnsupportedConfig):
             parse_proxy_uri("hysteria2://password@example.com:443")

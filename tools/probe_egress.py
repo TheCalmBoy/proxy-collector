@@ -118,8 +118,10 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         # "tls": true outright, and a vmess link that carries tls=tls but
         # no tls block connects in the clear.
         if str(vmess.get("tls") or "").lower() in ("tls", "reality"):
+            # enabled=True: same nil-tls-client segfault as the trojan block.
             tls: dict[str, Any] = {
-                "server_name": str(vmess.get("sni") or vmess.get("host") or host)
+                "enabled": True,
+                "server_name": str(vmess.get("sni") or vmess.get("host") or host),
             }
             if str(vmess.get("fp") or "").lower() == "chrome":
                 tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
@@ -194,7 +196,12 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             # plaintext outbound for every trojan link that only set sni,
             # which is how a bare trojan:// proxy never got probed at all.
             # An explicit security=none is the only way to ask for that.
-            outbound["tls"] = {"server_name": server_name}
+            # enabled must be True: sing-box 1.14 returns a NIL tls client
+            # for a block without it (NewClientWithOptions:
+            # "if !options.Options.Enabled { return nil, nil }"), and the
+            # first handshake then segfaults the whole process, taking all
+            # 352 local listeners down with it (curl exit 7 across the run).
+            outbound["tls"] = {"enabled": True, "server_name": server_name}
         transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
