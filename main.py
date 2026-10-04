@@ -649,7 +649,11 @@ def classify(result: dict[str, Any]) -> str:
 
 
 def stable_id(uri: str) -> str:
-    return hashlib.sha256(uri.encode("utf-8")).hexdigest()[:8].upper()
+    # 12 hex = 48 bits: long enough that two configs can't share a tail,
+    # short enough to keep URI fragments and display names compact. The
+    # subscription worker spells these bytes into a per-config name
+    # (hash-spelling bijection), so the tail is also the name key.
+    return hashlib.sha256(uri.encode("utf-8")).hexdigest()[:12].upper()
 
 
 def annotate_uri(uri: str, country: str | None, api_result: dict[str, Any] | None) -> str:

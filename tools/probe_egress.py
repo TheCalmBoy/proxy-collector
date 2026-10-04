@@ -289,7 +289,9 @@ def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
 
 
 def _tag(uri: str) -> str:
-    return hashlib.sha256(uri.encode()).hexdigest()[:8].upper()
+    # 12 hex to match main.py's stable_id (fragment tails), so feed-less
+    # configs key their health records the same way the rest do.
+    return hashlib.sha256(uri.encode()).hexdigest()[:12].upper()
 
 
 # The published feed tags each config with an id the upstream source already
@@ -299,7 +301,7 @@ def _tag(uri: str) -> str:
 # ever matched and the worker filtered out every proxy as unverified. Reuse the
 # upstream id when it is present, and fall back to the hash only for configs
 # that carry no fragment id.
-_TRAILING_ID_RE = re.compile(r"^(?:[A-F0-9]{6,8})$")
+_TRAILING_ID_RE = re.compile(r"^(?:[A-F0-9]{6,12})$")
 
 
 def _feed_id(uri: str) -> str | None:
