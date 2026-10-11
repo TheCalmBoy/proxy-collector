@@ -1,0 +1,53 @@
+name: Runner capacity probe
+# Temporary diagnostic: measures what the GitHub runner can actually do, so
+# the speed-test concurrency ceiling is chosen from evidence rather than
+# guesswork. Not part of the proxy pipeline.
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Measure runner limits
+        run: |
+          echo "cpus=$(nproc)"
+          echo "mem=$(free -m | awk '/Mem:/{print $2}')MB"
+          echo "fd_soft=$(ulimit -Sn) fd_hard=$(ulimit -Hn)"
+          echo "somaxconn=$(cat /proc/sys/net/core/somaxconn)"
+          echo "conntrack_max=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo n/a)"
+          echo "tcp_rmem=$(cat /proc/sys/net/ipv4/tcp_rmem | tr '\t' ' ')"
+          echo "ephemeral_ports=$(cat /proc/sys/net/ipv4/ip_local_port_range)"
+
+      - name: Measure raw CDN throughput, single stream
+        run: |
+          curl -sS -o /dev/null --max-time 40 \
+            -w "single: %{speed_download} B/s  total=%{time_total}s size=%{size_download}\n" \
+            "https://speed.cloudflare.com/__down?bytes=5000000"
+
+      - name: Measure concurrent CDN throughput
+        run: |
+          for N in 40 100 200 400; do
+            start=$(date +%s%N)
+            for i in $(seq 1 $N); do
+              curl -sS -o /dev/null --max-time 90 \
+                "https://speed.cloudflare.com/__down?bytes=5000000" &
+            done
+            wait
+            end=$(date +%s%N)
+            secs=$(echo "scale=2; ($end - $start)/1000000000" | bc)
+            mbps=$(echo "scale=2; $N*5/$secs" | bc)
+            echo "N=$N  ${secs}s  aggregate ${mbps} MB/s"
+          done
+
+      - name: Does process spawn saturate under load
+        run: |
+          # The speed test spawns one curl subprocess per config. If fork/exec
+          # is the real ceiling rather than bandwidth, this shows it.
+          for N in 40 100 200 400; do
+            start=$(date +%s%N)
+            for i in $(seq 1 $N); do sleep 0.05 & done
+            wait
+            end=$(date +%s%N)
+            echo "spawned $N in $(echo "scale=3; ($end - $start)/1000000000" | bc)s"
+          done

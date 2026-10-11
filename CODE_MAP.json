@@ -1,0 +1,108 @@
+{
+  "project": "proxy-collector",
+  "repo_url": "https://github.com/TheCalmBoy/proxy-collector",
+  "description": "Proxy subscription collection, verification, and formatting pipeline with Cloudflare Workers deployment",
+  "architecture": {
+    "overview": "Pipeline runs on 15-min heartbeat: odd runs dispatch probe-egress (concurrent 5MB downloads); even runs dispatch update-now (fetch upstream → verify → publish), then chain probe-egress. Cloudflare Workers serve subscriptions and manage scheduling. Freshness Watchdog ensures non-stall.",
+    "scheduling": {
+      "heartbeat_interval": "15 minutes",
+      "probe_interval": "~15 min (odd runs + after db updates)",
+      "db_update_interval": "30 minutes (even runs)",
+      "run_alternation": "Odd runs dispatch 'probe-egress'; even runs dispatch 'update-now' which chains to probe-egress"
+    },
+    "data_flow": [
+      "1. Upstream sources (0xRadikal + patterniha/Free-Configs) -> main.py",
+      "2. main.py decodes proxy URIs (vless/vmess/trojan/ss/socks/hysteria/tuic/etc.)",
+      "3. DNS prewarm (32 threads) -> TCP probe -> HTTPS gate -> speed test",
+      "4. Country verification via GeoLite2 + ip-api (roaming egress pool)",
+      "5. Output: formatted subscriptions to gh-pages",
+      "6. proxy-chain-subscription CF Worker serves subscriptions",
+      "7. proxy-pipeline-heartbeat CF Worker dispatches workflows every 15 min",
+      "8. proxy-egress-ip-check CF Worker verifies egress IPs",
+      "9. Freshness Watchdog ensures pipeline doesn't stall"
+    ]
+  },
+  "upstream_sources": {
+    "0xRadikal": "Primary source (verified, 19.3% yield)",
+    "patterniha/Free-Configs": "Secondary source (added 2026-10-11 via raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt)",
+    "Epodonios/v2ray-configs": "REMOVED (0.6% yield, killed 2026-09-29)",
+    "ebrashа": "REMOVED (0.0% yield)"
+  },
+  "cf_workers": {
+    "proxy-chain-subscription": {
+      "path": "workers/proxy-chain-subscription/",
+      "file": "index.js (1102 lines, 48.5 KB)",
+      "purpose": "Subscription formatter endpoint. Serves proxy entries in multiple formats. Receives entry64-encoded entries, validates, scores, outputs formatted files.",
+      "handlers": ["reply", "fail", "decodeEntries", "classify", "buildEndpointIndex", "buildSpeedIndex", "scoreForProxy", "resolveHealth", "rankEndpoints", "writeOutputFiles", "endpointKeyOf", "friendlyExitName", "qualityScore", "rankScore"],
+      "limits": {"MAX_ENTRY_BYTES": 9000, "MAX_ENTRIES": 90, "MAX_BODY_BYTES": 900000, "STALE_HEALTH_MAX_AGE_MS": 14400000}
+    },
+    "proxy-egress-ip-check": {
+      "path": "workers/proxy-egress-ip-check/",
+      "file": "index.js (166 lines, 5.8 KB)",
+      "purpose": "Egress IP verification. Downloads payload and streams it back.",
+      "apis_used": ["api.ffraud.com"],
+      "key_functions": ["json", "isIpAddress", "addressFamily", "downloadResponse"]
+    },
+    "proxy-pipeline-heartbeat": {
+      "path": "workers/proxy-pipeline-heartbeat/",
+      "file": "index.js (50 lines, 1.6 KB)",
+      "purpose": "15-min cron dispatcher. Odd runs dispatch probe-egress; even runs dispatch update-now. Uses KV to persist run counter.",
+      "cron": "*/15 * * * *",
+      "env_vars_required": ["GITHUB_TOKEN"],
+      "dispatch_events": {"odd_runs": "probe-egress", "even_runs": "update-now"},
+      "kv_state": "run-counter (persists between runs)"
+    }
+  },
+  "workflows": {
+    "update.yml": {
+      "name": "Update Proxy Database",
+      "trigger": "repository_dispatch (update-now, update-proxy-database) + workflow_dispatch",
+      "cron": "None (woken by heartbeat)",
+      "key_steps": ["checkout", "setup-python", "run tests", "install sing-box", "raise fd limit", "run main.py verify", "publish to gh-pages", "assert ip-api success", "chain probe-egress"],
+      "db_update_interval": "every 30 min (even heartbeat runs)"
+    },
+    "probe-egress.yml": {
+      "name": "Probe proxy egress IPs",
+      "trigger": "workflow_dispatch + chained from update.yml",
+      "cron": "None (dispatched by update.yml or manually)",
+      "probe_interval": "every 15 min (odd heartbeat runs + after db updates)"
+    },
+    "freshness-watchdog.yml": {
+      "name": "Freshness Watchdog",
+      "trigger": "repository_dispatch (heartbeat) + workflow_dispatch",
+      "purpose": "Dispatches update.yml or probe-egress.yml when freshness thresholds exceeded"
+    },
+    "test.yml": {"name": "Test", "trigger": "push, pull_request"},
+    "runner-probe.yml": "Checks runner health",
+    "s3diag.yml": "S3 diagnostics for published configs"
+  },
+  "python_source": {
+    "main.py": {"lines": 935, "purpose": "Core collection pipeline"},
+    "tools/": {
+      "verify.py": "76 KB - TCP/HTTP/Speed gates and proxy scoring",
+      "probe_egress.py": "62 KB - Egress IP probing",
+      "country_consistency.py": "GeoLite2 + ip-api country verification",
+      "freshness_watch.py": "Freshness gate checks",
+      "ipapi_proxy_pool.py": "ip-api egress proxy pool sidecar",
+      "s3diag.py": "S3 diagnostics for published configs"
+    }
+  },
+  "tests": [
+    "test_classify.py", "test_country_consistency.py", "test_dns_cache.py",
+    "test_dns_prewarm.py", "test_freshness_watch.py", "test_gemini_verdict.py",
+    "test_health_speed_verdict.py", "test_https_gate_stability.py",
+    "test_per_source_survival.py", "test_probe_egress.py"
+  ],
+  "env_vars": [
+    "SOURCE_URLS", "IP_API_URL", "IP_API_PROXY_URL", "IP_API_PROXY_POOL",
+    "MMDB_PATH", "OUTPUT_DIR", "PREVIOUS_VERIFIED_URL", "verify_limit",
+    "verify_tcp_concurrency", "verify_https_concurrency", "verify_speed_concurrency",
+    "min_speed_mb_s", "ipapi_pool_size"
+  ],
+  "workflow_failure_diagnosis": {
+    "symptom": "Update Proxy Database workflow failing repeatedly",
+    "root_cause": "Network connectivity issues (TLS handshake timeouts to api.github.com) causing the Cloudflare heartbeat worker's dispatch calls to fail",
+    "secondary_issue": "ip-api metadata assertion fails when TLS timeouts cascade through the egress proxy pool, resulting in 0 successful lookups",
+    "note": "Failures are intermittent/operational, not code bugs. The pipeline logic is sound; connectivity to GitHub API is the bottleneck."
+  }
+}

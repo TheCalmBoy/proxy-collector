@@ -1,0 +1,489 @@
+name: Update Proxy Database
+
+on:
+  # NO schedule: here. The only activator is the external Cloudflare heartbeat
+  # (heartbeat/wrangler.jsonc crons */5) -> repository_dispatch(heartbeat) on
+  # freshness-watchdog.yml -> the watchdog dispatches THIS workflow when the
+  # pool is >20 min old. GitHub's free-tier crons skipped ticks on
+  # 2026-10-01 and were removed entirely: two clocks (CF heartbeat + GitHub
+  # schedule) produced double-runs and queue stacks. One clock, one path.
+  # The probe still chains off this run via `gh workflow run` (strict
+  # publish-then-probe ordering).
+  # External heartbeat path (0xRadikal pattern): the Cloudflare cron wakes the
+  # watchdog, and any external operator can wake this workflow directly by
+  # POSTing to /dispatches. This path cannot be skipped by GitHub's
+  # best-effort scheduler, which is the only reason the pipeline froze on
+  # 2026-10-01.
+  repository_dispatch:
+    types: [update-now, update-proxy-database]
+  workflow_dispatch:
+    inputs:
+      verify_limit:
+        description: "Maximum configs to verify (0 = all)"
+        required: false
+        default: "0"
+      verify_tcp_concurrency:
+        description: "Concurrent TCP checks (cheap, one CONNECT each)"
+        required: false
+        default: "750"
+      verify_https_concurrency:
+        description: "Concurrent HTTPS checks (each is a full TLS handshake; see run history for safe ceiling)"
+        required: false
+        default: "100"
+      verify_speed_concurrency:
+        description: "Concurrent 5MB download tests. Default 40 measured best stage-3 pass rate (51.8%) in a 7-arm carry_over=false sweep: 20=47.9 40=51.8 60=49.8 80=50.2 100=48.7 150=51.2 400=34.8. n=1 per arm and upstream candidate count drifts, so 40 vs 150 is within noise; treat 20-150 as a plateau and 400 as the clear loser."
+        required: false
+        default: "40"
+      source_urls:
+        description: "Comma-separated upstream config URLs. Empty = default (0xRadikal verified only). Epodonios was A/B'd and removed: 5440 extra candidates yielded 37 FEWER final configs."
+        required: false
+        default: ""
+      carry_over:
+        description: "Re-seed from our own last verified output. Turn OFF for a controlled A/B: consecutive runs otherwise inherit each other's winners, so arm N contains arm N-1's survivors and the comparison is meaningless."
+        type: boolean
+        required: false
+        default: true
+      min_speed_mb_s:
+        description: "Stage 3 minimum download speed in MB/s (0.100 = 100 KB/s). Raise to trade yield for usable bandwidth; measure before changing."
+        required: false
+        # This default IS the scheduled-run floor, and it silently won over the
+        # env line. A bare `workflow run` supplies no inputs, so
+        # ${{ inputs.min_speed_mb_s }} resolves to THIS value and the `||`
+        # fallback never runs. f26bedd fixed the env line to '1.0' while this
+        # stayed 0.100, so run 36557357087 still verified at 100 KB/s
+        # ("Stage 3 passed: 278/1335 (>=100 KB/s)") and published 38 configs
+        # below 1.0 MB/s. Both definitions must agree.
+        default: "1.0"
+      ipapi_pool_size:
+        description: "How many verified configs to use as ip-api egress proxies. 0 disables the pool and runs lookups direct."
+        required: false
+        default: "12"
+      debug_https:
+        description: "Print HTTPS handshake failures"
+        type: boolean
+        default: false
+      https_url:
+        description: "HTTPS test URL"
+        required: false
+        default: "https://www.gstatic.com/generate_204"
+      verify_udp_timeout:
+        description: "Per-packet UDP budget in seconds. Raise it if Stage 2 reports many 'no reply' failures on proxies you expect to relay."
+        required: false
+        default: "6.0"
+
+permissions:
+  contents: write
+  # The chained egress probe is dispatched at the end of a run via
+  # `gh workflow run`, which needs the actions:write scope on the job token.
+  actions: write
+
+concurrency:
+  group: proxy-database-update
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          # Full depth: peaceiris/actions-gh-pages side-clones and pushes the
+          # gh-pages branch; with a shallow checkout it intermittently fails
+          # with "No such remote: 'origin'" (run 36910739610).
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Gate the publish on the suite. test.yml also runs these on every push,
+      # but that is a separate workflow: without this step a failing commit
+      # still reaches the feed, because nothing here depends on that job.
+      # The suite is ~5s and touches no network, so it costs nothing next to
+      # the verification this job already does.
+      - name: Run test suite
+        run: python -m unittest discover -s tests
+
+      - name: Install sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.14.0"
+          archive="sing-box-${version}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}" \
+            -o "/tmp/${archive}"
+          echo "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63  /tmp/${archive}" | sha256sum --check --status
+          tar -xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      # sing-box opens one listening socket per inbound at startup. At ~6500
+      # configs that exceeds the soft fd limit on GitHub's runners and it dies
+      # at ~4085 inbounds with a bare "exit 1" and no message -- the exact
+      # failure of scheduled run 36506931445. This step is the fix; a GITHUB_ENV
+      # export would not survive into later steps, which run in fresh shells.
+      - name: Raise file descriptor limit
+        run: |
+          ulimit -n 65535 2>/dev/null || true
+          echo "fd soft limit: $(ulimit -n)"
+
+      - name: Verify sing-box works
+        run: |
+          echo '{"log":{"level":"error"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > /tmp/test-config.json
+          sing-box check -c /tmp/test-config.json
+          timeout 3 sing-box run -c /tmp/test-config.json 2>/dev/null || true
+          echo "sing-box test passed"
+
+      - name: Download DB-IP Lite country database
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current="$(date -u +%Y-%m)"
+          previous="$(date -u -d '1 month ago' +%Y-%m)"
+
+          download() {
+            local month="$1"
+            local url="https://download.db-ip.com/free/dbip-country-lite-${month}.mmdb.gz"
+            echo "Trying ${url}"
+            if curl --fail --location --silent --show-error --retry 3 --connect-timeout 20 \
+              "${url}" -o GeoLite2-Country.mmdb.gz; then
+              echo "Downloaded DB-IP Lite ${month}"
+              return 0
+            fi
+            return 1
+          }
+
+          if ! download "${current}"; then
+            echo "Current month database unavailable; trying previous month ${previous}."
+            download "${previous}"
+          fi
+
+          gzip -dc GeoLite2-Country.mmdb.gz > GeoLite2-Country.mmdb
+          test -s GeoLite2-Country.mmdb
+          ls -lh GeoLite2-Country.mmdb
+
+      - name: Run unit tests
+        # Before the collector, so a broken parser is caught in seconds
+        # rather than after a full sweep. Six real defects in
+        # parse_proxy_uri sat here unnoticed for exactly this long: the
+        # workflow ran verify.py but never the suite that would have
+        # reported them, including sing-box rejecting every TLS config
+        # because "tls" was emitted as a bool.
+        run: python run_tests.py
+
+      - name: Build ip-api proxy pool
+        shell: bash
+        env:
+          POOL_SOURCE: https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt
+          POOL_COUNT: ${{ inputs.ipapi_pool_size || '12' }}
+        run: |
+          set -euo pipefail
+
+          # ip-api's free tier is per-caller-address, so a single runner
+          # resolving a 16k-config corpus gets rate limited and every lookup in
+          # the batch comes back UNKNOWN -- which silently zeroes the country
+          # field on the whole health index and 503s the worker.
+          #
+          # The pool is built from our own last published set, which is the
+          # only list of configs known to have passed the TCP+UDP gates. It is
+          # deliberately NOT this run's output: the pool has to exist before
+          # the collector runs, and stale-but-recent is fine for spreading
+          # quota across egress addresses.
+          #
+          # Failure here is not fatal. A dead pool just means the rate limit
+          # comes back, which is the behaviour we had before this step existed.
+          # output/ does not exist yet at this point in the job -- the
+          # collector creates it later. Without this mkdir, curl fails with
+          # (23) "Failure writing output to destination" while the download
+          # itself is perfectly fine, and the run silently falls back to a
+          # direct (and therefore rate-limited) ip-api session.
+          mkdir -p output
+          pool="output/ipapi_pool.txt"
+          if curl --fail --location --silent --show-error --connect-timeout 20 \
+               "${POOL_SOURCE}" -o "${pool}"; then
+            echo "Pool source fetched: $(wc -l < "${pool}") lines"
+          else
+            echo "Could not fetch pool source; continuing without a proxy pool."
+            exit 0
+          fi
+
+          python tools/ipapi_proxy_pool.py "${pool}" output/ipapi_pool.json \
+            --count "${POOL_COUNT}"
+
+          # Fail loudly if the generated config is unusable, otherwise the
+          # sidecar below dies silently and every lookup goes direct.
+          sing-box check -c output/ipapi_pool.json
+
+      - name: Start ip-api proxy pool sidecar
+        id: pool_ready
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Defaults are empty: with no id in the form, GitHub still resolves
+          # steps.pool_ready.outputs.* to '', and main.py reads that as "no
+          # proxy" and runs direct. That is the correct fallback.
+          echo "proxy_url=" >> "$GITHUB_OUTPUT"
+          echo "pool_url=" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f output/ipapi_pool.json ]; then
+            echo "No pool config; ip-api lookups will run direct."
+            exit 0
+          fi
+
+          sing-box run -c output/ipapi_pool.json \
+            > /tmp/pool.log 2>&1 &
+          echo "$!" > /tmp/pool.pid
+
+          # Readiness by actual connection, not a sleep: a fixed wait passes
+          # silently when the sidecar failed to start and the run then looks
+          # healthy while every lookup is still rate limited.
+          for _ in $(seq 1 20); do
+            if curl --silent --max-time 3 --proxy socks5h://127.0.0.1:11080 \
+                 http://ip-api.com/json/ -o /dev/null; then
+              echo "ip-api pool sidecar is up."
+              # Only now may the collector be pointed at the SOCKS port.
+              # Before this, "is it up" was decided in the collector's env
+              # block, which cannot see whether the sidecar came up -- so a
+              # sidecar that never started still got IP_API_PROXY_URL set, and
+              # every lookup failed against a port nobody was listening on
+              # instead of falling back to direct.
+              echo "ready" > "$RUNNER_TEMP/pool.env"
+              echo "proxy_url=socks5://127.0.0.1:11080" >> "$GITHUB_OUTPUT"
+              echo "pool_url=http://127.0.0.1:11082" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "warning: pool sidecar did not become ready; log follows"
+          tail -5 /tmp/pool.log || true
+
+      - name: Run collector
+        env:
+          # The sidecar from the previous step, and the Clash API the collector
+          # PUTs to in order to advance the selector. Both are no-ops when the
+          # pool could not be built, which is why main.py treats them as opt-in.
+          #
+          # Sourced from a file the sidecar step writes ONLY after a real
+          # connection through the SOCKS port succeeds. Hardcoding these here
+          # is what made run 36443764848 return ip_api_success: 0 while every
+          # step exited 0: the pool source fetch failed, no sidecar ran, and
+          # yet every lookup was sent to a dead port.
+          IP_API_PROXY_URL: ${{ steps.pool_ready.outputs.proxy_url }}
+          IP_API_PROXY_POOL: ${{ steps.pool_ready.outputs.pool_url }}
+          # Re-seed from our own last published set. Upstream rotates, and a
+          # failed probe is not proof a proxy died, so without this a config
+          # that passed every gate can vanish from the feed for good.
+          # NOTE: do not write this as `inputs.carry_over == false && '' || URL`.
+          # GitHub expressions have no ternary, and that idiom is a trap: when
+          # the left test is true the middle operand is '' -- falsy -- so the
+          # || branch runs and the URL is emitted anyway. carry_over=false
+          # therefore still carried over, and the whole concurrency sweep was
+          # confounded. The safe form puts the EMPTY value on the || side and a
+          # truthy value in the middle, so neither branch can substitute for the
+          # other: false -> '' || '' -> ''; true -> URL || '' -> URL.
+          PREVIOUS_VERIFIED_URL: ${{ inputs.carry_over && 'https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/all.txt' || '' }}
+          # main.py is what reads SOURCE_URLS, and it runs in this step. Setting
+          # it on the verification step only meant the override was silently
+          # ignored and the collector fetched every default source regardless.
+          SOURCE_URLS: ${{ inputs.source_urls }}
+          # The collector step printed nothing for 858s and then dumped its whole
+          # summary at once: python main.py buffers stdout when stdout is not a
+          # TTY, and the step did not unbuffer it. So the 14.3 min collector step
+          # was one opaque block and its per-stage cost was unknowable.
+          PYTHONUNBUFFERED: '1'
+        run: python -u main.py
+
+      - name: Fetch rejected-endpoint denylist from previous probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          # verify.py's reject filter reads verify-output/rejected-endpoints.json
+          # on THIS runner (OUTPUT default); the published copy is written by
+          # the probe's rolling union. 404 on the first cycle is fine - an
+          # empty denylist is a no-op in the filter.
+          mkdir -p verify-output
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/rejected-endpoints.json?ts=$(date +%s)" \
+            -o verify-output/rejected-endpoints.json || true
+          test -s verify-output/rejected-endpoints.json || rm -f verify-output/rejected-endpoints.json
+          echo "Denylist entries: $(python -c "import json,pathlib; p=pathlib.Path('verify-output/rejected-endpoints.json'); print(len(json.loads(p.read_text()).get('endpoints',[]))) if p.exists() else print(0)")"
+
+      - name: Run verification (TCP/UDP/download/HTTPS)
+        shell: bash
+        env:
+          WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
+          WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
+          VERIFY_TCP_CONCURRENCY: ${{ inputs.verify_tcp_concurrency || '750' }}
+          VERIFY_HTTPS_CONCURRENCY: ${{ inputs.verify_https_concurrency || '100' }}
+          VERIFY_SPEED_CONCURRENCY: ${{ inputs.verify_speed_concurrency || '40' }}
+          VERIFY_LIMIT: ${{ inputs.verify_limit || '0' }}
+          # This override is the effective speed floor for every scheduled and
+          # manual run, and it silently won over the code default. VERIFY_MIN_
+          # SPEED_MB_S was pinned to '0.100' here while tools/verify.py's own
+          # default read 1.0, so d2a19fd ("raise speed floor to 1.0 MB/s")
+          # changed a number nothing used: 31 of 286 published configs came in
+          # under 1.0 MB/s with stages.download.passed true, and the
+          # subscription worker printed those rates into config names as if
+          # they had cleared the floor. The code default is the single source
+          # of truth for the floor, so this line passes it through instead of
+          # restating it. Change VERIFY_MIN_SPEED_MB_S in tools/verify.py.
+          VERIFY_MIN_SPEED_MB_S: ${{ inputs.min_speed_mb_s || '1.0' }}
+          # verify.py reads a SINGLE SOURCE_URL, and the workflow left it empty,
+          # so it fell back to its own default (0xRadikal, ~930 lines) and
+          # re-verified that instead of the corpus main.py had just built. The
+          # collector wrote 10,577 annotated configs to output/all.txt and the
+          # verification stage never saw one of them -- which is why every
+          # "four source" number so far described collection, not output. Point
+          # it at the collector's own product so the new sources are tested.
+          SOURCE_URL: file://${{ github.workspace }}/output/all.txt
+          VERIFY_UDP_TIMEOUT: ${{ inputs.verify_udp_timeout || '6.0' }}
+          VERIFY_DEBUG_HTTPS: ${{ inputs.debug_https && '1' || '' }}
+          VERIFY_HTTPS_URL: ${{ inputs.https_url || 'https://www.gstatic.com/generate_204' }}
+        run: |
+          # This job opens thousands of sockets; the default soft limit is ~1024.
+          ulimit -n 65535 || echo "warning: could not raise fd limit"
+          ulimit -n
+          # Progress lines are useless if they arrive all at once when the
+          # process exits: a timed-out or cancelled run then prints nothing
+          # and there is no way to tell which stage was slow.
+          PYTHONUNBUFFERED=1 python -u tools/verify.py
+
+      - name: Preserve latest egress health index
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)"
+          if curl --fail --location --silent --show-error "$url" -o /tmp/egress-health.json; then
+            cp /tmp/egress-health.json output/egress-health.json
+          else
+            echo "No published egress health index yet."
+          fi
+
+      - name: Stop ip-api proxy pool sidecar
+        if: always()
+        shell: bash
+        run: |
+          # Runs even when the collector failed: a leaked sing-box keeps
+          # sockets and the Clash API port open for the rest of the job, and
+          # the next step would otherwise probe a sidecar nobody is using.
+          if [ -f /tmp/pool.pid ]; then
+            kill "$(cat /tmp/pool.pid)" 2>/dev/null || true
+            echo "stopped pool sidecar"
+          fi
+
+      - name: Show generated summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("output/manifest.json").read_text())
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+
+      - name: Show verification summary
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          verify = json.loads(Path("verify-output/enriched-configs.json").read_text())
+          print(json.dumps(verify.get("stats", {}), indent=2))
+          PY
+
+      - name: Assert ip-api metadata was actually resolved
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          # ip-api is a best-effort enrichment: 100% success is not
+          # achievable and should not fail the job. Zero success, though,
+          # means the country field is missing on every row, the worker 503s,
+          # and the run still exits 0 -- exactly what run 36443764848 did
+          # after the pool fetch silently failed. That is a broken pipeline,
+          # not a degraded one, so it is a hard failure.
+          verify = json.loads(Path("verify-output/enriched-configs.json").read_text())
+          stats = verify.get("stats", {})
+          print(f"verify stats: {json.dumps(stats, indent=2)}")
+
+          # The ip-api counters are published in manifest.json (stage of the
+          # run that produced them), NOT in enriched-configs.json's stats --
+          # that stats block only carries the four verification stage counts.
+          # Reading ip_api_success from the wrong file silently yields 0, which
+          # is exactly what made this guard kill run 36449477436 even though
+          # the pool had just fixed the problem (ip_api_success: 9438).
+          manifest = json.loads(Path("output/manifest.json").read_text())
+          stats = manifest.get("stats", manifest)
+          ok = stats.get("ip_api_success", 0)
+          failed = stats.get("ip_api_failed", 0)
+          print(f"ip_api_success={ok} ip_api_failed={failed}")
+          if ok == 0:
+              raise SystemExit(
+                  "Every ip-api lookup failed (ip_api_success=0). Country "
+                  "metadata is missing on all rows, which silently 503s the "
+                  "worker. Refusing to publish a green run with no countries."
+              )
+          PY
+
+      - name: Publish only the configs that passed verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The collector publishes every config it scraped, but the whole
+          # point of running verify.py is to publish only the ones that
+          # passed all four stages. verify-output/ was written and then
+          # thrown away, so every consumer was reading unverified data.
+          #
+          # Rebuild the published files from the verified subset, using the
+          # same layout main.py produces so clients see no difference.
+          # Logic lives in publish_step.py so it is covered by tests.
+          python .github/workflows/publish_step.py
+
+      - name: Deploy generated database to gh-pages
+        uses: peaceiris/actions-gh-pages@v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./output
+          force_orphan: true
+          full_commit_message: "auto: update proxy database"
+
+      - name: Dispatch the chained egress probe
+        # The probe no longer runs on its own cron - it CHAINS off this run.
+        # Publishing to gh-pages just happened (step above), so when the probe
+        # starts and fetches gh-pages/enriched-configs.json it gets THIS
+        # run's pool, not the previous one. A couple of minutes of delay
+        # (runner pickup + install) is absorbed by probe-egress.yml's
+        # "Note a stale pool" step, which is non-fatal now.
+        #
+        # A `workflow_run` trigger was not viable: the egress worker 401s
+        # without its Bearer token, and workflow_run jobs cannot read the
+        # triggering workflow's secrets. `gh workflow run` (this job has
+        # actions:write) is the same mechanism freshness-watchdog.yml already
+        # uses, and the probe's own concurrency group serializes any overlap
+        # with a watchdog dispatch.
+        #
+        # Heartbeat-dispatched and manual runs chain - not a push or PR.
+        # (No schedule: trigger any more: the Cloudflare heartbeat is the
+        # only activator, so repository_dispatch is the expected event.)
+        if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run probe-egress.yml --ref main
+          echo "chained probe dispatched for $(date -u +%H:%M:%SZ)"

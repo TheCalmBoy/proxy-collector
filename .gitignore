@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+sing-box-*/
+*.tar.gz
+.wrangler/
+probe-output/report.json

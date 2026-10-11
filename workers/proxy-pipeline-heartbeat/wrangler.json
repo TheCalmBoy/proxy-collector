@@ -1,0 +1,16 @@
+{
+  "name": "proxy-pipeline-heartbeat",
+  "main": "index.js",
+  "compatibility_date": "2026-10-11",
+  "triggers": {
+    "crons": [
+      "*/15 * * * *"
+    ]
+  },
+  "vars": {
+    "REPO": "TheCalmBoy/proxy-collector",
+    "UPDATE_EVENT": "update-now",
+    "PROBE_EVENT": "probe-egress",
+    "RUN_COUNTER_KEY": "run-counter"
+  }
+}

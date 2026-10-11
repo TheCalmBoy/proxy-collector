@@ -1,0 +1,5 @@
+{
+  "name": "proxy-egress-ip-check",
+  "main": "index.js",
+  "compatibility_date": "2026-10-11"
+}

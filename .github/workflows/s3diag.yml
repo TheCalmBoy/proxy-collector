@@ -1,0 +1,117 @@
+name: Stage 3 Diagnostics
+
+# Runs on the same runner as production, because the whole point is to
+# describe the real pipeline. The Railway numbers did not match what the
+# GitHub runner sees, and the pipeline's own verdicts come from GitHub.
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: "Configs to diagnose (Stage-1 survivors preferred)"
+        required: false
+        default: "60"
+      bytes:
+        description: "Download payload in bytes"
+        required: false
+        default: "5000000"
+      max_time:
+        description: "Per-config max-time in seconds"
+        required: false
+        default: "50"
+      conc:
+        description: "Concurrency for the download test"
+        required: false
+        default: "40"
+      source:
+        description: "candidate source: published | source"
+        required: false
+        default: "published"
+        type: choice
+        options: [published, source]
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install sing-box
+        run: |
+          VER=1.14.0
+          curl -fsSL -o sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
+          tar -xzf sb.tar.gz
+          sudo mv "sing-box-${VER}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sudo chmod +x /usr/local/bin/sing-box
+          sing-box version
+
+      # Diagnostics default to the configs the last production run already
+      # published, because those are the ones we know passed Stages 1-2 and we
+      # want to know why the rest of the candidate pool was rejected. `source`
+      # pulls the raw upstream lists instead, for a cold look at the funnel.
+      - name: Fetch candidates
+        env:
+          SOURCE: ${{ inputs.source }}
+        run: |
+          set -euo pipefail
+          if [ "$SOURCE" = "source" ]; then
+            curl -fsSL -o candidates.txt \
+              "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt"
+          else
+            curl -fsSL -o published.json \
+              "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/enriched-configs.json"
+            python - <<'PY'
+          import json
+          d = json.load(open("published.json"))
+          uris = [c["uri"] for c in d["configs"] if c.get("uri")]
+          open("candidates.txt", "w").write("\n".join(uris) + "\n")
+          print(f"published configs: {len(uris)}")
+          PY
+          fi
+          wc -l candidates.txt
+
+      - name: Run Stage 3 diagnostics
+        env:
+          REPO: ${{ github.workspace }}
+          SING_BOX: /usr/local/bin/sing-box
+          PROBE_N: ${{ inputs.n }}
+          PROBE_BYTES: ${{ inputs.bytes }}
+          PROBE_MAXTIME: ${{ inputs.max_time }}
+          PROBE_CONC: ${{ inputs.conc }}
+          REPORT_PATH: diag-report.json
+        run: python -u tools/s3diag.py candidates.txt | tee diag.txt
+
+      - name: Show failure classification summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          p = "diag-report.json"
+          if not os.path.exists(p):
+              print("no report produced")
+              raise SystemExit(0)
+          d = json.load(open(p))
+          print("meta:", json.dumps(d["meta"]))
+          PY
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3diag-report
+          path: |
+            diag-report.json
+            diag.txt
+          retention-days: 14

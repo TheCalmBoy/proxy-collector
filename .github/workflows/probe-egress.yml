@@ -1,0 +1,274 @@
+name: Probe proxy egress IPs
+
+on:
+  # No cron of its own. This workflow is CHAINED: update.yml (every 30 min)
+  # dispatches it via `gh workflow run` the moment a build publishes to
+  # gh-pages, so the probe always measures the pool that was JUST published
+  # instead of the one from the previous scheduled slot. (2026-10-01)
+  #
+  # Why not a cron here: the old :37 hourly cron measured the previous slot's
+  # pool by design, and even a perfectly-ordered 30-min pair of crons would
+  # only measure a pool up to ~30 min old. Dispatching from the update job is
+  # strict ordering with no timing bet.
+  #
+  # Why not a `workflow_run` trigger: the egress worker 401s without its
+  # Bearer token, and workflow_run jobs cannot read the triggering workflow's
+  # secrets. `gh workflow run` (update.yml has actions:write) is the same
+  # proven mechanism freshness-watchdog.yml already uses, and this workflow's
+  # concurrency group (cancel-in-progress: false) serializes any overlap with
+  # a watchdog dispatch.
+  #
+  # This workflow still runs unattended: update.yml's every-30-min cron is the
+  # schedule, and freshness-watchdog.yml dispatches it (or update.yml) when
+  # the chain is broken.
+  workflow_dispatch:
+    inputs:
+      probe_concurrency:
+        description: "Concurrent speed tests through sing-box. Each one is a 5 MB download, so this is real runner bandwidth, not just sockets."
+        required: false
+        default: "50"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: proxy-egress-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PROBE_BATCH_SIZE: "all"
+      # 750 concurrent 5 MB downloads through one sing-box process saturated
+      # the runner: 99/174 died with curl exit 35 (TLS handshake failure) and
+      # 50 with exit 97 (proxy handshake rejected), which is local resource
+      # exhaustion masquerading as dead proxies. Phase 1 uses 750 sockets for
+      # cheap one-byte CONNECTs; phase 2 moves real payload, so it gets fewer.
+      # 100 (up from 50): the stability loop's 9s/round is a fan-out floor -
+      # 347 proxies / 50 concurrent = 7 waves of the slowest residential exit.
+      # 100 cuts that to ~4 waves (~5s work/round). Same request count, same
+      # 19 rounds; only more of them run at once.
+      PROBE_CONCURRENCY: ${{ inputs.probe_concurrency || '100' }}
+      RETEST_DELAY_SECONDS: "300"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.14.0"
+          archive="sing-box-${version}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}" \
+            -o "/tmp/${archive}"
+          echo "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63  /tmp/${archive}" | sha256sum --check --status
+          tar -xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Fetch verified configs from Phase 1
+        # probe_egress.py reads verify-output/enriched-configs.json, but that
+        # file is a build artifact of the update.yml runner and is never
+        # committed. This workflow is a separate job with a fresh checkout, so
+        # the file has to be fetched. The only published copy lives on gh-pages,
+        # which update.yml writes at the end of every successful run.
+        #
+        # The previous egress-health.json is fetched too (best-effort). The probe
+        # folds it back in as a rolling union so a thin/flaky run cannot freeze
+        # the index - it must not fail this step, hence `|| true`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify-output
+          curl --fail --location --silent --show-error --retry 3 --retry-delay 10 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/enriched-configs.json?ts=$(date +%s)" \
+            -o verify-output/enriched-configs.json
+          test -s verify-output/enriched-configs.json
+          # Previous health index for the rolling union; 404 on the very first
+          # run is fine - the union simply has nothing to carry forward.
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/egress-health.json?ts=$(date +%s)" \
+            -o verify-output/previous-egress-health.json || true
+          test -s verify-output/previous-egress-health.json || rm -f verify-output/previous-egress-health.json
+          # Previous denylist for the rolling union; 404 on the very first
+          # run is fine - merge_rejected() treats an absent list as a no-op.
+          curl --silent --location --show-error \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/rejected-endpoints.json?ts=$(date +%s)" \
+            -o verify-output/previous-rejected-endpoints.json || true
+          test -s verify-output/previous-rejected-endpoints.json || rm -f verify-output/previous-rejected-endpoints.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("verify-output/enriched-configs.json").read_text())
+          print(f"Fetched {len(data.get('configs', []))} verified configs from Phase 1")
+          prev = Path("verify-output/previous-egress-health.json")
+          if prev.exists() and prev.stat().st_size > 0:
+              try:
+                  print(f"Previous health index: {len(json.loads(prev.read_text()).get('configs', {}))} rows to carry forward")
+              except Exception:
+                  print("Previous health index unreadable; ignoring for the union")
+          else:
+              print("No previous health index to carry forward")
+          PY
+
+      - name: Note a stale pool (non-fatal)
+        # The :37 cron assumes the :07 update already republished. Crons are
+        # best-effort on both sides, so a skipped or failed update used to look
+        # exactly like a healthy run: the probe fetched yesterday's
+        # enriched-configs.json, measured it, and published an egress-health.json
+        # with a fresh generated_at.
+        #
+        # This used to hard-fail (exit the step) at 120 min, which is what
+        # killed the run in the 2026-10-01 incident (age=337 min -> probe
+        # aborted, health index frozen for hours). That is now wrong for two
+        # reasons:
+        #
+        #   1. The probe now does a rolling union (PREVIOUS_HEALTH). The pool we
+        #      fetch from gh-pages IS the last-published, still-served feed, so
+        #      probing it is the correct action even when a couple of hourly
+        #      updates were skipped - it measures the real current feed and
+        #      carries forward the rest.
+        #   2. freshness-watchdog.yml now dispatches update.yml itself when the
+        #      pool is frozen >3h, so a genuinely stuck pipeline gets re-collected
+        #      by a separate path instead of by this guard tripping.
+        #
+        # So we report the age and let the probe run. The only thing that is
+        # truly fatal is a pool we cannot parse at all, which the heredoc would
+        # crash on regardless.
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          path = Path("verify-output/enriched-configs.json")
+          generated_at = json.loads(path.read_text())["generated_at"]
+          produced = datetime.fromisoformat(generated_at)
+          if produced.tzinfo is None:
+              produced = produced.replace(tzinfo=timezone.utc)
+          age_min = (datetime.now(timezone.utc) - produced).total_seconds() / 60
+          print(f"pool generated_at={generated_at} age={age_min:.1f} min")
+          if age_min > 120:
+              print(
+                  f"NOTE: pool is {age_min:.0f} min old (>120). At least one hourly "
+                  f"update was skipped. Probing anyway - the rolling union carries "
+                  f"forward prior rows, and freshness-watchdog.yml will re-collect "
+                  f"if the pool stays frozen."
+              )
+          PY
+
+      - name: Run initial and delayed egress checks
+        shell: bash
+        env:
+          WORKER_URL: https://proxy-egress-ip-check.keqa94tfn-cgr8m3z.workers.dev
+          WORKER_TOKEN: ${{ secrets.IP_CHECK_WORKER_TOKEN }}
+          # Rolling union input: the previously-published index, fetched (best-
+          # effort) by the Fetch step. Unset/missing just skips the carry-over.
+          PREVIOUS_HEALTH: verify-output/previous-egress-health.json
+          # Same pattern for the rejected-endpoint denylist (48h TTL); the
+          # probe folds it back in so a rejected endpoint stays out of
+          # verify's Stage 1-3 even on runs where it was not re-measured.
+          PREVIOUS_REJECTED: verify-output/previous-rejected-endpoints.json
+        run: |
+          # This step opens one socket per concurrent config, and the default
+          # soft limit is ~1024. update.yml raises it; this workflow never did,
+          # so under concurrency it hits EMFILE and the failures look like
+          # broken proxies.
+          ulimit -n 65535 || echo "warning: could not raise fd limit"
+          ulimit -n
+          # -u: the probe prints phase-level timing anchors ([t0]-[t3]); when
+          # stdout is block-buffered (no TTY) every line dumps at step end and
+          # the bottleneck is invisible.
+          python -u tools/probe_egress.py
+
+      - name: Upload sing-box log
+        # Always uploaded and not if-guarded. When sing-box dies mid-run every
+        # probe fails with curl exit 7 and the log is the only thing that says
+        # why; the report artifact is skipped precisely when the run fails.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-egress-sing-box-${{ github.run_id }}
+          path: /tmp/probe-egress-sing-box.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload egress report
+        if: always() && hashFiles('probe-output/report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxy-egress-report-${{ github.run_id }}
+          path: probe-output/report.json
+          retention-days: 14
+
+      - name: Publish latest egress health index
+        if: success() && hashFiles('probe-output/egress-health.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = Buffer.from(fs.readFileSync('probe-output/egress-health.json')).toString('base64');
+            const { owner, repo } = context.repo;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              let sha;
+              try {
+                const existing = await github.rest.repos.getContent({ owner, repo, path: 'egress-health.json', ref: 'gh-pages' });
+                sha = existing.data.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path: 'egress-health.json', branch: 'gh-pages', sha,
+                  message: 'auto: publish proxy egress health', content,
+                });
+                break;
+              } catch (error) {
+                if (error.status !== 409 || attempt === 3) throw error;
+              }
+            }
+
+      # The rejected-endpoint denylist is published the same way so the NEXT
+      # update.yml run can fetch it and feed it to verify.py's reject filter.
+      # Without this the denylist would live only on the probe runner and
+      # never reach verify, so a rejected endpoint would be re-verified on the
+      # very next cycle. Best-effort: a 404 on the very first run is fine.
+      - name: Publish merged rejected-endpoint denylist
+        if: success() && hashFiles('probe-output/rejected-endpoints.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const content = Buffer.from(fs.readFileSync('probe-output/rejected-endpoints.json')).toString('base64');
+            const { owner, repo } = context.repo;
+            for (let attempt = 0; attempt < 4; attempt++) {
+              let sha;
+              try {
+                const existing = await github.rest.repos.getContent({ owner, repo, path: 'rejected-endpoints.json', ref: 'gh-pages' });
+                sha = existing.data.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner, repo, path: 'rejected-endpoints.json', branch: 'gh-pages', sha,
+                  message: 'auto: publish proxy egress denylist', content,
+                });
+                break;
+              } catch (error) {
+                if (error.status !== 409 || attempt === 3) throw error;
+              }
+            }
