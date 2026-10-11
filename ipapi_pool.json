@@ -1,0 +1,147 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11080
+    },
+    {
+      "type": "mixed",
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11081
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "shadowsocks",
+      "server": "103.11.76.248",
+      "server_port": 28679,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "NzJlOTQ5NWYtM2ZkYi00Cg==",
+      "tag": "p0"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "5.78.51.123",
+      "server_port": 1080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "8tmnvX5zYuWGVIDP2jglZw",
+      "tag": "p1"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "209.46.102.22",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "1hhrqrokj3ag",
+      "tag": "p2"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "51.195.126.38",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "2YdE4lFOid5a",
+      "tag": "p3"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "51.77.225.200",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "zRZNBszYyWo5",
+      "tag": "p4"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "185.213.23.63",
+      "server_port": 990,
+      "method": "chacha20-ietf-poly1305",
+      "password": "ARgvGZywA+gacgGV26Bvmu05+wZmRW/j+AdU+Z8Bt44=",
+      "tag": "p5"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "45.149.114.171",
+      "server_port": 777,
+      "method": "chacha20-ietf-poly1305",
+      "password": "Jeoq8ujfkqZKKvACQhoqBQ1PA3uq4242",
+      "tag": "p6"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "140.82.63.79",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "ZoZtfPOyVvmKARUN",
+      "tag": "p7"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "102.37.156.224",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "aduB9HGxQHjA2SBMRjkHX6",
+      "tag": "p8"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "216.105.168.18",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "bQZl7HDxSabr1FurTYQHFU",
+      "tag": "p9"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "132.243.175.144",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "e8KgS8fD0yDqYFpgN4G5piCOt9aFyqA3",
+      "tag": "p10"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "130.49.189.158",
+      "server_port": 43558,
+      "method": "chacha20-ietf-poly1305",
+      "password": "eicdhshSrFLCx/sZ1PSpuKyoVWGZpU95tFS4iGC1c04=",
+      "tag": "p11"
+    },
+    {
+      "type": "selector",
+      "tag": "pool",
+      "outbounds": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9",
+        "p10",
+        "p11"
+      ],
+      "default": "p0",
+      "interrupt_exist_connections": false
+    }
+  ],
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:11082"
+    }
+  },
+  "route": {
+    "final": "pool",
+    "auto_detect_interface": true
+  }
+}

@@ -1,0 +1,10 @@
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@149.22.87.204:443#JP-RES-AS212238-AC7E26DA2D77
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@149.22.87.241:443#JP-RES-AS212238-EF6E35791BD0
+ss://YWVzLTI1Ni1nY206M2VPRmVOc3NkZTdQWVlNdg==@84.247.155.196:443#FR-DC-AS141995-6A85FE951CBF
+ss://YWVzLTI1Ni1nY206M2VPRmVOc3NkZTdQWVlNdg==@84.247.155.196:80#FR-DC-AS141995-98E70449ADB1
+trojan://UX82473651@54.250.237.143:443?security=tls&insecure=0&headerType=none&type=tcp&allowInsecure=0&sni=accurate-frog.rooster465.autos#JP-DC-AS16509-8072360A888F
+trojan://UX82473651@brief-glider.rooster465.autos:443?security=tls&sni=brief-glider.rooster465.autos#JP-DC-AS16509-B34608322861
+trojan://UX82473651@live-stallion.rooster465.autos:443?security=tls&sni=live-stallion.rooster465.autos#JP-DC-AS16509-EDB03A77CEB9
+trojan://UX82473651@optimal-penguin.rooster465.autos:443?security=tls&sni=optimal-penguin.rooster465.autos#JP-DC-AS16509-BE36EA7691A0
+trojan://UX82473651@stable-python.rooster465.autos:443?security=tls&sni=stable-python.rooster465.autos#JP-DC-AS16509-1F2C93C26A71
+trojan://UX82473651@winning-marten.rooster465.autos:443?security=tls&sni=winning-marten.rooster465.autos#JP-DC-AS16509-1EF7E873846F

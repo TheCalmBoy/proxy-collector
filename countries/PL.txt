@@ -1,0 +1,1 @@
+vless://ee0a38e3-d148-48ac-ba99-5133446c2377@95.85.253.241:2083?security=tls&encryption=none&insecure=0&headerType=none&fp=chrome&type=tcp&allowInsecure=0&sni=95.85.253.241#PL-RES-AS209693-2889E7620878

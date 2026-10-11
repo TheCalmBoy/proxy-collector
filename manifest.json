@@ -1,0 +1,107 @@
+{
+  "generated_at": "2026-10-11T03:16:46.449240+00:00",
+  "source": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+  "geoip_database": "DB-IP Lite IP to Country MMDB",
+  "geoip_license": "CC BY 4.0 (attribution: https://db-ip.com)",
+  "ip_classification": "ip-api.com batch (hosting -> DC/RES)",
+  "stats": {
+    "source_entries": 1655,
+    "upstream_entries": 2571,
+    "carryover_entries": 247,
+    "parsed_entries": 1655,
+    "unresolved_entries": 0,
+    "unsupported_entries": 0,
+    "unique_ips": 1045,
+    "ip_api_success": 1655,
+    "ip_api_failed": 0,
+    "protocols": {
+      "hysteria2": 2,
+      "ss": 362,
+      "trojan": 293,
+      "vless": 897,
+      "vmess": 101
+    },
+    "classifications": {
+      "DC": 975,
+      "RES": 680
+    },
+    "country_counts": {
+      "AE": 2,
+      "AL": 1,
+      "AM": 2,
+      "AT": 3,
+      "AU": 3,
+      "BG": 14,
+      "BR": 1,
+      "BY": 1,
+      "CA": 269,
+      "CH": 8,
+      "CN": 1,
+      "CZ": 3,
+      "DE": 160,
+      "DK": 2,
+      "DZ": 1,
+      "EE": 22,
+      "ES": 12,
+      "FI": 78,
+      "FR": 47,
+      "GB": 39,
+      "GR": 1,
+      "HK": 45,
+      "ID": 4,
+      "IE": 18,
+      "IN": 20,
+      "IR": 28,
+      "IT": 8,
+      "JP": 113,
+      "KR": 62,
+      "KZ": 14,
+      "LT": 5,
+      "LV": 7,
+      "MD": 5,
+      "ME": 5,
+      "MY": 1,
+      "NL": 223,
+      "NO": 3,
+      "PL": 36,
+      "PT": 2,
+      "RO": 4,
+      "RS": 14,
+      "RU": 42,
+      "SC": 4,
+      "SE": 23,
+      "SG": 72,
+      "TH": 5,
+      "TR": 12,
+      "TW": 1,
+      "US": 203,
+      "ZA": 6
+    },
+    "output_entries": 1655,
+    "per_source": {
+      "carry-over": {
+        "candidates": 12,
+        "after_dedup": 12,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt": {
+        "candidates": 1457,
+        "after_dedup": 1457,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt": {
+        "candidates": 186,
+        "after_dedup": 186,
+        "overlap": 0
+      }
+    },
+    "verified_survivors": 225,
+    "verified_countries": 21
+  },
+  "files": {
+    "all": "all.txt",
+    "all_base64": "all.base64.txt",
+    "countries": "countries/",
+    "enriched": "enriched-configs.json"
+  }
+}
