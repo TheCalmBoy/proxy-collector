@@ -275,9 +275,9 @@ class ScheduleOrderingTests(unittest.TestCase):
             )
 
     def test_cloudflare_heartbeat_is_the_sole_clock(self):
-        """The one clock that remains is the Cloudflare Worker's 5-min cron.
+        """The one clock that remains is the Cloudflare Worker's 15-min cron.
 
-        If this file or its */5 schedule disappears, nothing in the repo can
+        If this file or its */15 schedule disappears, nothing in the repo can
         start an update or a probe on its own - the pipeline silently stops.
         """
         self.assertTrue(
@@ -286,8 +286,8 @@ class ScheduleOrderingTests(unittest.TestCase):
         )
         text = self.HEARTBEAT.read_text(encoding="utf-8")
         self.assertRegex(
-            text, r'"\*/5 \* \* \* \*"',
-            "the Cloudflare heartbeat must stay on a */5 cron; a slower beat "
+            text, r'"\*/15 \* \* \* \*"',
+            "the Cloudflare heartbeat must stay on a */15 cron; a slower beat "
             "leaves the pool/measurement stale for longer than the thresholds",
         )
         # The watchdog is woken by repository_dispatch, not by its own cron.
