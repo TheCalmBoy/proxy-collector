@@ -4,10 +4,10 @@
 // this repo on 2026-10-01, freezing the pipeline: the watchdog that was
 // supposed to recover it lived on the same scheduler, so a second GitHub
 // cron could not back it up. This Worker lives on Cloudflare's cron -- a
-// different platform -- and POSTs one repository_dispatch to the watchdog
-// every 5 minutes. The watchdog's freshness gate does the rest (pool >30
-// min -> update, health >10 min -> probe, both fresh -> no-op), so this
-// handler is deliberately stateless: one POST, no decisions.
+// different platform -- and POSTs a repository_dispatch every 15 minutes.
+// Alternating runs (KV counter) dispatch update-now (even) vs probe-egress (odd).
+// The watchdog's freshness gate provides additional safety.
+// This handler is deliberately stateless per-dispatch: one POST, no decisions.
 //
 // Secrets: GITHUB_TOKEN -- a classic PAT with the `workflow` scope (or a
 // GitHub App token). 288 dispatches/day is negligible against the 5000/h

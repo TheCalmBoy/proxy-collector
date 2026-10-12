@@ -2,9 +2,9 @@ name: Update Proxy Database
 
 on:
   # NO schedule: here. The only activator is the external Cloudflare heartbeat
-  # (heartbeat/wrangler.jsonc crons */5) -> repository_dispatch(heartbeat) on
+  # (heartbeat/wrangler.jsonc crons */15) -> repository_dispatch(heartbeat) on
   # freshness-watchdog.yml -> the watchdog dispatches THIS workflow when the
-  # pool is >20 min old. GitHub's free-tier crons skipped ticks on
+  # pool is >30 min old. GitHub's free-tier crons skipped ticks on
   # 2026-10-01 and were removed entirely: two clocks (CF heartbeat + GitHub
   # schedule) produced double-runs and queue stacks. One clock, one path.
   # The probe still chains off this run via `gh workflow run` (strict
