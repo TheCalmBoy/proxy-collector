@@ -10,12 +10,48 @@ var MAX_ENTRY_BYTES = 9e3;
 var MAX_ENTRIES = 90;
 var MAX_BODY_BYTES = 9e5;
 var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
+// Above the soft threshold we still serve the index (aged) instead of hard-failing
+// the whole subscription; above this we ignore it entirely and serve unfiltered.
+var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
+// Local traffic must never be sent through an exit node. Without these the only
+// rule is MATCH,<proxy>, so the router, NAS, printers, mDNS names and loopback
+// all get tunnelled to a foreign exit - where they simply fail. no-resolve
+// keeps the rule check from triggering a DNS lookup of its own. Verified against
+// mihomo: `mihomo -t` accepts this exact set.
+var LOCAL_DIRECT_RULES = [
+  "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+  "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+  "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+  "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+  "IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+  "IP-CIDR,255.255.255.255/32,DIRECT,no-resolve",
+  "IP-CIDR6,::1/128,DIRECT,no-resolve",
+  "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+  "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+  "DOMAIN-SUFFIX,local,DIRECT"
+];
+function byteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+__name(byteLength, "byteLength");
+__name2(byteLength, "byteLength");
+__name22(byteLength, "byteLength");
 var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
-  if (typeof body === "string" && body.length > MAX_BODY_BYTES) {
-    body = body.slice(0, MAX_BODY_BYTES);
+  if (typeof body === "string" && byteLength(body) > MAX_BODY_BYTES) {
+    // Prefer a whole-line cut. cutToBytes counts real UTF-8 bytes (a character
+    // can be 1-3 bytes, so a character count would overshoot by up to 3x on
+    // multibyte text) and refuses to split a surrogate pair. Structured formats
+    // are trimmed by whole nodes before they reach here (fitBody), so this only
+    // ever trims plain lists.
+    const cut = cutToBytes(body, MAX_BODY_BYTES);
+    const boundary = body.lastIndexOf("\n", cut);
+    body = boundary > 0 ? body.slice(0, boundary + 1) : body.slice(0, cut);
     headers["x-body-truncated"] = "true";
   }
   return new Response(body, { status, headers });
@@ -23,12 +59,88 @@ function reply(body, status = 200, type = "application/json; charset=utf-8", ext
 __name(reply, "reply");
 __name2(reply, "reply");
 __name22(reply, "reply");
-function fail(error, status = 400) {
-  return reply(JSON.stringify({ error }), status);
+function fail(error, status = 400, extra = null) {
+  return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
 __name(fail, "fail");
 __name2(fail, "fail");
 __name22(fail, "fail");
+// Largest prefix of `text` whose UTF-8 encoding fits in `budget` bytes.
+function cutToBytes(text, budget) {
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLength(text.slice(0, mid)) <= budget)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  if (lo > 0 && /[\uD800-\uDBFF]/.test(text[lo - 1]))
+    lo -= 1;
+  return lo;
+}
+__name(cutToBytes, "cutToBytes");
+__name2(cutToBytes, "cutToBytes");
+__name22(cutToBytes, "cutToBytes");
+function totalVariants(countries) {
+  return countries.reduce((sum, country) => sum + country.variants.length, 0);
+}
+__name(totalVariants, "totalVariants");
+__name2(totalVariants, "totalVariants");
+__name22(totalVariants, "totalVariants");
+// First `limit` exits, in order. Every format derives its proxy list AND its
+// group members from country.variants, so keeping a prefix of them keeps the
+// two consistent - a plain byte slice would leave groups pointing at proxies
+// that no longer exist.
+function keepVariants(countries, limit) {
+  let remaining = limit;
+  const kept = [];
+  for (const country of countries) {
+    if (remaining <= 0)
+      break;
+    const take = Math.min(remaining, country.variants.length);
+    remaining -= take;
+    if (take > 0)
+      kept.push({ ...country, variants: country.variants.slice(0, take) });
+  }
+  return kept;
+}
+__name(keepVariants, "keepVariants");
+__name2(keepVariants, "keepVariants");
+__name22(keepVariants, "keepVariants");
+// Renders the config with fewer and fewer exits until it fits the budget.
+// Size grows monotonically with the number of exits, so binary search finds the
+// largest config that fits in ~log2(n) renders. Dropping exits one at a time
+// and re-rendering would be quadratic and would blow the CPU limit on a large
+// feed (a 900KB body with thousands of exits).
+function fitBody(render, entries, countries, healthById, speedByEndpoint, budget = MAX_BODY_BYTES) {
+  const total = totalVariants(countries);
+  const full = render(entries, countries, healthById, speedByEndpoint);
+  if (byteLength(full) <= budget)
+    return { body: full, countries, dropped: 0 };
+  let lo = 0;
+  let hi = total;
+  let best = null;
+  let bestBody = null;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const body = render(entries, keepVariants(countries, mid), healthById, speedByEndpoint);
+    if (byteLength(body) <= budget) {
+      best = mid;
+      bestBody = body;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best === null)
+    return { body: full, countries, dropped: 0 };
+  return { body: bestBody, countries: keepVariants(countries, best), dropped: total - best };
+}
+__name(fitBody, "fitBody");
+__name2(fitBody, "fitBody");
+__name22(fitBody, "fitBody");
 function decodeEntries(url) {
   const values = url.searchParams.getAll("entry64");
   const unique = /* @__PURE__ */ new Set();
@@ -475,6 +587,100 @@ function scalarFields(object) {
 __name(scalarFields, "scalarFields");
 __name2(scalarFields, "scalarFields");
 __name22(scalarFields, "scalarFields");
+
+// Cloudflare publishes the ECH config for a decoy name as a DNS HTTPS (type 65)
+// record. Fetching it is what ?ech=embed does, so a client whose own DNS cannot
+// resolve the record never has to ask for it.
+var ECH_CONFIG_TTL_MS = 3e5;
+var echConfigCache = /* @__PURE__ */ new Map();
+function b64Bytes(bytes) {
+  let binary = "";
+  for (const byte of bytes)
+    binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+function b64urlBytes(bytes) {
+  return b64Bytes(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function dnsHTTPSQuery(name, type) {
+  const out = [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+  for (const label of name.split(".")) {
+    const bytes = new TextEncoder().encode(label);
+    out.push(bytes.length, ...bytes);
+  }
+  out.push(0, type >> 8, type & 255, 0, 1);
+  return new Uint8Array(out);
+}
+function skipDnsName(buf, offset) {
+  for (;;) {
+    const len = buf[offset];
+    if (len === 0)
+      return offset + 1;
+    if ((len & 192) === 192)
+      return offset + 2;
+    offset += len + 1;
+  }
+}
+// Pulls the ech (SvcParam key 5) value out of an HTTPS RR answer.
+function echFromDnsAnswer(buf) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const questions = view.getUint16(4);
+  const answers = view.getUint16(6);
+  let offset = 12;
+  for (let i = 0; i < questions; i += 1)
+    offset = skipDnsName(buf, offset) + 4;
+  for (let i = 0; i < answers; i += 1) {
+    offset = skipDnsName(buf, offset);
+    const type = view.getUint16(offset);
+    const length = view.getUint16(offset + 8);
+    offset += 10;
+    const end = offset + length;
+    if (type === 65) {
+      let cursor = skipDnsName(buf, offset + 2);
+      while (cursor + 4 <= end) {
+        const key = view.getUint16(cursor);
+        const size = view.getUint16(cursor + 2);
+        cursor += 4;
+        if (key === 5)
+          return b64Bytes(buf.subarray(cursor, cursor + size));
+        cursor += size;
+      }
+    }
+    offset = end;
+  }
+  return null;
+}
+async function fetchEchConfig(name) {
+  const cached = echConfigCache.get(name);
+  if (cached && Date.now() - cached.at < ECH_CONFIG_TTL_MS)
+    return cached.value;
+  try {
+    const response = await fetch(
+      "https://cloudflare-dns.com/dns-query?dns=" + b64urlBytes(dnsHTTPSQuery(name, 65)),
+      {
+        headers: { accept: "application/dns-message" },
+        signal: AbortSignal.timeout(4e3)
+      }
+    );
+    if (response.ok) {
+      const value = echFromDnsAnswer(new Uint8Array(await response.arrayBuffer()));
+      if (value) {
+        echConfigCache.set(name, { value, at: Date.now() });
+        return value;
+      }
+    }
+  } catch {
+  }
+  return cached ? cached.value : null;
+}
+
+// ?secure=1 keeps only exits whose client-to-exit hop is wrapped in TLS, which
+// is what decides whether the ISP sees an ordinary TLS handshake. Plain
+// shadowsocks and bare vmess/vless are encrypted but not TLS, so they go.
+var TLS_ALWAYS_TYPES = /* @__PURE__ */ new Set(["trojan", "hysteria", "hysteria2", "tuic", "anytls"]);
+function isTlsHop(proxy) {
+  return TLS_ALWAYS_TYPES.has(proxy.type) || proxy.tls === true;
+}
 var AMNEZIA_JMIN = 50;
 var AMNEZIA_JMAX = 100;
 var WARP_SERVER_KEY = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
@@ -571,9 +777,9 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
         "    proxies:"
       );
       autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-      lines.push("rules:", "  - MATCH,Best");
+      pushRules(lines, "MATCH,Best");
     } else {
-      lines.push("rules:", `  - MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
+      pushRules(lines, `MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
     }
     return lines.join("\n") + "\n";
   }
@@ -601,7 +807,7 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
       );
       autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
     }
-    lines.push("rules:", "  - MATCH,Proxy");
+    pushRules(lines, "MATCH,Proxy");
     return lines.join("\n") + "\n";
   }
   const ordered = [];
@@ -613,12 +819,21 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
     ordered.push(entry.tag);
   lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
   ordered.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-  lines.push("rules:", "  - MATCH,Proxy");
+  pushRules(lines, "MATCH,Proxy");
   return lines.join("\n") + "\n";
 }
 __name(mihomo, "mihomo");
 __name2(mihomo, "mihomo");
 __name22(mihomo, "mihomo");
+function pushRules(lines, match) {
+  lines.push("rules:");
+  for (const rule of LOCAL_DIRECT_RULES)
+    lines.push(`  - ${rule}`);
+  lines.push(`  - ${match}`);
+}
+__name(pushRules, "pushRules");
+__name2(pushRules, "pushRules");
+__name22(pushRules, "pushRules");
 function b64(text) {
   return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 }
@@ -713,13 +928,18 @@ function xrayOutbound(proxy, tag, dialerProxy) {
       show: false,
       ...proxy.alpn?.length ? { alpn: proxy.alpn } : {}
     };
-  else if (stream.security === "tls")
+  else if (stream.security === "tls") {
+    // Xray takes a base64 ECHConfigList here, never the name+resolver form, and
+    // it does not validate the field (garbage passes -test), so emit it only
+    // when we really hold a config and leave it out otherwise.
+    const echXray = parseEch(proxy.ech);
     stream.tlsSettings = {
       ...proxy.servername || proxy.sni ? { serverName: proxy.servername || proxy.sni } : {},
       ...proxy["client-fingerprint"] ? { fingerprint: proxy["client-fingerprint"] } : {},
       ...proxy.alpn?.length ? { alpn: proxy.alpn } : {},
-      ...proxy.ech ? { echConfigList: proxy.ech } : {}
+      ...echXray?.config ? { echConfigList: echXray.config } : {}
     };
+  }
   if (stream.network === "ws")
     stream.wsSettings = {
       path: proxy["ws-opts"]?.path || proxy.path || "/",
@@ -988,6 +1208,7 @@ var index_default = {
     } catch (e) {
       return fail(e.message);
     }
+
     const format = guessFormat(request, url);
     if (format !== "mihomo" && format !== "sing-box" && format !== "xray" && format !== "links" && format !== "unknown")
       return fail("format_must_be_mihomo_sing_box_xray_or_links");
@@ -997,7 +1218,13 @@ var index_default = {
       return fail("wireguard_entry_requires_mihomo_xray_or_links_format", 406);
     const origin = (env.FEED_ORIGIN || "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages").replace(/\/$/, "");
     const feedPath = country ? `countries/${country}.txt` : "all.txt";
-    const feed = await fetch(`${origin}/${feedPath}`, { headers: { accept: "text/plain" }, signal: AbortSignal.timeout(1e4) });
+    const feed = await fetch(`${origin}/${feedPath}`, {
+      headers: { accept: "text/plain" },
+      signal: AbortSignal.timeout(1e4),
+      // The feed changes on the pipeline's schedule, not per request: without
+      // this every visitor re-fetched it from the upstream on every hit.
+      cf: { cacheTtl: 60, cacheEverything: true }
+    });
     if (feed.status === 404)
       return fail("country_feed_not_found", 404);
     if (!feed.ok)
@@ -1006,9 +1233,52 @@ var index_default = {
     let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxy(uri, i + 1) })).filter((item) => item.proxy);
     if (!parsed.length)
       return fail("feed_has_no_supported_proxies", 404);
+    // ?secure=1 keeps only exits whose hop is TLS: something is better than a
+    // bare protocol when the ISP is the threat model.
+    if (url.searchParams.get("secure") === "1") {
+      parsed = parsed.filter((item) => isTlsHop(item.proxy));
+      if (!parsed.length)
+        return fail("no_tls_exits_in_feed", 503);
+    }
+
+    // ?ech=embed pins Cloudflare's published ECH key into the config, so the
+    // client needs no ECH lookup of its own. It has to cover the exits as well
+    // as the entrypoints: an exit can carry its own ech= and would otherwise
+    // still need a lookup, which is the very thing this option exists to avoid.
+    // Off by default, because mihomo 1.19.x has no ECH rejection fallback, so a
+    // key that rotates takes the config with it.
+    let echEmbedded = 0;
+    if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
+      const pending = new Map();
+      for (const proxy of [...entries.map((entry) => entry.proxy), ...parsed.map((item) => item.proxy)]) {
+        const parsedEch = parseEch(proxy.ech);
+        if (!parsedEch?.queryServerName)
+          continue;
+        if (!pending.has(parsedEch.queryServerName))
+          pending.set(parsedEch.queryServerName, []);
+        pending.get(parsedEch.queryServerName).push(proxy);
+      }
+      const resolved = new Map(await Promise.all(
+        [...pending.keys()].map(async (name) => [name, await fetchEchConfig(name)])
+      ));
+      for (const [name, proxies] of pending) {
+        const config = resolved.get(name);
+        if (!config)
+          continue;
+        for (const proxy of proxies) {
+          proxy.ech = config;
+          echEmbedded += 1;
+        }
+      }
+    }
+    const echHeaders = url.searchParams.has("ech")
+      ? { "x-ech-mode": echEmbedded ? "embedded:" + echEmbedded : "query" }
+      : {};
+
     let healthById = {};
     let healthIndexState = "missing";
     let healthJoin = null;
+    let healthAgeMs = null;
     try {
       const healthVersion = Math.floor(Date.now() / (5 * 6e4));
       const healthResponse = await fetch(`${origin}/egress-health.json?v=${healthVersion}`, {
@@ -1022,9 +1292,12 @@ var index_default = {
         const healthDocument = await healthResponse.json();
         const generatedAt = Date.parse(healthDocument?.generated_at || "");
         const ageMs = Date.now() - generatedAt;
-        if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= STALE_HEALTH_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
+        if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= HEALTH_HARD_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
           healthById = healthDocument.configs;
-          healthIndexState = "fresh";
+          healthAgeMs = ageMs;
+          healthIndexState = ageMs <= STALE_HEALTH_MAX_AGE_MS ? "fresh" : "aged";
+        } else {
+          healthIndexState = "unusable";
         }
       }
     } catch {
@@ -1043,24 +1316,25 @@ var index_default = {
       }
     } catch {
     }
-    if (healthIndexState === "unavailable")
-      return fail("recent_egress_health_unavailable", 503);
-    if (Object.keys(healthById).length === 0)
-      return fail("no_egress_health_index", 503);
+    const healthEndpointIndex = buildEndpointIndex(healthById);
+    const healthHeaders = () => ({
+      "x-health-index": healthIndexState,
+      ...healthJoin ? { "x-health-join": `${healthJoin.verified}/${healthJoin.feed}` } : {},
+      ...Number.isFinite(healthAgeMs) ? { "x-health-age": String(Math.max(0, Math.round(healthAgeMs / 1e3))) } : {}
+    });
     if (healthIndexState === "fresh") {
-      const endpointIndex2 = buildEndpointIndex(healthById);
       const before = parsed.length;
       parsed = parsed.filter((item) => {
-        return Boolean(resolveHealthFor(item, healthById, endpointIndex2));
+        return Boolean(resolveHealthFor(item, healthById, healthEndpointIndex));
       });
       healthJoin = { feed: before, verified: parsed.length };
       if (!parsed.length)
-        return fail("no_recently_verified_proxies", 503);
+        return fail("no_recently_verified_proxies", 503, healthHeaders());
     }
     const grouped = /* @__PURE__ */ new Map();
     const RAINBOW_KEY = "ZZ-RAINBOW";
     for (const item of parsed) {
-      const health = resolveHealthFor(item.proxy, healthById, buildEndpointIndex(healthById));
+      const health = resolveHealthFor(item.proxy, healthById, healthEndpointIndex);
       const crossesBorders = !!health && String(health.classification?.same_country) === "false" && Array.isArray(health.classification?.countries) && health.classification.countries.length > 1;
       if (crossesBorders) {
         if (!grouped.has(RAINBOW_KEY))
@@ -1074,7 +1348,8 @@ var index_default = {
         grouped.set(code, []);
       grouped.get(code).push(item);
     }
-    const endpointIndex = buildEndpointIndex(healthById);
+    const endpointIndex = healthEndpointIndex;
+    let variantSerial = 0;
     const countries = [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([code, items]) => {
       const ranked = items.map((item) => ({
         item,
@@ -1086,11 +1361,13 @@ var index_default = {
       const variants = [];
       for (let index = 0; index < exits.length; index += 1) {
         if (entries.length) {
-          const entry = entries[index % entries.length];
+          const slot = variantSerial;
+          variantSerial += 1;
+          const entry = entries[slot % entries.length];
           variants.push({
             proxy: exits[index],
             name: friendlyExitName(code, index, exits[index], healthById, null, speedByEndpoint),
-            tag: `${code}-${String(index + 1).padStart(2, "0")}e${index % entries.length + 1}`,
+            tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot % entries.length + 1}`,
             dialerProxy: entry.tag
           });
         } else {
@@ -1100,29 +1377,35 @@ var index_default = {
       return { code, items: capped.map((entry) => entry.item), exits, baseNames, variants };
     });
     if (!countries.length)
-      return fail("no_recently_verified_proxies", 503);
-    const joinHeaders = healthJoin ? { "x-health-join": `${healthJoin.verified}/${healthJoin.feed}` } : null;
+      return fail("no_recently_verified_proxies", 503, healthHeaders());
+    const joinHeaders = { ...healthHeaders(), ...echHeaders };
     if (format === "links" || !entries.length && (format === "xray" || format === "unknown")) {
       const links = countries.flatMap((group) => group.items.map((item, index) => withUriName(item.uri, group.baseNames[index])));
       if (entries.length)
         links.unshift(...entries.map((entry) => withUriName(entry.uri, entry.tag)));
       return reply(b64(links.join("\n")), 200, "text/plain; charset=utf-8", joinHeaders);
     }
-    if (format === "mihomo")
-      return reply(mihomo(entries, countries, healthById, speedByEndpoint), 200, "text/yaml; charset=utf-8", joinHeaders);
-    if (format === "sing-box")
-      return reply(singbox(entries, countries, healthById, speedByEndpoint), 200, "application/json; charset=utf-8", joinHeaders);
-    return reply(xrayConfig(entries, countries, country || "ALL", healthById, speedByEndpoint), 200, "application/json; charset=utf-8", joinHeaders);
+    const render = format === "mihomo" ? mihomo : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
+    const fitted = fitBody(render, entries, countries, healthById, speedByEndpoint);
+    const fittedHeaders = fitted.dropped ? { ...joinHeaders, "x-exits-dropped": String(fitted.dropped) } : joinHeaders;
+    return reply(fitted.body, 200, format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", fittedHeaders);
   }
 };
 export {
   GOOD_ENOUGH_MB_S,
   buildEndpointIndex,
   buildSpeedIndex,
+  MAX_BODY_BYTES,
+  byteLength,
+  cutToBytes,
+  fitBody,
+  reply,
   index_default as default,
   endpointKeyOf,
   friendlyExitName,
   mihomo,
+  keepVariants,
+  totalVariants,
   parseEch,
   qualityScore,
   rankScore,
