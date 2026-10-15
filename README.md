@@ -1,44 +1,119 @@
-# proxy-collector prototype
+# proxy-collector
 
-This is the GitHub-side prototype for the proxy database pipeline.
+Collects public proxy configs, verifies which ones actually work, and publishes them as
+ready-to-use subscriptions.
 
-## What it does
+It runs in two places:
 
-1. Downloads the current `verified/configs.txt` from 0xRadikal.
-2. Parses supported proxy URIs and extracts their endpoint host.
-3. Resolves the endpoint to a public IP.
-4. Uses DB-IP Lite MMDB locally to determine the endpoint country.
-5. Deduplicates IPs and uses ip-api.com's batch endpoint to add hosting/ISP/ASN metadata.
-6. Writes all entries into country-specific text and Base64 files.
-7. Publishes the generated `output/` directory to the `gh-pages` branch.
+- **GitHub Actions** — the pipeline: fetch → probe → geolocate → publish to `gh-pages`.
+- **Cloudflare Workers** — serve the subscriptions, wake the pipeline, verify egress.
 
-The collector intentionally does **not** hardcode a country allow-list. Every country found in the data gets its own file.
+## Layout
 
-## Generated layout
+| Path | What it is |
+|---|---|
+| `main.py`, `tools/` | the pipeline: fetch, probe, classify, publish |
+| `tests/`, `run_tests.py` | pipeline tests |
+| `.github/workflows/` | the jobs — see [Scheduling](#scheduling) |
+| `workers/proxy-chain-subscription/` | the subscription endpoint clients point at |
+| `workers/proxy-egress-ip-check/` | measures an exit's public IP and download speed |
+| `heartbeat/` | the Worker that wakes the pipeline every 15 min |
+| `CODE_MAP.json` | machine-readable map of the above |
 
-```text
-all.txt
-all.txt.base64
-countries/US.txt
-countries/US.base64.txt
-countries/UA.txt
-countries/UA.txt.base64
-...
-manifest.json
-ATTRIBUTION.txt
+The Workers are committed as the bundles Cloudflare actually runs — `heartbeat/` is the
+one exception, holding readable source next to its bundle under `workers/`.
+
+## Scheduling
+
+GitHub's free-tier `schedule:` crons stopped firing for this repo on 2026-10-01 and froze
+the pipeline — the watchdog meant to recover it lived on the same scheduler, so it froze
+with it. Nothing here relies on `schedule:` any more.
+
+Every 15 minutes a Cloudflare cron on `heartbeat/` POSTs a `repository_dispatch`
+(`heartbeat`). It runs on a different platform, so GitHub's best-effort scheduler cannot
+skip it. `freshness-watchdog.yml` receives that event, downloads the two published
+documents, and decides:
+
+| Condition | Action |
+|---|---|
+| pool older than 30 min | dispatch `update.yml` — re-collect, which chains its own probe |
+| health older than 10 min | dispatch `probe-egress.yml` — measure the current pool |
+| both stale | update wins; its chained probe covers the health side |
+| both fresh, or a heavy run already queued/running | no-op |
+
+`probe-egress.yml` is chained rather than scheduled: `update.yml` fires it with
+`gh workflow run` the moment a build publishes, so the probe measures the pool that was
+just published instead of the previous slot's. Every workflow is also runnable by hand
+via `workflow_dispatch`.
+
+## Published data (`gh-pages`)
+
+| File | Contents |
+|---|---|
+| `all.txt` | every verified proxy URI, annotated |
+| `countries/<CC>.txt` | the same, split by endpoint country |
+| `all.txt.base64`, `countries/<CC>.base64.txt` | base64 of the above |
+| `manifest.json`, `ATTRIBUTION.txt`, `source_map.json` | index, credits, URI → source |
+| `enriched-configs.json` | configs with their probe and country metadata |
+| `egress-health.json` | measured egress health per exit, refreshed by `probe-egress` |
+| `rejected-endpoints.json` | what the probes rejected, and why |
+
+## Subscription endpoint
+
+`GET /sub` on `workers/proxy-chain-subscription`. The format is detected from the
+client's User-Agent; override it when detection gets it wrong.
+
+| Query | Default | Meaning |
+|---|---|---|
+| `format` | from User-Agent | `mihomo`, `sing-box`, `xray`, `links` (`clash` → `mihomo`) |
+| `country` | `ALL` | two-letter ISO code, or `ALL` |
+| `entry64` | none | base64 proxy URI for an entrypoint; repeatable |
+| `secure=1` | off | keep only exits whose hop is TLS |
+| `ech=embed` | off | pin the ECH key into the config instead of leaving it to the client's DNS |
+
+Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
+`x-health-join`, `x-ech-mode`.
+
+**Entrypoints and exits.** `entry64` is the hop that gets out of a filtered network; the
+Worker chains the feed's exits behind it with `dialer-proxy`. Exits are handed out
+round-robin, so no one entrypoint carries every connection.
+
+**Size caps.** `MAX_ENTRIES` 90, `MAX_BODY_BYTES` 900000, `MAX_ENTRY_BYTES` 9000. If the
+rendered body would exceed the cap, whole exits are dropped — the YAML stays valid
+instead of being cut mid-node.
+
+### ECH
+
+An entrypoint whose edge requires ECH leaks the destination name in its ClientHello
+unless the client holds Cloudflare's ECH public key. The default leaves that key to the
+client's own DNS (`query-server-name`), because mihomo has no `ECHRejectionError`
+recovery: a pinned key that later rotates hard-fails with no fallback. `?ech=embed` pins
+it anyway, for clients that cannot resolve it themselves — refresh the subscription
+every 30–60 minutes if you use it.
+
+## Tests
+
+```bash
+python3 run_tests.py                  # all pipeline tests
+python3 run_tests.py classify         # only files whose name matches "classify"
+cd workers/proxy-chain-subscription && node --test   # Worker tests
 ```
 
-`all.txt` and the country files contain annotated proxy URIs. The Base64 variants are Base64 encodings of the corresponding text files.
+CI runs the Python suite on every push and pull request
+(`.github/workflows/test.yml`). The Worker tests are not wired into CI — run them with
+`node --test` as above.
 
-## Important classification limitation
+`workers/proxy-chain-subscription/scripts/verify-chain.sh` is the end-to-end check
+against a live Worker: it parses the rendered YAML, starts mihomo on it, fetches through
+the chain, and reports the egress country.
 
-The country is the country of the resolved proxy endpoint IP according to DB-IP Lite. It is not a guarantee of the public egress IP that a website will see after connecting through the proxy.
+```bash
+SUB_URL='https://<worker>/sub?format=mihomo&entry64=<base64-uri>' ./scripts/verify-chain.sh
+```
 
-`DC` means ip-api reported `hosting=true`; `RES` means `hosting=false`; lookup failures remain `UNKNOWN` rather than being forced into either class.
+## Running the pipeline locally
 
-## Local run
-
-Download a DB-IP Lite MMDB named `GeoLite2-Country.mmdb` into the repository root, then:
+Needs a DB-IP Lite MMDB named `GeoLite2-Country.mmdb` in the repository root:
 
 ```bash
 python -m venv .venv
@@ -47,16 +122,20 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-## GitHub Pages
+Output lands in `output/`. `MMDB_PATH`, `OUTPUT_DIR`, and `IP_API_URL` are overridable by
+environment variable.
 
-The workflow deploys `output/` to `gh-pages`. In the repository's Pages settings, select GitHub Actions / the `gh-pages` deployment as appropriate for the repository configuration.
+## How a proxy is classified
 
-## Real proxy egress checks
+The country is the country of the resolved endpoint IP according to DB-IP Lite. It is
+not a guarantee about the egress IP a website will see after connecting through the
+proxy.
 
-The separate `Probe proxy egress IPs` workflow fetches the current verified list and tests every supported VLESS, VMess, Shadowsocks, and Trojan link through sing-box. Each test requests `/ip?download_bytes=5000000` through the local SOCKS listener, which returns caller metadata followed by a 5 MB download sample. The larger transfer gives a steadier throughput estimate than the previous 1 MB sample. If curl reaches its 30-second cap, the workflow still estimates throughput from the bytes received before timeout. The workflow measures response latency and download throughput, waits five minutes, then retests the same links. It runs hourly at minute 17 or by manual dispatch, with up to 100 requests active concurrently. The Worker caches FFraud data per egress IP for six hours. Each full result is available as a 14-day Actions artifact named `proxy-egress-report-<run-id>`. A compact `egress-health.json` index is also published to the Pages feed, keyed by the same stable proxy IDs used in country files. It includes only links that returned an egress IP in both rounds and had at least one measured speed of 10 KB/s or higher. For displayed speed it uses the slower valid sample, even when the retests differ, and omits raw egress IPs.
+`DC` means ip-api reported `hosting=true`, `RES` means `hosting=false`; a failed lookup
+stays `UNKNOWN` rather than being forced into either class. There is deliberately no
+country allow-list — every country present in the data gets its own file.
 
-Before running it, add an Actions repository secret named `IP_CHECK_WORKER_TOKEN` containing the Worker bearer token from `.api-bearer-token` in the separate Worker project. Keep that value private. The Worker URL is already configured in the workflow. Unsupported URI schemes and protocol options are counted and skipped rather than guessed. The report includes observed egress IPs, FFraud reputation, measured download speeds, and whether those speeds repeated closely; generated sing-box configs and source proxy credentials are kept out of the artifact. The 5 MB sample is about 240 GB of test data per day at roughly 1,000 configs checked hourly.
+## Upstream sources
 
-## Data attribution
-
-DB-IP Lite is licensed under CC BY 4.0. See `output/ATTRIBUTION.txt` and https://db-ip.com.
+- `0xRadikal/Free-v2ray-Configs` — primary
+- `patterniha/Free-Configs` — secondary, added 2026-10-11
