@@ -1229,7 +1229,13 @@ var index_default = {
       return fail("wireguard_entry_requires_mihomo_xray_or_links_format", 406);
     const origin = (env.FEED_ORIGIN || "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages").replace(/\/$/, "");
     const feedPath = country ? `countries/${country}.txt` : "all.txt";
-    const feed = await fetch(`${origin}/${feedPath}`, { headers: { accept: "text/plain" }, signal: AbortSignal.timeout(1e4) });
+    const feed = await fetch(`${origin}/${feedPath}`, {
+      headers: { accept: "text/plain" },
+      signal: AbortSignal.timeout(1e4),
+      // The feed changes on the pipeline's schedule, not per request: without
+      // this every visitor re-fetched it from the upstream on every hit.
+      cf: { cacheTtl: 60, cacheEverything: true }
+    });
     if (feed.status === 404)
       return fail("country_feed_not_found", 404);
     if (!feed.ok)
