@@ -524,9 +524,7 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
         Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
       if (ech)
         lines.push(`    tls-opts:
-      ech:
-        enabled: true
-        config: ${yamlScalar(ech)}`);
+      ech: ${yamlScalar(ech)}`);
     }
   }, "appendProxy");
   for (const entry of entries)
@@ -820,7 +818,7 @@ function singboxOutbound(proxy, tag, detour = void 0) {
       if (proxy.reality)
         out.tls.reality = { enabled: true, public_key: proxy.reality["public-key"], short_id: proxy.reality["short-id"] };
       if (proxy.ech)
-        out.tls.ech = { enabled: true, config: proxy.ech };
+        out.tls.ech = proxy.ech;
     }
     if (proxy.network === "ws")
       out.transport = { type: "ws", path: proxy["ws-opts"]?.path || "/", headers: { Host: proxy["ws-opts"]?.headers?.Host || proxy.server } };
