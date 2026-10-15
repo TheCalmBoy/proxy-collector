@@ -80,3 +80,42 @@ test("rules keep a catch-all and never leave a gap", async () => {
   assert.ok(rules.length > 0, "expected rules");
   assert.ok(rules.some((r) => r.includes("MATCH")), "expected a MATCH catch-all");
 });
+
+// Without these, the router, NAS and loopback get tunnelled to a foreign exit.
+const LOCAL_CIDRS = ["10.0.0.0/8", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                     "169.254.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"];
+
+test("local ranges are routed DIRECT, before the catch-all", async () => {
+  const { status, body } = await render([uriFor("9.9.9.9", "entry")]);
+  assert.equal(status, 200);
+  const rules = body.split("\nrules:\n")[1].split("\n").filter((l) => l.trim().startsWith("-"));
+  for (const cidr of LOCAL_CIDRS) {
+    const idx = rules.findIndex((r) => r.includes(`,${cidr},DIRECT`));
+    assert.ok(idx >= 0, `no DIRECT rule for ${cidr}`);
+    assert.ok(idx < rules.findIndex((r) => r.includes("MATCH")), `${cidr} must precede MATCH`);
+  }
+});
+
+test("every DIRECT rule uses no-resolve so it cannot cause a lookup", async () => {
+  const { body } = await render([uriFor("9.9.9.9", "entry")]);
+  const rules = body.split("\nrules:\n")[1].split("\n").filter((l) => l.includes("DIRECT"));
+  for (const r of rules)
+    assert.match(r, /no-resolve|DOMAIN-SUFFIX/, `missing no-resolve: ${r.trim()}`);
+});
+
+test("the multi-country layout carries the same DIRECT rules", async () => {
+  const many = Array.from({ length: 60 }, (_, i) =>
+    `http://203.0.113.${i + 1}:8080#${i < 30 ? "DE" : "NL"}-${i + 1}`).join("\n");
+  globalThis.fetch = async (input) => {
+    const u = String(input);
+    if (u.includes("egress-health.json") || u.includes("enriched-configs.json"))
+      return new Response("", { status: 404 });
+    return new Response(many, { status: 200 });
+  };
+  const res = await worker.fetch(
+    new Request(`https://w.example/sub?format=mihomo&entry64=${entry64For(uriFor("9.9.9.9", "entry"))}`), {});
+  const body = await res.text();
+  assert.equal(res.status, 200);
+  assert.match(body, /IP-CIDR,10\.0\.0\.0\/8,DIRECT,no-resolve/);
+  assert.match(body, /IP-CIDR,192\.168\.0\.0\/16,DIRECT,no-resolve/);
+});

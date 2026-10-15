@@ -14,6 +14,26 @@ var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
 // the whole subscription; above this we ignore it entirely and serve unfiltered.
 var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
+// Local traffic must never be sent through an exit node. Without these the only
+// rule is MATCH,<proxy>, so the router, NAS, printers, mDNS names and loopback
+// all get tunnelled to a foreign exit - where they simply fail. no-resolve
+// keeps the rule check from triggering a DNS lookup of its own. Verified against
+// mihomo: `mihomo -t` accepts this exact set.
+var LOCAL_DIRECT_RULES = [
+  "IP-CIDR,0.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
+  "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+  "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+  "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+  "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+  "IP-CIDR,224.0.0.0/4,DIRECT,no-resolve",
+  "IP-CIDR,255.255.255.255/32,DIRECT,no-resolve",
+  "IP-CIDR6,::1/128,DIRECT,no-resolve",
+  "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+  "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+  "DOMAIN-SUFFIX,local,DIRECT"
+];
 function byteLength(text) {
   return new TextEncoder().encode(text).length;
 }
@@ -663,9 +683,9 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
         "    proxies:"
       );
       autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-      lines.push("rules:", "  - MATCH,Best");
+      pushRules(lines, "MATCH,Best");
     } else {
-      lines.push("rules:", `  - MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
+      pushRules(lines, `MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
     }
     return lines.join("\n") + "\n";
   }
@@ -693,7 +713,7 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
       );
       autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
     }
-    lines.push("rules:", "  - MATCH,Proxy");
+    pushRules(lines, "MATCH,Proxy");
     return lines.join("\n") + "\n";
   }
   const ordered = [];
@@ -705,12 +725,21 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
     ordered.push(entry.tag);
   lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
   ordered.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-  lines.push("rules:", "  - MATCH,Proxy");
+  pushRules(lines, "MATCH,Proxy");
   return lines.join("\n") + "\n";
 }
 __name(mihomo, "mihomo");
 __name2(mihomo, "mihomo");
 __name22(mihomo, "mihomo");
+function pushRules(lines, match) {
+  lines.push("rules:");
+  for (const rule of LOCAL_DIRECT_RULES)
+    lines.push(`  - ${rule}`);
+  lines.push(`  - ${match}`);
+}
+__name(pushRules, "pushRules");
+__name2(pushRules, "pushRules");
+__name22(pushRules, "pushRules");
 function b64(text) {
   return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 }
