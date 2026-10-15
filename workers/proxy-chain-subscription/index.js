@@ -10,6 +10,9 @@ var MAX_ENTRY_BYTES = 9e3;
 var MAX_ENTRIES = 90;
 var MAX_BODY_BYTES = 9e5;
 var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
+// Above the soft threshold we still serve the index (aged) instead of hard-failing
+// the whole subscription; above this we ignore it entirely and serve unfiltered.
+var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
 var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
@@ -23,8 +26,8 @@ function reply(body, status = 200, type = "application/json; charset=utf-8", ext
 __name(reply, "reply");
 __name2(reply, "reply");
 __name22(reply, "reply");
-function fail(error, status = 400) {
-  return reply(JSON.stringify({ error }), status);
+function fail(error, status = 400, extra = null) {
+  return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
 __name(fail, "fail");
 __name2(fail, "fail");
@@ -1009,6 +1012,7 @@ var index_default = {
     let healthById = {};
     let healthIndexState = "missing";
     let healthJoin = null;
+    let healthAgeMs = null;
     try {
       const healthVersion = Math.floor(Date.now() / (5 * 6e4));
       const healthResponse = await fetch(`${origin}/egress-health.json?v=${healthVersion}`, {
@@ -1022,9 +1026,12 @@ var index_default = {
         const healthDocument = await healthResponse.json();
         const generatedAt = Date.parse(healthDocument?.generated_at || "");
         const ageMs = Date.now() - generatedAt;
-        if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= STALE_HEALTH_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
+        if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= HEALTH_HARD_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
           healthById = healthDocument.configs;
-          healthIndexState = "fresh";
+          healthAgeMs = ageMs;
+          healthIndexState = ageMs <= STALE_HEALTH_MAX_AGE_MS ? "fresh" : "aged";
+        } else {
+          healthIndexState = "unusable";
         }
       }
     } catch {
@@ -1043,24 +1050,25 @@ var index_default = {
       }
     } catch {
     }
-    if (healthIndexState === "unavailable")
-      return fail("recent_egress_health_unavailable", 503);
-    if (Object.keys(healthById).length === 0)
-      return fail("no_egress_health_index", 503);
+    const healthEndpointIndex = buildEndpointIndex(healthById);
+    const healthHeaders = () => ({
+      "x-health-index": healthIndexState,
+      ...healthJoin ? { "x-health-join": `${healthJoin.verified}/${healthJoin.feed}` } : {},
+      ...Number.isFinite(healthAgeMs) ? { "x-health-age": String(Math.max(0, Math.round(healthAgeMs / 1e3))) } : {}
+    });
     if (healthIndexState === "fresh") {
-      const endpointIndex2 = buildEndpointIndex(healthById);
       const before = parsed.length;
       parsed = parsed.filter((item) => {
-        return Boolean(resolveHealthFor(item, healthById, endpointIndex2));
+        return Boolean(resolveHealthFor(item, healthById, healthEndpointIndex));
       });
       healthJoin = { feed: before, verified: parsed.length };
       if (!parsed.length)
-        return fail("no_recently_verified_proxies", 503);
+        return fail("no_recently_verified_proxies", 503, healthHeaders());
     }
     const grouped = /* @__PURE__ */ new Map();
     const RAINBOW_KEY = "ZZ-RAINBOW";
     for (const item of parsed) {
-      const health = resolveHealthFor(item.proxy, healthById, buildEndpointIndex(healthById));
+      const health = resolveHealthFor(item.proxy, healthById, healthEndpointIndex);
       const crossesBorders = !!health && String(health.classification?.same_country) === "false" && Array.isArray(health.classification?.countries) && health.classification.countries.length > 1;
       if (crossesBorders) {
         if (!grouped.has(RAINBOW_KEY))
@@ -1074,7 +1082,7 @@ var index_default = {
         grouped.set(code, []);
       grouped.get(code).push(item);
     }
-    const endpointIndex = buildEndpointIndex(healthById);
+    const endpointIndex = healthEndpointIndex;
     const countries = [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([code, items]) => {
       const ranked = items.map((item) => ({
         item,
@@ -1100,8 +1108,8 @@ var index_default = {
       return { code, items: capped.map((entry) => entry.item), exits, baseNames, variants };
     });
     if (!countries.length)
-      return fail("no_recently_verified_proxies", 503);
-    const joinHeaders = healthJoin ? { "x-health-join": `${healthJoin.verified}/${healthJoin.feed}` } : null;
+      return fail("no_recently_verified_proxies", 503, healthHeaders());
+    const joinHeaders = healthHeaders();
     if (format === "links" || !entries.length && (format === "xray" || format === "unknown")) {
       const links = countries.flatMap((group) => group.items.map((item, index) => withUriName(item.uri, group.baseNames[index])));
       if (entries.length)
