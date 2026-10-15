@@ -14,11 +14,24 @@ var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
 // the whole subscription; above this we ignore it entirely and serve unfiltered.
 var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
+function byteLength(text) {
+  return new TextEncoder().encode(text).length;
+}
+__name(byteLength, "byteLength");
+__name2(byteLength, "byteLength");
+__name22(byteLength, "byteLength");
 var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
-  if (typeof body === "string" && body.length > MAX_BODY_BYTES) {
-    body = body.slice(0, MAX_BODY_BYTES);
+  if (typeof body === "string" && byteLength(body) > MAX_BODY_BYTES) {
+    // Prefer a whole-line cut. cutToBytes counts real UTF-8 bytes (a character
+    // can be 1-3 bytes, so a character count would overshoot by up to 3x on
+    // multibyte text) and refuses to split a surrogate pair. Structured formats
+    // are trimmed by whole nodes before they reach here (fitBody), so this only
+    // ever trims plain lists.
+    const cut = cutToBytes(body, MAX_BODY_BYTES);
+    const boundary = body.lastIndexOf("\n", cut);
+    body = boundary > 0 ? body.slice(0, boundary + 1) : body.slice(0, cut);
     headers["x-body-truncated"] = "true";
   }
   return new Response(body, { status, headers });
@@ -32,6 +45,82 @@ function fail(error, status = 400, extra = null) {
 __name(fail, "fail");
 __name2(fail, "fail");
 __name22(fail, "fail");
+// Largest prefix of `text` whose UTF-8 encoding fits in `budget` bytes.
+function cutToBytes(text, budget) {
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (byteLength(text.slice(0, mid)) <= budget)
+      lo = mid;
+    else
+      hi = mid - 1;
+  }
+  if (lo > 0 && /[\uD800-\uDBFF]/.test(text[lo - 1]))
+    lo -= 1;
+  return lo;
+}
+__name(cutToBytes, "cutToBytes");
+__name2(cutToBytes, "cutToBytes");
+__name22(cutToBytes, "cutToBytes");
+function totalVariants(countries) {
+  return countries.reduce((sum, country) => sum + country.variants.length, 0);
+}
+__name(totalVariants, "totalVariants");
+__name2(totalVariants, "totalVariants");
+__name22(totalVariants, "totalVariants");
+// First `limit` exits, in order. Every format derives its proxy list AND its
+// group members from country.variants, so keeping a prefix of them keeps the
+// two consistent - a plain byte slice would leave groups pointing at proxies
+// that no longer exist.
+function keepVariants(countries, limit) {
+  let remaining = limit;
+  const kept = [];
+  for (const country of countries) {
+    if (remaining <= 0)
+      break;
+    const take = Math.min(remaining, country.variants.length);
+    remaining -= take;
+    if (take > 0)
+      kept.push({ ...country, variants: country.variants.slice(0, take) });
+  }
+  return kept;
+}
+__name(keepVariants, "keepVariants");
+__name2(keepVariants, "keepVariants");
+__name22(keepVariants, "keepVariants");
+// Renders the config with fewer and fewer exits until it fits the budget.
+// Size grows monotonically with the number of exits, so binary search finds the
+// largest config that fits in ~log2(n) renders. Dropping exits one at a time
+// and re-rendering would be quadratic and would blow the CPU limit on a large
+// feed (a 900KB body with thousands of exits).
+function fitBody(render, entries, countries, healthById, speedByEndpoint, budget = MAX_BODY_BYTES) {
+  const total = totalVariants(countries);
+  const full = render(entries, countries, healthById, speedByEndpoint);
+  if (byteLength(full) <= budget)
+    return { body: full, countries, dropped: 0 };
+  let lo = 0;
+  let hi = total;
+  let best = null;
+  let bestBody = null;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const body = render(entries, keepVariants(countries, mid), healthById, speedByEndpoint);
+    if (byteLength(body) <= budget) {
+      best = mid;
+      bestBody = body;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best === null)
+    return { body: full, countries, dropped: 0 };
+  return { body: bestBody, countries: keepVariants(countries, best), dropped: total - best };
+}
+__name(fitBody, "fitBody");
+__name2(fitBody, "fitBody");
+__name22(fitBody, "fitBody");
 function decodeEntries(url) {
   const values = url.searchParams.getAll("entry64");
   const unique = /* @__PURE__ */ new Set();
@@ -1119,21 +1208,27 @@ var index_default = {
         links.unshift(...entries.map((entry) => withUriName(entry.uri, entry.tag)));
       return reply(b64(links.join("\n")), 200, "text/plain; charset=utf-8", joinHeaders);
     }
-    if (format === "mihomo")
-      return reply(mihomo(entries, countries, healthById, speedByEndpoint), 200, "text/yaml; charset=utf-8", joinHeaders);
-    if (format === "sing-box")
-      return reply(singbox(entries, countries, healthById, speedByEndpoint), 200, "application/json; charset=utf-8", joinHeaders);
-    return reply(xrayConfig(entries, countries, country || "ALL", healthById, speedByEndpoint), 200, "application/json; charset=utf-8", joinHeaders);
+    const render = format === "mihomo" ? mihomo : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
+    const fitted = fitBody(render, entries, countries, healthById, speedByEndpoint);
+    const fittedHeaders = fitted.dropped ? { ...joinHeaders, "x-exits-dropped": String(fitted.dropped) } : joinHeaders;
+    return reply(fitted.body, 200, format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", fittedHeaders);
   }
 };
 export {
   GOOD_ENOUGH_MB_S,
   buildEndpointIndex,
   buildSpeedIndex,
+  MAX_BODY_BYTES,
+  byteLength,
+  cutToBytes,
+  fitBody,
+  reply,
   index_default as default,
   endpointKeyOf,
   friendlyExitName,
   mihomo,
+  keepVariants,
+  totalVariants,
   parseEch,
   qualityScore,
   rankScore,
