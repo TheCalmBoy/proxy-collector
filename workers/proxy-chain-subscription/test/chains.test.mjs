@@ -54,6 +54,17 @@ test("with several entries the exits round-robin and still all resolve", async (
   for (const ref of refs) assert.ok(names.includes(ref), `dangling dialer-proxy: ${ref}`);
 });
 
+test("with several entries the exits spread across them", async () => {
+  const { status, body } = await render([uriFor("9.9.9.9", "e1"), uriFor("8.8.8.8", "e2")]);
+  assert.equal(status, 200);
+  const names = proxyNames(body);
+  const refs = dialerRefs(body);
+  const entryNames = names.filter((n) => n.includes("ET"));
+  assert.equal(entryNames.length, 2, "expected two entrypoints");
+  assert.equal(new Set(refs).size, 2, "expected the exits to spread over both entries");
+  for (const ref of refs) assert.ok(names.includes(ref), `dangling dialer-proxy: ${ref}`);
+});
+
 test("the entrypoints themselves carry no dialer-proxy", async () => {
   const { body } = await render([uriFor("9.9.9.9", "entry")]);
   const blocks = body.split("\n  -\n").slice(1);

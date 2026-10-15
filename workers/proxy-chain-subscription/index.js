@@ -1083,6 +1083,7 @@ var index_default = {
       grouped.get(code).push(item);
     }
     const endpointIndex = healthEndpointIndex;
+    let variantSerial = 0;
     const countries = [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([code, items]) => {
       const ranked = items.map((item) => ({
         item,
@@ -1094,11 +1095,13 @@ var index_default = {
       const variants = [];
       for (let index = 0; index < exits.length; index += 1) {
         if (entries.length) {
-          const entry = entries[index % entries.length];
+          const slot = variantSerial;
+          variantSerial += 1;
+          const entry = entries[slot % entries.length];
           variants.push({
             proxy: exits[index],
             name: friendlyExitName(code, index, exits[index], healthById, null, speedByEndpoint),
-            tag: `${code}-${String(index + 1).padStart(2, "0")}e${index % entries.length + 1}`,
+            tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot % entries.length + 1}`,
             dialerProxy: entry.tag
           });
         } else {
