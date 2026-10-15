@@ -920,13 +920,18 @@ function xrayOutbound(proxy, tag, dialerProxy) {
       show: false,
       ...proxy.alpn?.length ? { alpn: proxy.alpn } : {}
     };
-  else if (stream.security === "tls")
+  else if (stream.security === "tls") {
+    // Xray takes a base64 ECHConfigList here, never the name+resolver form, and
+    // it does not validate the field (garbage passes -test), so emit it only
+    // when we really hold a config and leave it out otherwise.
+    const echXray = parseEch(proxy.ech);
     stream.tlsSettings = {
       ...proxy.servername || proxy.sni ? { serverName: proxy.servername || proxy.sni } : {},
       ...proxy["client-fingerprint"] ? { fingerprint: proxy["client-fingerprint"] } : {},
       ...proxy.alpn?.length ? { alpn: proxy.alpn } : {},
-      ...proxy.ech ? { echConfigList: proxy.ech } : {}
+      ...echXray?.config ? { echConfigList: echXray.config } : {}
     };
+  }
   if (stream.network === "ws")
     stream.wsSettings = {
       path: proxy["ws-opts"]?.path || proxy.path || "/",
