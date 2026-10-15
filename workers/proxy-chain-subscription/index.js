@@ -458,6 +458,17 @@ function yamlScalar(value) {
 __name(yamlScalar, "yamlScalar");
 __name2(yamlScalar, "yamlScalar");
 __name22(yamlScalar, "yamlScalar");
+// Normalises the share-link `ech` param. Accepts:
+//   base64 ECHConfigList                           -> { config }
+//   "cloudflare-ech.com"                           -> { queryServerName }
+//   "cloudflare-ech.com+udp://1.2.3.4:443" (Xray)  -> { queryServerName } (resolver dropped)
+function parseEch(raw) {
+  const value = String(raw ?? "").trim().replace(/ /g, "+"); // '+' may arrive as ' '
+  if (!value) return null;
+  if (/^[A-Za-z0-9+/]{40,}={0,2}$/.test(value)) return { config: value };
+  const name = value.split("+")[0].trim().toLowerCase();
+  return /^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(name) ? { queryServerName: name } : null;
+}
 function scalarFields(object) {
   return Object.entries(object).filter(([, v]) => v !== void 0 && v !== null && typeof v !== "object").map(([k, v]) => `    ${k}: ${typeof v === "string" ? yamlScalar(v) : v}`).join("\n");
 }
@@ -522,9 +533,14 @@ ${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
       path: ${yamlScalar(proxy["ws-opts"].path)}
       headers:
         Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
-      if (ech)
-        lines.push(`    tls-opts:
-      ech: ${yamlScalar(ech)}`);
+      const echOpts = proxy.tls ? parseEch(ech) : null;
+      if (echOpts) {
+        lines.push("    ech-opts:", "      enable: true");
+        if (echOpts.config)
+          lines.push(`      config: ${yamlScalar(echOpts.config)}`);
+        if (echOpts.queryServerName)
+          lines.push(`      query-server-name: ${yamlScalar(echOpts.queryServerName)}`);
+      }
     }
   }, "appendProxy");
   for (const entry of entries)
@@ -701,7 +717,8 @@ function xrayOutbound(proxy, tag, dialerProxy) {
     stream.tlsSettings = {
       ...proxy.servername || proxy.sni ? { serverName: proxy.servername || proxy.sni } : {},
       ...proxy["client-fingerprint"] ? { fingerprint: proxy["client-fingerprint"] } : {},
-      ...proxy.alpn?.length ? { alpn: proxy.alpn } : {}
+      ...proxy.alpn?.length ? { alpn: proxy.alpn } : {},
+      ...proxy.ech ? { echConfigList: proxy.ech } : {}
     };
   if (stream.network === "ws")
     stream.wsSettings = {
@@ -817,8 +834,15 @@ function singboxOutbound(proxy, tag, detour = void 0) {
         out.tls.utls = { enabled: true, fingerprint: proxy["client-fingerprint"] };
       if (proxy.reality)
         out.tls.reality = { enabled: true, public_key: proxy.reality["public-key"], short_id: proxy.reality["short-id"] };
-      if (proxy.ech)
-        out.tls.ech = proxy.ech;
+      const ech = parseEch(proxy.ech);
+      if (ech) {
+        out.tls.ech = { enabled: true };
+        if (ech.queryServerName) out.tls.ech.query_server_name = ech.queryServerName;
+        if (ech.config) {
+          const body = ech.config.match(/.{1,64}/g) || [];
+          out.tls.ech.config = ["-----BEGIN ECH CONFIGS-----", ...body, "-----END ECH CONFIGS-----"];
+        }
+      }
     }
     if (proxy.network === "ws")
       out.transport = { type: "ws", path: proxy["ws-opts"]?.path || "/", headers: { Host: proxy["ws-opts"]?.headers?.Host || proxy.server } };
@@ -1098,6 +1122,8 @@ export {
   index_default as default,
   endpointKeyOf,
   friendlyExitName,
+  mihomo,
+  parseEch,
   qualityScore,
   rankScore,
   resolveHealth,
