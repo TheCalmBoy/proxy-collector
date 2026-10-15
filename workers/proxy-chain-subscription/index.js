@@ -587,6 +587,92 @@ function scalarFields(object) {
 __name(scalarFields, "scalarFields");
 __name2(scalarFields, "scalarFields");
 __name22(scalarFields, "scalarFields");
+
+// Cloudflare publishes the ECH config for a decoy name as a DNS HTTPS (type 65)
+// record. Fetching it is what ?ech=embed does, so a client whose own DNS cannot
+// resolve the record never has to ask for it.
+var ECH_CONFIG_TTL_MS = 3e5;
+var echConfigCache = /* @__PURE__ */ new Map();
+function b64Bytes(bytes) {
+  let binary = "";
+  for (const byte of bytes)
+    binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+function b64urlBytes(bytes) {
+  return b64Bytes(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function dnsHTTPSQuery(name, type) {
+  const out = [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+  for (const label of name.split(".")) {
+    const bytes = new TextEncoder().encode(label);
+    out.push(bytes.length, ...bytes);
+  }
+  out.push(0, type >> 8, type & 255, 0, 1);
+  return new Uint8Array(out);
+}
+function skipDnsName(buf, offset) {
+  for (;;) {
+    const len = buf[offset];
+    if (len === 0)
+      return offset + 1;
+    if ((len & 192) === 192)
+      return offset + 2;
+    offset += len + 1;
+  }
+}
+// Pulls the ech (SvcParam key 5) value out of an HTTPS RR answer.
+function echFromDnsAnswer(buf) {
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const questions = view.getUint16(4);
+  const answers = view.getUint16(6);
+  let offset = 12;
+  for (let i = 0; i < questions; i += 1)
+    offset = skipDnsName(buf, offset) + 4;
+  for (let i = 0; i < answers; i += 1) {
+    offset = skipDnsName(buf, offset);
+    const type = view.getUint16(offset);
+    const length = view.getUint16(offset + 8);
+    offset += 10;
+    const end = offset + length;
+    if (type === 65) {
+      let cursor = skipDnsName(buf, offset + 2);
+      while (cursor + 4 <= end) {
+        const key = view.getUint16(cursor);
+        const size = view.getUint16(cursor + 2);
+        cursor += 4;
+        if (key === 5)
+          return b64Bytes(buf.subarray(cursor, cursor + size));
+        cursor += size;
+      }
+    }
+    offset = end;
+  }
+  return null;
+}
+async function fetchEchConfig(name) {
+  const cached = echConfigCache.get(name);
+  if (cached && Date.now() - cached.at < ECH_CONFIG_TTL_MS)
+    return cached.value;
+  try {
+    const response = await fetch(
+      "https://cloudflare-dns.com/dns-query?dns=" + b64urlBytes(dnsHTTPSQuery(name, 65)),
+      {
+        headers: { accept: "application/dns-message" },
+        signal: AbortSignal.timeout(4e3)
+      }
+    );
+    if (response.ok) {
+      const value = echFromDnsAnswer(new Uint8Array(await response.arrayBuffer()));
+      if (value) {
+        echConfigCache.set(name, { value, at: Date.now() });
+        return value;
+      }
+    }
+  } catch {
+  }
+  return cached ? cached.value : null;
+}
 var AMNEZIA_JMIN = 50;
 var AMNEZIA_JMAX = 100;
 var WARP_SERVER_KEY = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
@@ -1109,6 +1195,26 @@ var index_default = {
     } catch (e) {
       return fail(e.message);
     }
+
+    // ?ech=embed pins Cloudflare's published ECH key into the config, so the
+    // client needs no ECH lookup of its own. Off by default: mihomo 1.19.x has
+    // no ECH rejection fallback, so a key that rotates takes the config with it.
+    let echEmbedded = 0;
+    if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
+      for (const entry of entries) {
+        const parsedEch = parseEch(entry.proxy.ech);
+        if (!parsedEch?.queryServerName)
+          continue;
+        const config = await fetchEchConfig(parsedEch.queryServerName);
+        if (config) {
+          entry.proxy.ech = config;
+          echEmbedded += 1;
+        }
+      }
+    }
+    const echHeaders = url.searchParams.has("ech")
+      ? { "x-ech-mode": echEmbedded ? "embedded:" + echEmbedded : "query" }
+      : {};
     const format = guessFormat(request, url);
     if (format !== "mihomo" && format !== "sing-box" && format !== "xray" && format !== "links" && format !== "unknown")
       return fail("format_must_be_mihomo_sing_box_xray_or_links");
@@ -1230,7 +1336,7 @@ var index_default = {
     });
     if (!countries.length)
       return fail("no_recently_verified_proxies", 503, healthHeaders());
-    const joinHeaders = healthHeaders();
+    const joinHeaders = { ...healthHeaders(), ...echHeaders };
     if (format === "links" || !entries.length && (format === "xray" || format === "unknown")) {
       const links = countries.flatMap((group) => group.items.map((item, index) => withUriName(item.uri, group.baseNames[index])));
       if (entries.length)
