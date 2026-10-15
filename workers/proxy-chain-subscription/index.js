@@ -673,6 +673,14 @@ async function fetchEchConfig(name) {
   }
   return cached ? cached.value : null;
 }
+
+// ?secure=1 keeps only exits whose client-to-exit hop is wrapped in TLS, which
+// is what decides whether the ISP sees an ordinary TLS handshake. Plain
+// shadowsocks and bare vmess/vless are encrypted but not TLS, so they go.
+var TLS_ALWAYS_TYPES = /* @__PURE__ */ new Set(["trojan", "hysteria", "hysteria2", "tuic", "anytls"]);
+function isTlsHop(proxy) {
+  return TLS_ALWAYS_TYPES.has(proxy.type) || proxy.tls === true;
+}
 var AMNEZIA_JMIN = 50;
 var AMNEZIA_JMAX = 100;
 var WARP_SERVER_KEY = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
@@ -1244,6 +1252,14 @@ var index_default = {
     let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxy(uri, i + 1) })).filter((item) => item.proxy);
     if (!parsed.length)
       return fail("feed_has_no_supported_proxies", 404);
+    // ?secure=1 keeps only exits whose hop is TLS: something is better than a
+    // bare protocol when the ISP is the threat model.
+    if (url.searchParams.get("secure") === "1") {
+      parsed = parsed.filter((item) => isTlsHop(item.proxy));
+      if (!parsed.length)
+        return fail("no_tls_exits_in_feed", 503);
+    }
+
     let healthById = {};
     let healthIndexState = "missing";
     let healthJoin = null;
