@@ -1209,25 +1209,6 @@ var index_default = {
       return fail(e.message);
     }
 
-    // ?ech=embed pins Cloudflare's published ECH key into the config, so the
-    // client needs no ECH lookup of its own. Off by default: mihomo 1.19.x has
-    // no ECH rejection fallback, so a key that rotates takes the config with it.
-    let echEmbedded = 0;
-    if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
-      for (const entry of entries) {
-        const parsedEch = parseEch(entry.proxy.ech);
-        if (!parsedEch?.queryServerName)
-          continue;
-        const config = await fetchEchConfig(parsedEch.queryServerName);
-        if (config) {
-          entry.proxy.ech = config;
-          echEmbedded += 1;
-        }
-      }
-    }
-    const echHeaders = url.searchParams.has("ech")
-      ? { "x-ech-mode": echEmbedded ? "embedded:" + echEmbedded : "query" }
-      : {};
     const format = guessFormat(request, url);
     if (format !== "mihomo" && format !== "sing-box" && format !== "xray" && format !== "links" && format !== "unknown")
       return fail("format_must_be_mihomo_sing_box_xray_or_links");
@@ -1259,6 +1240,40 @@ var index_default = {
       if (!parsed.length)
         return fail("no_tls_exits_in_feed", 503);
     }
+
+    // ?ech=embed pins Cloudflare's published ECH key into the config, so the
+    // client needs no ECH lookup of its own. It has to cover the exits as well
+    // as the entrypoints: an exit can carry its own ech= and would otherwise
+    // still need a lookup, which is the very thing this option exists to avoid.
+    // Off by default, because mihomo 1.19.x has no ECH rejection fallback, so a
+    // key that rotates takes the config with it.
+    let echEmbedded = 0;
+    if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
+      const pending = new Map();
+      for (const proxy of [...entries.map((entry) => entry.proxy), ...parsed.map((item) => item.proxy)]) {
+        const parsedEch = parseEch(proxy.ech);
+        if (!parsedEch?.queryServerName)
+          continue;
+        if (!pending.has(parsedEch.queryServerName))
+          pending.set(parsedEch.queryServerName, []);
+        pending.get(parsedEch.queryServerName).push(proxy);
+      }
+      const resolved = new Map(await Promise.all(
+        [...pending.keys()].map(async (name) => [name, await fetchEchConfig(name)])
+      ));
+      for (const [name, proxies] of pending) {
+        const config = resolved.get(name);
+        if (!config)
+          continue;
+        for (const proxy of proxies) {
+          proxy.ech = config;
+          echEmbedded += 1;
+        }
+      }
+    }
+    const echHeaders = url.searchParams.has("ech")
+      ? { "x-ech-mode": echEmbedded ? "embedded:" + echEmbedded : "query" }
+      : {};
 
     let healthById = {};
     let healthIndexState = "missing";
