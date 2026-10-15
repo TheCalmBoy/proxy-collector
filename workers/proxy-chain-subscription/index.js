@@ -363,6 +363,9 @@ function parseProxy(uri, index) {
     const fp = u.searchParams.get("fp");
     if (fp)
       proxy["client-fingerprint"] = fp;
+    const ech = u.searchParams.get("ech");
+    if (ech)
+      proxy.ech = ech;
     const flow = u.searchParams.get("flow");
     if (flow)
       proxy.flow = flow;
@@ -505,21 +508,25 @@ function mihomo(entries, countries, healthById, speedByEndpoint = null) {
         ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
       );
     } else {
-      const object = { ...proxy, name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
-      lines.push(`  -
-${scalarFields(object)}`);
-      if (object.reality)
+      const { ech, ...scalarProxy } = { ...proxy, name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
+      lines.push(`  -\n${scalarFields(scalarProxy)}`);
+      if (proxy.reality)
         lines.push(`    reality-opts:
-      public-key: ${yamlScalar(object.reality["public-key"])}
-      short-id: ${yamlScalar(object.reality["short-id"])}`);
-      if (object.alpn?.length)
+      public-key: ${yamlScalar(proxy.reality["public-key"])}
+      short-id: ${yamlScalar(proxy.reality["short-id"])}`);
+      if (proxy.alpn?.length)
         lines.push(`    alpn:
-${object.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
-      if (object["ws-opts"])
+${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
+      if (proxy["ws-opts"])
         lines.push(`    ws-opts:
-      path: ${yamlScalar(object["ws-opts"].path)}
+      path: ${yamlScalar(proxy["ws-opts"].path)}
       headers:
-        Host: ${yamlScalar(object["ws-opts"].headers.Host)}`);
+        Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
+      if (ech)
+        lines.push(`    tls-opts:
+      ech:
+        enabled: true
+        config: ${yamlScalar(ech)}`);
     }
   }, "appendProxy");
   for (const entry of entries)
@@ -812,6 +819,8 @@ function singboxOutbound(proxy, tag, detour = void 0) {
         out.tls.utls = { enabled: true, fingerprint: proxy["client-fingerprint"] };
       if (proxy.reality)
         out.tls.reality = { enabled: true, public_key: proxy.reality["public-key"], short_id: proxy.reality["short-id"] };
+      if (proxy.ech)
+        out.tls.ech = { enabled: true, config: proxy.ech };
     }
     if (proxy.network === "ws")
       out.transport = { type: "ws", path: proxy["ws-opts"]?.path || "/", headers: { Host: proxy["ws-opts"]?.headers?.Host || proxy.server } };
