@@ -54,15 +54,9 @@
         "x-health-join: <joined>/<total>",
         "x-ech-mode: query | embedded:<n>"
       ],
-      "handlers": ["reply", "fail", "decodeEntries", "parseEntry", "parseEch", "guessFormat", "classify", "buildEndpointIndex", "buildSpeedIndex", "scoreForProxy", "resolveHealth", "rankEndpoints", "fitBody", "keepVariants", "cutToBytes", "writeOutputFiles", "endpointKeyOf", "friendlyExitName", "entryName", "safeName", "qualityScore", "rankScore"],
-      "limits": {
-        "MAX_ENTRY_BYTES": 9000,
-        "MAX_ENTRIES": 90,
-        "MAX_BODY_BYTES": 900000,
-        "STALE_HEALTH_MAX_AGE_MS": 86400000,
-        "HEALTH_HARD_MAX_AGE_MS": 604800000
-      },
-      "size_behavior": "Over MAX_BODY_BYTES the Worker binary-searches how many whole exits fit and drops the rest, so the YAML is never cut mid-node.",
+      "handlers": ["reply", "fail", "decodeEntries", "parseEntry", "parseEch", "guessFormat", "classify", "buildEndpointIndex", "buildSpeedIndex", "scoreForProxy", "resolveHealth", "rankEndpoints", "writeOutputFiles", "endpointKeyOf", "friendlyExitName", "entryName", "safeName", "qualityScore", "rankScore"],
+      "limits": {"COUNTRY_CAP": 60, "STALE_HEALTH_MAX_AGE_MS": 86400000, "HEALTH_HARD_MAX_AGE_MS": 604800000},
+      "size_behavior": "No size caps. Entry count, entry length, and response size are all unbounded; the full feed is rendered. COUNTRY_CAP (60 exits per country, except the ZZ-RAINBOW bucket which is uncapped) is the only output-size control.",
       "feed": "raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages/{all.txt | countries/<CC>.txt}, fetched with a 60s edge cache (cf.cacheTtl/cacheEverything)",
       "env": {"FEED_ORIGIN": "overrides the feed origin"},
       "tests": "test/*.mjs run with `node --test`; scripts/verify-chain.sh parses the rendered YAML, starts mihomo, fetches through the chain, and reports the egress country"
@@ -142,6 +136,7 @@
   "history": {
     "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (heartbeat/).",
     "2026-10-11": "patterniha/Free-Configs added as a second source.",
-    "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added."
+    "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added.",
+    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew."
   }
 }

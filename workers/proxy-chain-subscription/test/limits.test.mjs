@@ -1,55 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, {
-  MAX_BODY_BYTES,
-  byteLength,
-  cutToBytes,
-  reply,
-} from "/home/pedi/proxy-collector-ech/workers/proxy-chain-subscription/index.js";
+import worker, { reply } from "/home/pedi/proxy-collector-ech/workers/proxy-chain-subscription/index.js";
 
-// ---------- reply(): never exceed the byte budget, never cut mid-line ----------
+// The worker deliberately has NO size caps: no per-entry byte limit, no entry
+// count limit, and no response byte budget. This file pins that contract, so
+// re-adding a cap has to be a deliberate act rather than an accident.
+//
+// The fixture below is 110 countries x 60 exits. It used to exceed the old
+// 900 KB budget and get trimmed to a prefix; it must now arrive whole.
 
-test("reply trims an over-long single line to within the budget", async () => {
-  const res = reply("x".repeat(MAX_BODY_BYTES + 50_000));
-  assert.equal(res.headers.get("x-body-truncated"), "true");
-  assert.ok(byteLength(await res.text()) <= MAX_BODY_BYTES);
-});
-
-test("reply cuts on a line boundary, not mid-line", async () => {
-  const line = "y".repeat(99) + "\n";
-  const res = reply(line.repeat(Math.ceil((MAX_BODY_BYTES + 5000) / line.length)));
-  const body = await res.text();
-  assert.ok(byteLength(body) <= MAX_BODY_BYTES);
-  assert.ok(body.endsWith("\n"), "expected the cut to land on a newline");
-  assert.ok(body.split("\n").every((l) => l === "" || l.length === 99));
-});
-
-test("reply counts bytes, not characters, on multibyte text", async () => {
-  // 300_001 euro signs = 900_003 bytes: over the budget, on one line, with no
-  // newline available to cut on. Only a real byte count catches this.
-  const res = reply("\u20ac".repeat(300_001));
-  assert.equal(res.headers.get("x-body-truncated"), "true");
-  assert.ok(byteLength(await res.text()) <= MAX_BODY_BYTES);
-});
-
-test("reply leaves an in-budget body untouched", async () => {
-  const res = reply("small body\n");
-  assert.equal(res.headers.get("x-body-truncated"), null);
-  assert.equal(await res.text(), "small body\n");
-});
-
-test("cutToBytes never splits a surrogate pair", () => {
-  const text = "\u{1F600}".repeat(200_000); // 800k units, 800k bytes
-  const cut = cutToBytes(text, 400_000);
-  assert.ok(cut % 2 === 0, `cut landed inside a surrogate pair: ${cut}`);
-  assert.ok(byteLength(text.slice(0, cut)) <= 400_000);
-});
-
-// ---------- end to end: a feed that genuinely exceeds the cap ----------
+const byteLength = (text) => new TextEncoder().encode(text).length;
 
 const code = (i) => String.fromCharCode(65 + Math.floor(i / 26)) + String.fromCharCode(65 + (i % 26));
 const CODES = Array.from({ length: 110 }, (_, i) => code(i));
-const PER_COUNTRY = 60;
+const PER_COUNTRY = 60; // per-country capping is a separate knob, still in force
 const TOTAL_EXITS = CODES.length * PER_COUNTRY; // 6600
 
 const FEED = CODES.flatMap((c, ci) =>
@@ -65,14 +29,36 @@ function entry64(uri) {
   return encodeURIComponent(btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""));
 }
 
-test("an oversized feed is trimmed by whole exits and stays consistent", async () => {
+function serveFeed() {
   globalThis.fetch = async (input) => {
     const u = String(input);
     if (u.includes("egress-health.json") || u.includes("enriched-configs.json"))
       return new Response("", { status: 404 });
     return new Response(FEED, { status: 200 });
   };
+}
 
+// ---------- reply() no longer trims ----------
+
+test("reply returns a body of any size untouched", async () => {
+  const body = "x".repeat(2_000_000);
+  const res = reply(body);
+  assert.equal(res.headers.get("x-body-truncated"), null);
+  assert.equal(res.status, 200);
+  assert.equal(byteLength(await res.text()), 2_000_000);
+});
+
+test("reply keeps multibyte text whole", async () => {
+  const body = "\u20ac".repeat(300_001); // 900_003 bytes
+  const res = reply(body);
+  assert.equal(res.headers.get("x-body-truncated"), null);
+  assert.equal(await res.text(), body);
+});
+
+// ---------- an oversized feed arrives whole ----------
+
+test("a feed past the old 900 KB budget renders every exit, not a prefix", async () => {
+  serveFeed();
   const started = Date.now();
   const res = await worker.fetch(
     new Request(`https://w.example/sub?format=mihomo&entry64=${entry64(ENTRY_URI)}`), {});
@@ -80,24 +66,58 @@ test("an oversized feed is trimmed by whole exits and stays consistent", async (
   const body = await res.text();
 
   assert.equal(res.status, 200);
-  // The whole point: the body is inside the budget...
-  assert.ok(byteLength(body) <= MAX_BODY_BYTES, `body was ${byteLength(body)} bytes`);
-  // ...because whole exits were dropped, not because the text was sliced.
-  assert.equal(res.headers.get("x-body-truncated"), null, "should not need a byte slice");
-  const dropped = Number(res.headers.get("x-exits-dropped"));
-  assert.ok(dropped > 0, "expected exits to be dropped");
+  // Nothing reports a trim, because nothing is trimmed any more.
+  assert.equal(res.headers.get("x-body-truncated"), null);
+  assert.equal(res.headers.get("x-exits-dropped"), null);
 
-  const kept = [...body.matchAll(/^    dialer-proxy: (".*")$/gm)].length;
-  assert.equal(kept + dropped, TOTAL_EXITS, "every exit is either kept or counted as dropped");
+  // Every exit is present: one dialer-proxy line per chained exit.
+  const chained = [...body.matchAll(/^    dialer-proxy: (".*")$/gm)].length;
+  assert.equal(chained, TOTAL_EXITS, `expected ${TOTAL_EXITS} exits, saw ${chained}`);
 
-  // No group may reference a proxy that was trimmed away.
+  // And the body really is past the budget that used to bind here.
+  assert.ok(byteLength(body) > 900_000, `body was only ${byteLength(body)} bytes`);
+
+  // Every exit stays reachable: no group may reference a proxy that is gone.
   const proxyNames = [...body.matchAll(/^    name: (".*")$/gm)].map((m) => m[1]);
   const groupNames = [...body.matchAll(/^  - name: (".*")$/gm)].map((m) => m[1]);
   const defined = new Set([...proxyNames, ...groupNames]);
   for (const [, ref] of body.matchAll(/^      - (".*")$/gm))
     assert.ok(defined.has(ref), `group references a missing proxy: ${ref}`);
 
-  // Binary search, not a per-exit re-render loop: this must stay fast.
-  assert.ok(elapsed < 20_000, `took ${elapsed}ms - the fit loop may be quadratic`);
-  console.log(`      (kept ${kept}/${TOTAL_EXITS} exits, dropped ${dropped}, ${byteLength(body)} bytes, ${elapsed}ms)`);
+  console.log(`      (${chained} exits, ${byteLength(body)} bytes, ${elapsed}ms)`);
+});
+
+// ---------- no entry count cap ----------
+
+test("more entrypoints than the old 90 cap are all kept", async () => {
+  serveFeed();
+  const params = Array.from({ length: 200 }, (_, i) =>
+    `entry64=${entry64(`socks://10.0.${Math.floor(i / 256)}.${i % 256}:1080#e${i}`)}`).join("&");
+  const res = await worker.fetch(new Request(`https://w.example/sub?format=mihomo&${params}`), {});
+  const body = await res.text();
+
+  assert.equal(res.status, 200);
+  assert.ok(body.includes("ET200"), "entry 200 should have been kept");
+  assert.equal(body.includes("ET201"), false, "the request only carried 200 entries");
+});
+
+// ---------- no per-entry byte cap ----------
+
+test("an entry longer than the old 9000-byte cap is accepted", async () => {
+  serveFeed();
+  const long = `vless://11111111-2222-3333-4444-555555555555@9.9.9.9:443?type=ws&path=/${"a".repeat(15_000)}#long`;
+  assert.ok(byteLength(long) > 9000, "the fixture must exceed the removed cap");
+
+  const res = await worker.fetch(new Request(`https://w.example/sub?format=mihomo&entry64=${entry64(long)}`), {});
+  assert.equal(res.status, 200);
+  assert.ok((await res.text()).includes("ET1"), "the long entry should be rendered");
+});
+
+// ---------- what is still rejected ----------
+
+test("an empty entry64 is still an error", async () => {
+  serveFeed();
+  const res = await worker.fetch(new Request("https://w.example/sub?format=mihomo&entry64="), {});
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, "invalid_entry64");
 });
