@@ -318,6 +318,17 @@ def prewarm_dns(hosts: list[str], workers: int = DNS_WARMUP_WORKERS) -> int:
 
 
 def _resolve_host_uncached(host: str) -> str | None:
+    # Upstream feeds put garbage in the server field: a label longer than 63
+    # characters, or non-ASCII bytes. getaddrinfo raises UnicodeError on those,
+    # and it is called through a thread pool whose exception aborts the whole
+    # run -- one malformed line in an otherwise good feed killed a 20k-candidate
+    # measurement outright. Reject the shape first, then trust no exception
+    # taxonomy for the rest.
+    if not host or len(host) > 253 or not host.isascii():
+        return None
+    if any(len(label) > 63 for label in host.split(".")):
+        return None
+
     try:
         ipaddress.ip_address(host)
         return host if is_public_ip(host) else None
@@ -326,7 +337,9 @@ def _resolve_host_uncached(host: str) -> str | None:
 
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except socket.gaierror:
+    except (OSError, UnicodeError, ValueError):
+        # gaierror/herror/timeout are OSError; UnicodeError covers the idna
+        # failures above; ValueError keeps the ip_address branch honest.
         return None
 
     candidates: list[str] = []
