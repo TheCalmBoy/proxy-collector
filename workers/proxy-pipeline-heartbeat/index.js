@@ -1,73 +1,67 @@
-var __defProp = Object.defineProperty;
-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+// The pipeline's only clock.
+//
+// Cloudflare fires this Worker every 30 minutes (see wrangler.json crons) and
+// it POSTs one repository_dispatch(update-now). update.yml then fetches,
+// verifies and publishes the pool, and chains probe-egress.yml so the probe
+// measures the pool that was just published. Nothing else starts a run: there
+// is no GitHub `schedule:` cron anywhere in this repo.
+//
+// Why 30 minutes and not 15: the chain is update (~6.5 min median, 12.5 max)
+// plus probe (~5.2 min). At a 15-minute beat the next tick landed mid-chain,
+// the update queued on its concurrency group instead of running, and its
+// chained probe landed ~6 min after the previous one with no new pool in
+// between. A 30-minute beat leaves the chain ~11 minutes of margin.
+//
+// There is deliberately no alternation and no KV counter. The earlier design
+// dispatched a standalone probe on "odd" beats, but nothing subscribed to that
+// event type (probe-egress.yml is workflow_dispatch only), and the KV
+// namespace the counter needed was never declared in this config, so every
+// beat took the "even" branch: update-now, every time.
+//
+// Secret: GITHUB_TOKEN -- a classic PAT with the `workflow` scope.
+const REPO = "TheCalmBoy/proxy-collector";
 
-// index.js
-var REPO = "TheCalmBoy/proxy-collector";
-// Heartbeat: fires every 15 min via CF cron.
-// Odd runs (1st, 3rd, ...): dispatch probe-egress workflow directly.
-// Even runs (2nd, 4th, ...): dispatch update-now workflow, which chains
-//   to probe-egress after db update completes (via gh workflow run in update.yml).
-// This achieves probe every 15m minimum, db update every 30m.
 async function beat(env) {
-  var runCounter = 0;
-  if (env.KV) {
-    var stored = await env.KV.get(env.RUN_COUNTER_KEY || "run-counter");
-    if (stored !== null) runCounter = parseInt(stored, 10) || 0;
-  }
-  var isEven = runCounter % 2 === 0;
-  var eventType = isEven ? "update-now" : "probe-egress";
-  var phase = isEven ? "database-update + chained probe" : "probe-only";
-  var res = await fetch(`https://api.github.com/repos/${REPO}/dispatches`, {
+  const eventType = env.UPDATE_EVENT || "update-now";
+  const res = await fetch(`https://api.github.com/repos/${REPO}/dispatches`, {
     method: "POST",
     headers: {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${env.GITHUB_TOKEN}`,
       "content-type": "application/json",
-      "user-agent": "proxy-pipeline-heartbeat (Cloudflare Worker)"
+      // GitHub's API rejects any request without a User-Agent (403: "Request
+      // forbidden by administrative rules"). Cloudflare's fetch sends none.
+      "user-agent": "proxy-pipeline-heartbeat (Cloudflare Worker)",
     },
-    body: JSON.stringify({
-      event_type: eventType,
-      client_payload: {
-        run_index: String(runCounter),
-        phase: phase,
-        dispatch_source: "heartbeat"
-      }
-    })
+    body: JSON.stringify({ event_type: eventType }),
   });
-  var nextCounter = runCounter + 1;
-  if (env.KV) {
-    await env.KV.put(env.RUN_COUNTER_KEY || "run-counter", String(nextCounter));
-  }
-  if (res.status !== 204) {
-    const text = await res.text();
-    console.error(`heartbeat dispatch failed (run ${runCounter}, ${phase}): ${res.status} ${text.slice(0, 200)}`);
+  if (res.status === 204) {
+    console.log(`dispatched ${eventType}`);
   } else {
-    console.log(`Heartbeat run ${runCounter}: dispatched ${eventType} (${phase})`);
+    const detail = (await res.text()).split("\n")[0].slice(0, 200);
+    console.error(`dispatch failed: HTTP ${res.status} ${detail}`);
   }
-  return { status: res.status, runCounter: runCounter, phase: phase };
+  return res.status;
 }
-__name(beat, "beat");
-var heartbeat_default = {
-  async scheduled(event, env) {
+
+export default {
+  async scheduled(_event, env, _ctx) {
     await beat(env);
   },
+
+  // Kept so a beat can be fired by hand when testing (POST the worker URL),
+  // and so an accidental GET explains itself instead of erroring.
   async fetch(request, env) {
-    if (request.method === "POST") {
-      var result = await beat(env);
+    if (request.method !== "POST") {
       return new Response(
-        result.status === 204
-          ? `beat sent (run ${result.runCounter}: ${result.phase})`
-          : `dispatch failed: HTTP ${result.status}`,
-        { status: result.status === 204 ? 202 : 502 }
+        "proxy-pipeline-heartbeat: POST here to fire one beat (update-now).\n",
+        { status: 200 },
       );
     }
+    const status = await beat(env);
     return new Response(
-      "proxy-pipeline-heartbeat: POST to fire a beat. Every 15m: odd=probe, even=db update + chained probe.",
-      { status: 200 }
+      status === 204 ? "beat sent\n" : `dispatch failed: HTTP ${status}\n`,
+      { status: status === 204 ? 202 : 502 },
     );
-  }
+  },
 };
-export {
-  heartbeat_default as default
-};
-//# sourceMappingURL=index.js.map

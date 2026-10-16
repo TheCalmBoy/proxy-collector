@@ -199,20 +199,20 @@ class DispatchInputDefaultsMatchCodeTests(unittest.TestCase):
 class ScheduleOrderingTests(unittest.TestCase):
     """The pipeline has exactly ONE clock: the external Cloudflare heartbeat.
 
-    History, why this shape: two crons (update :05/:35 + watchdog */10) plus
-    the 5-min CF heartbeat produced double-runs and stacked queued probes, and
-    the 2026-10-01 freeze proved GitHub's free-tier schedule: skips ticks. So
-    every GitHub ``schedule:`` cron is gone. The only activator is now:
+    History, why this shape: two crons (update :05/:35 + watchdog */10) plus an
+    external heartbeat produced double-runs and stacked queued probes, and the
+    2026-10-01 freeze proved GitHub's free-tier schedule: skips ticks. Every
+    GitHub ``schedule:`` cron is gone, and the 2026-10-16 cleanup removed the
+    second dispatch path with it. The only activator is now:
 
-        heartbeat/wrangler.jsonc crons */5
-          -> repository_dispatch(heartbeat) on freshness-watchdog.yml
-          -> watchdog dispatches update.yml when the pool is >20 min old
+        workers/proxy-pipeline-heartbeat/wrangler.json crons */30
+          -> repository_dispatch(update-now) straight into update.yml
           -> update.yml's chain step dispatches probe-egress.yml on publish.
 
     What this class pins down:
-      * no GitHub schedule: cron remains in any of the three heavy workflows
-        (a re-added cron IS the bug this class was born to catch);
-      * the Cloudflare beat config still exists and ticks every 5 minutes;
+      * no GitHub schedule: cron remains in any heavy workflow (a re-added cron
+        IS the bug this class was born to catch);
+      * the Cloudflare beat config still exists and ticks every 30 minutes;
       * the probe has no schedule: AND no repository_dispatch of its own --
         it is reached only by the chain, so it cannot fire un-ordered.
     """
@@ -220,8 +220,7 @@ class ScheduleOrderingTests(unittest.TestCase):
     WORKFLOWS = REPO / ".github/workflows"
     PRODUCER = WORKFLOWS / "update.yml"
     CONSUMER = WORKFLOWS / "probe-egress.yml"
-    WATCHDOG = WORKFLOWS / "freshness-watchdog.yml"
-    HEARTBEAT = REPO / "heartbeat" / "wrangler.jsonc"
+    HEARTBEAT = REPO / "workers" / "proxy-pipeline-heartbeat" / "wrangler.json"
 
     def schedule_crons(self, path: Path) -> list[int]:
         """The minute-of-hour for every schedule entry, in file order.
@@ -266,7 +265,7 @@ class ScheduleOrderingTests(unittest.TestCase):
         double-runs, queue stacks, skipped ticks), so the absence is the
         contract, not an oversight.
         """
-        for path in (self.PRODUCER, self.CONSUMER, self.WATCHDOG):
+        for path in (self.PRODUCER, self.CONSUMER):
             self.assertTrue(path.is_file(), f"missing {path}")
             self.assertEqual(
                 self.schedule_crons(path), [],
@@ -275,28 +274,41 @@ class ScheduleOrderingTests(unittest.TestCase):
             )
 
     def test_cloudflare_heartbeat_is_the_sole_clock(self):
-        """The one clock that remains is the Cloudflare Worker's 15-min cron.
+        """The one clock that remains is the Cloudflare Worker's 30-min cron.
 
-        If this file or its */15 schedule disappears, nothing in the repo can
+        If this file or its */30 schedule disappears, nothing in the repo can
         start an update or a probe on its own - the pipeline silently stops.
+
+        The period is pinned deliberately: a 15-min beat made the next tick land
+        mid-chain (update + its chained probe is ~11.7 min median, 18.4 worst
+        case), so runs queued on their concurrency group and probes fired twice
+        per published pool. 30 min is the value that keeps the chain inside its
+        own beat.
         """
         self.assertTrue(
             self.HEARTBEAT.is_file(),
-            "heartbeat/wrangler.jsonc is missing; nothing left to wake the pipeline",
+            "workers/proxy-pipeline-heartbeat/wrangler.json is missing; "
+            "nothing left to wake the pipeline",
         )
         text = self.HEARTBEAT.read_text(encoding="utf-8")
         self.assertRegex(
-            text, r'"\*/15 \* \* \* \*"',
-            "the Cloudflare heartbeat must stay on a */15 cron; a slower beat "
-            "leaves the pool/measurement stale for longer than the thresholds",
+            text, r'"\*/30 \* \* \* \*"',
+            "the Cloudflare heartbeat must stay on a */30 cron; a faster beat "
+            "lands mid-chain, and a slower one leaves the published pool stale",
         )
-        # The watchdog is woken by repository_dispatch, not by its own cron.
-        wd = self.WATCHDOG.read_text(encoding="utf-8")
-        self.assertIn("repository_dispatch", wd,
-                      "freshness-watchdog.yml must keep its repository_dispatch "
-                      "trigger: that is where the heartbeat lands")
-        self.assertIn("heartbeat", wd,
-                      "the watchdog must accept the 'heartbeat' dispatch event")
+        # The beat must reach update.yml directly: no intermediate decider, and
+        # no standalone probe. A second dispatch path is what made the timings
+        # unreadable (two probes per pool, probes with no new pool between).
+        producer = self.PRODUCER.read_text(encoding="utf-8")
+        self.assertIn("types: [update-now, update-proxy-database]", producer,
+                      "update.yml must keep the repository_dispatch types the "
+                      "heartbeat posts (update-now)")
+        self.assertFalse(
+            (self.WORKFLOWS / "freshness-watchdog.yml").exists(),
+            "the freshness watchdog is gone by design: the beat goes straight "
+            "to update.yml, which chains its own probe. Re-adding a second "
+            "dispatch path is the bug this replaced.",
+        )
 
     def test_probe_has_no_own_activator(self):
         """The probe must not fire on its own - only the chain reaches it.
@@ -359,9 +371,9 @@ class ScheduleOrderingTests(unittest.TestCase):
           1. the probe does a rolling union (PREVIOUS_HEALTH) - the pool fetched
              from gh-pages IS the last-published, still-served feed, so probing
              it is the correct action even when updates were skipped;
-          2. freshness-watchdog.yml re-collects a frozen pool on its own path,
-             so a genuinely stuck pipeline is recovered by dispatch, not by this
-             guard tripping.
+          2. the 30-min Cloudflare beat re-collects a frozen pool on its own,
+             so a genuinely stuck pipeline is recovered by the next beat, not by
+             this guard tripping.
 
         So the probe must still *report* pool age (an unparseable pool is fatal
         - the heredoc crashes on it regardless), but it must no longer sys.exit
@@ -375,7 +387,7 @@ class ScheduleOrderingTests(unittest.TestCase):
         self.assertNotIn(
             "REFUSING TO PROBE", text,
             "probe-egress.yml must not hard-refuse a stale pool; the rolling "
-            "union plus the watchdog make refusing a foot-gun (2026-10-01)",
+            "union plus the next beat make refusing a foot-gun (2026-10-01)",
         )
         self.assertNotIn(
             "sys.exit", text,
@@ -400,28 +412,6 @@ class ScheduleOrderingTests(unittest.TestCase):
             text, r"PREVIOUS_HEALTH:\s*verify-output/previous-egress-health.json",
             "the probe step must point PREVIOUS_HEALTH at the fetched index",
         )
-
-    def test_watchdog_exists_and_dispatches_the_heavy_workflows(self):
-        """The non-cron trigger path: a cheap watchdog wakes the heavy jobs.
-
-        This is the actual skip-combat. A missed Cloudflare beat is recovered
-        on the next 5-min tick instead of the pipeline freezing. The watchdog
-        has no schedule: of its own anymore (test_no_github_schedule_remains) -
-        it is woken by the heartbeat's repository_dispatch.
-        """
-        watchdog = self.WORKFLOWS / "freshness-watchdog.yml"
-        self.assertTrue(watchdog.is_file(), "freshness-watchdog.yml is missing")
-        text = watchdog.read_text(encoding="utf-8")
-        # No own cron: only the heartbeat (repository_dispatch) may wake it.
-        self.assertEqual(self.schedule_crons(watchdog), [],
-                         "the watchdog must not carry its own schedule: cron; "
-                         "the Cloudflare heartbeat is the sole activator")
-        # And it dispatches both heavy workflows by name.
-        self.assertIn("gh workflow run update.yml", text)
-        self.assertIn("gh workflow run probe-egress.yml", text)
-        self.assertIn("actions: write", text,
-                      "the watchdog needs the 'actions' permission to dispatch")
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,34 +17,31 @@ It runs in two places:
 | `.github/workflows/` | the jobs — see [Scheduling](#scheduling) |
 | `workers/proxy-chain-subscription/` | the subscription endpoint clients point at |
 | `workers/proxy-egress-ip-check/` | measures an exit's public IP and download speed |
-| `heartbeat/` | the Worker that wakes the pipeline every 15 min |
+| `workers/proxy-pipeline-heartbeat/` | the Worker that wakes the pipeline every 30 min |
 | `CODE_MAP.json` | machine-readable map of the above |
 
-The Workers are committed as the bundles Cloudflare actually runs — `heartbeat/` is the
-one exception, holding readable source next to its bundle under `workers/`.
+Every Worker lives under `workers/`, holding what Cloudflare actually runs.
+`proxy-chain-subscription` and `proxy-egress-ip-check` are committed as the esbuild output
+Cloudflare executes; `proxy-pipeline-heartbeat` is a small hand-written module, so its
+committed file is both source and bundle.
 
 ## Scheduling
 
 GitHub's free-tier `schedule:` crons stopped firing for this repo on 2026-10-01 and froze
-the pipeline — the watchdog meant to recover it lived on the same scheduler, so it froze
-with it. Nothing here relies on `schedule:` any more.
+the pipeline. Nothing here relies on `schedule:` any more.
 
-Every 15 minutes a Cloudflare cron on `heartbeat/` POSTs a `repository_dispatch`
-(`heartbeat`). It runs on a different platform, so GitHub's best-effort scheduler cannot
-skip it. `freshness-watchdog.yml` receives that event, downloads the two published
-documents, and decides:
+Every 30 minutes a Cloudflare cron on `workers/proxy-pipeline-heartbeat/` POSTs a
+`repository_dispatch` (`update-now`). It runs on a different platform, so GitHub's
+best-effort scheduler cannot skip it. `update.yml` receives that event directly: fetch →
+verify → publish to `gh-pages`, then chain `probe-egress.yml` with `gh workflow run`, so
+the probe measures the pool that was just published. One beat, one pool, measured once.
 
-| Condition | Action |
-|---|---|
-| pool older than 30 min | dispatch `update.yml` — re-collect, which chains its own probe |
-| health older than 10 min | dispatch `probe-egress.yml` — measure the current pool |
-| both stale | update wins; its chained probe covers the health side |
-| both fresh, or a heavy run already queued/running | no-op |
+The beat is 30 minutes rather than 15 because a full chain is update (~6.5 min median,
+12.5 max) plus probe (~5.2 min). At a 15-minute beat the next tick landed mid-chain, the
+update queued on its concurrency group instead of running, and its chained probe landed
+~6 min after the previous probe with no new pool in between.
 
-`probe-egress.yml` is chained rather than scheduled: `update.yml` fires it with
-`gh workflow run` the moment a build publishes, so the probe measures the pool that was
-just published instead of the previous slot's. Every workflow is also runnable by hand
-via `workflow_dispatch`.
+Every workflow is also runnable by hand via `workflow_dispatch`.
 
 ## Published data (`gh-pages`)
 

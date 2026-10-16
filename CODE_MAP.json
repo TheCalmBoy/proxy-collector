@@ -3,20 +3,18 @@
   "repo_url": "https://github.com/TheCalmBoy/proxy-collector",
   "description": "Proxy subscription collection, verification, and formatting pipeline with Cloudflare Workers deployment",
   "architecture": {
-    "overview": "Cloudflare Worker heartbeat (15 min) wakes the pipeline. The freshness watchdog decides whether to re-collect or re-probe. main.py collects and verifies; probe-egress measures the published pool. A Cloudflare Worker serves subscriptions from the published feed.",
+    "overview": "One Cloudflare Worker heartbeat (30 min) wakes the pipeline directly. main.py collects, verifies and publishes; update.yml then chains probe-egress to measure the pool that was just published. A Cloudflare Worker serves subscriptions from the published feed.",
     "scheduling": {
-      "heartbeat_interval": "15 minutes (Cloudflare cron */15 - a different platform from GitHub's best-effort scheduler)",
-      "wake_path": "heartbeat Worker POSTs repository_dispatch(heartbeat) -> freshness-watchdog.yml evaluates and dispatches",
+      "heartbeat_interval": "30 minutes (Cloudflare cron */30 in workers/proxy-pipeline-heartbeat - a different platform from GitHub's best-effort scheduler)",
+      "wake_path": "the heartbeat Worker POSTs repository_dispatch(update-now) straight into update.yml; no intermediate decider runs",
       "decisions": [
-        "pool older than 30 min -> gh workflow run update.yml (re-collect; it chains its own probe)",
-        "health older than 10 min -> gh workflow run probe-egress.yml",
-        "both stale -> update wins (its chained probe covers the health side)",
-        "both fresh, or a heavy run is already queued/running -> no-op"
+        "none - the beat always means update.yml, which chains its own probe on publish"
       ],
       "chaining": "update.yml fires probe-egress.yml with `gh workflow run` as soon as a build publishes, so the probe measures the pool that was just published",
       "github_schedule_crons": "NONE. Free-tier schedule: crons stopped firing 2026-10-01 and froze the pipeline; the clock now lives on Cloudflare.",
-      "db_update_interval": "~30 min (the watchdog re-collects once the pool document passes 30 min of age)",
-      "probe_interval": "~10-15 min (health >10 min old, plus chained after every update)"
+      "why_30_not_15": "the chain is update (~6.5 min median, 12.5 max) plus probe (~5.2 min); at a 15-min beat the next tick landed mid-chain, queued on the concurrency group, and its chained probe landed ~6 min after the previous probe with no new pool in between",
+      "db_update_interval": "30 min (one beat = one collect)",
+      "probe_interval": "30 min (chained after every update; never standalone)"
     },
     "data_flow": [
       "1. Upstream sources (0xRadikal + hamedcode + iampedii/whitedns-sub) -> main.py",
@@ -25,8 +23,7 @@
       "4. Country verification via DB-IP Lite MMDB + ip-api (roaming egress pool)",
       "5. Output: all.txt + countries/<CC>.txt (+ base64, manifest.json, source_map.json, ATTRIBUTION.txt) to gh-pages",
       "6. proxy-egress-ip-check Worker measures egress IPs for the probe workflow; probe-egress publishes egress-health.json",
-      "7. proxy-chain-subscription Worker serves chained subscriptions from the published feed",
-      "8. freshness-watchdog.yml keeps the chain from stalling"
+      "7. proxy-chain-subscription Worker serves chained subscriptions from the published feed"
     ]
   },
   "upstream_sources": {
@@ -69,33 +66,25 @@
       "key_functions": ["json", "isIpAddress", "addressFamily", "downloadResponse"]
     },
     "proxy-pipeline-heartbeat": {
-      "source": "heartbeat/index.js (64 lines) - the readable source, with its wrangler.jsonc",
-      "committed_bundle": "workers/proxy-pipeline-heartbeat/index.js (73 lines) - a superseded copy of the same Worker's build output",
-      "purpose": "15-min Cloudflare cron. POSTs repository_dispatch(heartbeat) to GitHub. Stateless per dispatch: one POST, no decisions, no KV counter - freshness-watchdog.yml decides what to run.",
-      "cron": "*/15 * * * *",
+      "source": "workers/proxy-pipeline-heartbeat/index.js (hand-written ESM; no bundler step)",
+      "purpose": "The pipeline's only clock. A 30-min Cloudflare cron POSTs repository_dispatch(update-now) to GitHub; update.yml collects, publishes, and chains probe-egress. Stateless: one POST per beat, no decisions, no counter.",
+      "cron": "*/30 * * * *",
       "env_vars_required": ["GITHUB_TOKEN"],
-      "dispatch_events": {"heartbeat": "freshness-watchdog.yml (thresholds decide update vs probe)"}
+      "dispatch_events": {"update-now": "update.yml (which chains probe-egress.yml on publish)"}
     }
   },
   "workflows": {
     "update.yml": {
       "name": "Update Proxy Database",
       "trigger": "repository_dispatch (update-now, update-proxy-database) + workflow_dispatch",
-      "cron": "None (never scheduled; woken by the watchdog)",
+      "cron": "None (never scheduled; woken by the 30-min Cloudflare beat)",
       "key_steps": ["checkout", "setup-python", "run tests", "install sing-box", "raise fd limit", "run main.py verify", "publish to gh-pages", "assert ip-api success", "chain probe-egress"]
     },
     "probe-egress.yml": {
       "name": "Probe proxy egress IPs",
-      "trigger": "workflow_dispatch + chained from update.yml + dispatched by freshness-watchdog.yml",
+      "trigger": "workflow_dispatch + chained from update.yml (never standalone)",
       "cron": "None (chained, so it always measures the just-published pool)",
       "inputs": {"probe_concurrency": "concurrent 5 MB speed tests through sing-box, default 50"}
-    },
-    "freshness-watchdog.yml": {
-      "name": "Freshness Watchdog",
-      "trigger": "repository_dispatch (heartbeat) + workflow_dispatch",
-      "permissions": "actions: write (it dispatches the heavy workflows)",
-      "thresholds": {"pool": ">30 min -> update", "health": ">10 min -> probe"},
-      "guard": "freshness_watch.py --check-active skips a dispatch when a heavy run is queued/running or already finished recently"
     },
     "test.yml": {
       "name": "Test",
@@ -112,17 +101,16 @@
       "verify.py": "76424 bytes - TCP/HTTP/Speed gates and proxy scoring",
       "probe_egress.py": "61781 bytes - Egress IP probing",
       "country_consistency.py": "Country verification",
-      "freshness_watch.py": "Freshness gate checks",
       "ipapi_proxy_pool.py": "ip-api egress proxy pool sidecar",
       "s3diag.py": "Stage 3 failure classification"
     }
   },
   "tests": {
     "runner": "python3 run_tests.py [name-fragment]",
-    "count": 24,
+    "count": 23,
     "files": [
       "tests/test_classify.py", "tests/test_country_consistency.py", "tests/test_dns_cache.py",
-      "tests/test_dns_prewarm.py", "tests/test_freshness_watch.py", "tests/test_gemini_verdict.py",
+      "tests/test_dns_prewarm.py", "tests/test_gemini_verdict.py",
       "tests/test_health_speed_verdict.py", "tests/test_https_gate_stability.py",
       "tests/test_per_source_survival.py", "tests/test_probe_egress.py", "tests/test_probe_egress_retry.py",
       "tests/test_probe_health_union.py", "tests/test_probe_inbound_ports.py", "tests/test_publish_step.py",
@@ -134,9 +122,9 @@
     "worker": "workers/proxy-chain-subscription/test/*.mjs (chain integrity, health headers, byte limits, ECH shapes, secure filter, embed coverage)"
   },
   "history": {
-    "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (heartbeat/).",
+    "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (now workers/proxy-pipeline-heartbeat/).",
     "2026-10-11": "patterniha/Free-Configs added as a second source.",
     "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added.",
-    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran)."
+    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran). Later the same day the heartbeat was consolidated: two source copies of one deployed Worker existed (heartbeat/ and workers/proxy-pipeline-heartbeat/, same name), the beat moved from */15 to */30 so the chain fits inside its own beat, the orphaned standalone-probe dispatch was dropped, and freshness-watchdog.yml plus tools/freshness_watch.py were deleted."
   }
 }

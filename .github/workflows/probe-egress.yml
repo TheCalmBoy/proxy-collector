@@ -13,14 +13,13 @@ on:
   #
   # Why not a `workflow_run` trigger: the egress worker 401s without its
   # Bearer token, and workflow_run jobs cannot read the triggering workflow's
-  # secrets. `gh workflow run` (update.yml has actions:write) is the same
-  # proven mechanism freshness-watchdog.yml already uses, and this workflow's
-  # concurrency group (cancel-in-progress: false) serializes any overlap with
-  # a watchdog dispatch.
+  # secrets. `gh workflow run` (update.yml has actions:write) is the proven
+  # mechanism, and this workflow's concurrency group (cancel-in-progress:
+  # false) serializes any overlap with a manual dispatch.
   #
-  # This workflow still runs unattended: update.yml's every-30-min cron is the
-  # schedule, and freshness-watchdog.yml dispatches it (or update.yml) when
-  # the chain is broken.
+  # The cadence is whatever the clock beats: the Cloudflare Worker's 30-min
+  # cron (workers/proxy-pipeline-heartbeat) wakes update.yml, which chains this
+  # workflow. So the probe runs exactly once per published pool.
   workflow_dispatch:
     inputs:
       probe_concurrency:
@@ -139,9 +138,9 @@ jobs:
         #      probing it is the correct action even when a couple of hourly
         #      updates were skipped - it measures the real current feed and
         #      carries forward the rest.
-        #   2. freshness-watchdog.yml now dispatches update.yml itself when the
-        #      pool is frozen >3h, so a genuinely stuck pipeline gets re-collected
-        #      by a separate path instead of by this guard tripping.
+        #   2. the Cloudflare beat re-collects every 30 min regardless, so a
+        #      genuinely stuck pipeline is recovered by the next beat instead of
+        #      by this guard tripping.
         #
         # So we report the age and let the probe run. The only thing that is
         # truly fatal is a pool we cannot parse at all, which the heredoc would
@@ -163,10 +162,9 @@ jobs:
           print(f"pool generated_at={generated_at} age={age_min:.1f} min")
           if age_min > 120:
               print(
-                  f"NOTE: pool is {age_min:.0f} min old (>120). At least one hourly "
+                  f"NOTE: pool is {age_min:.0f} min old (>120). At least one "
                   f"update was skipped. Probing anyway - the rolling union carries "
-                  f"forward prior rows, and freshness-watchdog.yml will re-collect "
-                  f"if the pool stays frozen."
+                  f"forward prior rows, and the next beat re-collects."
               )
           PY
 
