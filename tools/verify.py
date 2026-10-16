@@ -204,6 +204,96 @@ SS_METHOD_KEY_BYTES = {
     "2022-blake3-aes-256-gcm": 32,
     "2022-blake3-chacha20-poly1305": 32,
 }
+
+# uTLS fingerprints sing-box 1.14 accepts, verified with `sing-box check`.
+# Xray and V2RayNG also accept "unsafe", which means "do not use uTLS at all",
+# so that value and anything unrecognised mean "omit the block": an unknown
+# name does not just fail one config, it aborts the whole shared process.
+SUPPORTED_UTLS_FINGERPRINTS = frozenset({
+    "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android",
+    "random", "randomized",
+})
+# Where a value is syntactically absent rather than unknown.
+UTLS_ABSENT_ALIASES = frozenset({"", "none", "unsafe"})
+# Reality refuses to initialise without uTLS, so a reality link that asks for
+# no fingerprint, or for one sing-box does not know, still has to get one.
+REALITY_FALLBACK_FINGERPRINT = "chrome"
+
+# Query keys that mean "skip certificate verification". Clients spell this
+# differently and sing-box only understands the tls.insecure field.
+INSECURE_PARAM_KEYS = (
+    "insecure", "allowinsecure", "allowInsecure",
+    "skip-cert-verify", "skipCertVerify", "skip_cert_verify",
+)
+
+
+def _truthy(raw: Any) -> bool:
+    """Read a query value the way a client does: "1"/"true" are on."""
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _alpn_values(params: dict[str, list[str]]) -> list[str]:
+    """Links write ALPN as "h2,http/1.1", sometimes with spaces."""
+    raw = _first(params, "alpn")
+    if not raw:
+        return []
+    return [p for p in str(raw).replace(",", " ").split() if p]
+
+
+def _tls_requested(params: dict[str, list[str]], *, implied: bool = False) -> bool:
+    """Does this link ask for TLS at all? `security=none` must stay plain.
+
+    QUIC-based links (hysteria2, tuic, anytls) are TLS by definition and carry
+    no `security` parameter, hence `implied`.
+    """
+    if implied:
+        return True
+    security = (_first(params, "security", "tls") or "").strip().lower()
+    if security in ("tls", "reality", "xtls"):
+        return True
+    return _truthy(security)
+
+
+def _tls_block(params: dict[str, list[str]], host: str) -> dict[str, Any]:
+    """Build the sing-box `tls` block for one link.
+
+    Reality needs all three of `enabled`, `public_key` and a uTLS fingerprint.
+    Without `enabled` sing-box silently treats the outbound as plain TLS, so a
+    reality config was previously dialled unencrypted against a reality server
+    and always died; without uTLS it refuses to start at all.
+    """
+    tls: dict[str, Any] = {
+        "enabled": True,
+        "server_name": _first(params, "sni", "host") or host,
+    }
+    alpn = _alpn_values(params)
+    if alpn:
+        tls["alpn"] = alpn
+    if any(_truthy(_first(params, key)) for key in INSECURE_PARAM_KEYS):
+        tls["insecure"] = True
+
+    fingerprint = (_first(params, "fp", "fingerprint") or "").strip().lower()
+    if fingerprint in UTLS_ABSENT_ALIASES or fingerprint not in SUPPORTED_UTLS_FINGERPRINTS:
+        fingerprint = ""
+
+    reality = (_first(params, "security", "tls") or "").strip().lower() == "reality"
+    if reality:
+        public_key = _first(params, "pbk", "public_key")
+        if not public_key:
+            # Probing this as plain TLS would guarantee a false negative.
+            raise UnsupportedConfig("reality_without_public_key")
+        block: dict[str, Any] = {"enabled": True, "public_key": public_key}
+        short_id = _first(params, "sid", "short_id")
+        if short_id:
+            block["short_id"] = short_id
+        tls["reality"] = block
+        tls["utls"] = {
+            "enabled": True,
+            "fingerprint": fingerprint or REALITY_FALLBACK_FINGERPRINT,
+        }
+    elif fingerprint:
+        tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+    return tls
 VERIFY_LIMIT = max(0, int(os.getenv("VERIFY_LIMIT", "0")))
 SPEED_TEST_BYTES = 5_000_000
 # 100 KB/s over a 5 MB body is a 50-second floor, which is why this is worth
@@ -850,27 +940,10 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             if flow and flow not in SUPPORTED_VLESS_FLOWS:
                 raise UnsupportedConfig(f"unsupported_flow:{flow}")
             outbound["flow"] = flow
-            if _first(params, "security", "tls") in ("tls", "reality"):
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": _first(params, "sni", "host") or host,
-                }
-                if _first(params, "fp") == "chrome":
-                    outbound["tls"]["utls"] = {"enabled": True, "fingerprint": "chrome"}
-                if _first(params, "security", "tls") == "reality":
-                    pbk = _first(params, "pbk", "public_key")
-                    sid = _first(params, "sid", "short_id")
-                    if pbk:
-                        outbound["tls"]["reality"] = {"public_key": pbk}
-                    if sid:
-                        outbound["tls"]["reality"]["short_id"] = sid
         else:
             outbound["password"] = uuid
-            if _first(params, "security", "tls") == "tls":
-                outbound["tls"] = {
-                    "enabled": True,
-                    "server_name": _first(params, "sni", "host") or host,
-                }
+        if _tls_requested(params):
+            outbound["tls"] = _tls_block(params, host)
         transport = _common_transport(params)
         if transport:
             outbound["transport"] = transport
