@@ -64,7 +64,7 @@ client's User-Agent; override it when detection gets it wrong.
 |---|---|---|
 | `format` | from User-Agent | `mihomo`, `sing-box`, `xray`, `links` (`clash` → `mihomo`) |
 | `country` | `ALL` | two-letter ISO code, or `ALL` |
-| `entry64` | none | base64 proxy URI for an entrypoint; repeatable |
+| `entry64` | none | base64 proxy URI for an entrypoint; repeatable. A node link, or a `masque://` URI for the mihomo formats |
 | `secure=1` | off | keep only exits whose hop is TLS |
 | `ech=embed` | off | pin the ECH key into the config instead of leaving it to the client's DNS |
 
@@ -72,8 +72,13 @@ Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
 `x-health-join`, `x-ech-mode`.
 
 **Entrypoints and exits.** `entry64` is the hop that gets out of a filtered network; the
-Worker chains the feed's exits behind it with `dialer-proxy`. Exits are handed out
-round-robin, so no one entrypoint carries every connection.
+Worker chains the feed's exits behind it with `dialer-proxy`. Every exit is rendered once
+per entrypoint — `ET1 - <exit>`, `ET2 - <exit>`, and so on — and each variant dials through
+its own entrypoint, so one entrypoint can go down without taking the config with it.
+
+A `masque://` entrypoint (Cloudflare WARP over HTTP/2) carries no share-link form, because
+mihomo has no masque node scheme; it is a worker-internal shape that renders for
+`format=mihomo` only. The other formats return 406 `masque_entry_requires_mihomo_format`.
 
 **Size.** There is no cap on how many entrypoints you send, how long one may be, or how
 large the response grows: the worker renders the whole feed. Per-country exits are still

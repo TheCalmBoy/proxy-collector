@@ -35,14 +35,14 @@
   "cf_workers": {
     "proxy-chain-subscription": {
       "path": "workers/proxy-chain-subscription/",
-      "file": "index.js (1417 lines, 60833 bytes, committed as the deployed bundle - this is esbuild output, not original source)",
+      "file": "index.js (1338 lines, 58173 bytes, committed as the deployed bundle - this is esbuild output, not original source)",
       "endpoint": "GET /sub (any other path 404s)",
-      "purpose": "Subscription endpoint. Reads a base64 entrypoint (entry64), chains feed exits behind it with dialer-proxy, and renders the result in the client's format.",
+      "purpose": "Subscription endpoint. Reads base64 entrypoint URIs (entry64: a node link, or a worker-internal masque:// shape), chains feed exits behind EACH entrypoint with dialer-proxy, and renders the result in the client's format.",
       "format_detection": "User-Agent first (clash/mihomo/stash -> mihomo, sing-box/nekobox -> sing-box, xray/v2rayng/mahsa -> links); ?format= overrides",
       "query_options": {
         "format": "mihomo | sing-box | xray | links (clash and clash-meta alias to mihomo)",
         "country": "two-letter ISO code, or ALL (default)",
-        "entry64": "base64 proxy URI for an entrypoint; repeatable, deduplicated, capped at MAX_ENTRIES",
+        "entry64": "base64 proxy URI for an entrypoint; repeatable, deduplicated. Accepts the node schemes plus masque:// (server, port, private-key, public-key, ip, ipv6, sni, network, mtu, handshake-timeout) - masque renders for format=mihomo only, 406 otherwise",
         "secure": "secure=1 keeps only exits whose hop is TLS; 503 no_tls_exits_in_feed when none survive",
         "ech": "ech=embed pins Cloudflare's ECH key into the config; default leaves it to the client's DNS (query-server-name), because mihomo has no ECHRejectionError recovery"
       },
@@ -119,12 +119,13 @@
       "tests/test_udp_nonblocking.py", "tests/test_udp_probe_capability.py", "tests/test_verify.py",
       "tests/test_workflow_env_contract.py"
     ],
-    "worker": "workers/proxy-chain-subscription/test/*.mjs (chain integrity, health headers, byte limits, ECH shapes, secure filter, embed coverage)"
+    "worker": "workers/proxy-chain-subscription/test/*.mjs (chain integrity, one variant per entrypoint with the ETn prefix and a matching dialer-proxy, masque entry render + its 406 guard, health headers, byte limits, ECH shapes, secure filter, embed coverage)"
   },
   "history": {
     "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (now workers/proxy-pipeline-heartbeat/).",
     "2026-10-11": "patterniha/Free-Configs added as a second source.",
     "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added.",
-    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran). Later the same day the heartbeat was consolidated: two source copies of one deployed Worker existed (heartbeat/ and workers/proxy-pipeline-heartbeat/, same name), the beat moved from */15 to */30 so the chain fits inside its own beat, the orphaned standalone-probe dispatch was dropped, and freshness-watchdog.yml plus tools/freshness_watch.py were deleted."
+    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran). Later the same day the heartbeat was consolidated: two source copies of one deployed Worker existed (heartbeat/ and workers/proxy-pipeline-heartbeat/, same name), the beat moved from */15 to */30 so the chain fits inside its own beat, the orphaned standalone-probe dispatch was dropped, and freshness-watchdog.yml plus tools/freshness_watch.py were deleted.",
+    "2026-10-17": "Subscription worker: masque:// entrypoints added. Cloudflare WARP over HTTP/2 is a config-only proxy - mihomo has no masque node scheme - so the worker transcodes a worker-internal URI (server, port, private-key, public-key, ip, ipv6, sni, network, mtu, handshake-timeout) into a type: masque proxy block and refuses the formats that cannot express it (406 masque_entry_requires_mihomo_format). The same day the entrypoint round-robin from 2026-10-15 was reverted: it gave each exit a single entrypoint, so an exit was reachable through one hop only (148 exits via ET1, 147 via ET2 on a 295-exit feed) and the loss was invisible - the proxy count still looked right and the config still validated. Every exit is now rendered once per entrypoint, named ETn - <exit>, each dialing through its own entrypoint."
   }
 }
