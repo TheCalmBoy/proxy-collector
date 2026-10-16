@@ -78,9 +78,9 @@ Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
 Worker chains the feed's exits behind it with `dialer-proxy`. Exits are handed out
 round-robin, so no one entrypoint carries every connection.
 
-**Size caps.** `MAX_ENTRIES` 90, `MAX_BODY_BYTES` 900000, `MAX_ENTRY_BYTES` 9000. If the
-rendered body would exceed the cap, whole exits are dropped — the YAML stays valid
-instead of being cut mid-node.
+**Size.** There is no cap on how many entrypoints you send, how long one may be, or how
+large the response grows: the worker renders the whole feed. Per-country exits are still
+capped at `COUNTRY_CAP`, which is what keeps the output a sane size.
 
 ### ECH
 
