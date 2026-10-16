@@ -601,9 +601,31 @@ function amneziaWgOption(proxy) {
 __name(amneziaWgOption, "amneziaWgOption");
 __name2(amneziaWgOption, "amneziaWgOption");
 __name22(amneziaWgOption, "amneziaWgOption");
-function mihomo(entries, countries, healthById, speedByEndpoint = null) {
+const DNS_RESOLVERS = ["223.5.5.5", "223.6.6.6", "178.22.122.100"];
+function dnsLines(enabled = true) {
+  if (!enabled) return [];
+  const resolverList = (key) => [`  ${key}:`, ...DNS_RESOLVERS.map((server) => `    - ${server}`)];
+  return [
+    "dns:",
+    "  enable: true",
+    "  ipv6: false",
+    "  enhanced-mode: fake-ip",
+    "  fake-ip-range: 198.18.0.1/16",
+    "  fake-ip-filter:",
+    '    - "+.lan"',
+    '    - "+.local"',
+    '    - "localhost.ptlogin2.qq.com"',
+    "  default-nameserver:",
+    "    - 223.5.5.5",
+    "    - 223.6.6.6",
+    ...resolverList("nameserver"),
+    ...resolverList("proxy-server-nameserver")
+  ];
+}
+__name(dnsLines, "dnsLines");
+function mihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
   const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint);
-  const lines = ["# Generated proxy subscription", "proxies:"];
+  const lines = ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"];
   const appendProxy = /* @__PURE__ */ __name22((proxy, name, dialerProxy = void 0) => {
     if (proxy.type === "wireguard") {
       const localIp = proxy.address?.find((value) => value.includes(".")) || proxy.address?.[0] || "";
@@ -1285,7 +1307,8 @@ var index_default = {
         links.unshift(...entries.map((entry) => withUriName(entry.uri, entry.tag)));
       return reply(b64(links.join("\n")), 200, "text/plain; charset=utf-8", joinHeaders);
     }
-    const render = format === "mihomo" ? mihomo : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
+    const dnsPref = url.searchParams.get("dns") !== "0";
+    const render = format === "mihomo" ? (e, c, h, s) => mihomo(e, c, h, s, { dns: dnsPref }) : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
     return reply(render(entries, countries, healthById, speedByEndpoint), 200, format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
   }
 };
