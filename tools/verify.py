@@ -1059,7 +1059,12 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
         if user:
             outbound["username"] = user
             outbound["password"] = pwd
-        outbound["tls"] = parsed.scheme == "https"
+        if parsed.scheme == "https":
+            # sing-box wants a TLS *object* here. A bare `true` makes it reject
+            # the entire batch at startup ("cannot unmarshal bool into
+            # HTTPOutboundOptions...tls"), so one https proxy anywhere in any
+            # feed killed a whole 22k-candidate run before a single probe ran.
+            outbound["tls"] = _tls_block({}, host)
         return outbound
 
     raise UnsupportedConfig(f"unsupported_scheme_{parsed.scheme}")
@@ -1643,22 +1648,74 @@ def dedupe_endpoints(
     return config, kept
 
 
+def _drop_offending_outbounds(config: dict, stderr_text: str) -> list[str]:
+    """Remove the outbounds sing-box named in its decode error.
+
+    `check` reports the exact field but only for the FIRST offending outbound, so
+    a batch with several bad shapes needs repeated passes; the caller loops.
+    Returns the dropped config ids, or [] when the error names nothing we can
+    attribute to one outbound (in which case the caller must give up loudly).
+    """
+    indices = sorted({int(m) for m in re.findall(r"outbounds\[(\d+)\]", stderr_text)}, reverse=True)
+    outbounds = list(config.get("outbounds") or [])
+    final_tag = (config.get("route") or {}).get("final")
+    dropped: list[str] = []
+    for index in indices:
+        if not 0 <= index < len(outbounds):
+            continue
+        tag = str(outbounds[index].get("tag") or "")
+        # Never drop the route's final outbound: the remaining rules would point
+        # at nothing and sing-box would refuse to start for a new reason.
+        if not tag.startswith("proxy-") or tag == final_tag:
+            continue
+        dropped.append(tag.removeprefix("proxy-"))
+        outbounds.pop(index)
+    if not dropped:
+        return []
+
+    gone_out = {f"proxy-{cid}" for cid in dropped}
+    gone_in = {f"in-{cid}" for cid in dropped}
+    config["outbounds"] = outbounds
+    config["inbounds"] = [
+        ib for ib in config.get("inbounds") or [] if ib.get("tag") not in gone_in
+    ]
+    route = dict(config.get("route") or {})
+    route["rules"] = [
+        rule for rule in route.get("rules") or []
+        if not (set(rule.get("inbound") or []) & gone_in)
+    ]
+    config["route"] = route
+    return dropped
+
+
 async def _run_sing_box(config: dict) -> asyncio.subprocess.Process:
     config_path = Path("/tmp/verify-sing-box.json")
-    config_path.write_text(json.dumps(config, separators=(",", ":")))
 
     # Validate first: `check` reports the exact offending field, whereas a
     # failed `run` only exits 1 and hides the cause in a startup race.
-    checked = await asyncio.create_subprocess_exec(
-        SING_BOX, "check", "-c", str(config_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, check_err = await checked.communicate()
-    if checked.returncode != 0:
-        print("sing-box rejected the config:", file=sys.stderr)
-        print(check_err.decode()[-2000:], file=sys.stderr)
-        raise RuntimeError("sing-box check failed")
+    # One unbuildable outbound must cost that candidate, not the whole run: drop
+    # what sing-box names and re-check, up to a bounded number of passes.
+    for _ in range(25):
+        config_path.write_text(json.dumps(config, separators=(",", ":")))
+        checked = await asyncio.create_subprocess_exec(
+            SING_BOX, "check", "-c", str(config_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, check_err = await checked.communicate()
+        if checked.returncode == 0:
+            break
+        text = check_err.decode(errors="replace")
+        dropped = _drop_offending_outbounds(config, text)
+        if not dropped:
+            print("sing-box rejected the config:", file=sys.stderr)
+            print(text[-2000:], file=sys.stderr)
+            raise RuntimeError("sing-box check failed")
+        shown = ", ".join(sorted(dropped)[:5])
+        more = f" (+{len(dropped) - 5} more)" if len(dropped) > 5 else ""
+        print(f"sing-box check: dropped {len(dropped)} unbuildable config(s): {shown}{more}", file=sys.stderr)
+    else:
+        raise RuntimeError("sing-box check failed: offenders still present after 25 drops")
 
     proc = await asyncio.create_subprocess_exec(
         SING_BOX, "run", "-c", str(config_path),
