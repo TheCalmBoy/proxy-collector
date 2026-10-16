@@ -413,6 +413,9 @@ def main() -> int:
         # Recorded so an identical config set can be replayed later; ids are
         # sha256 prefixes, never credentials.
         "sample_ids": [verify._tag(u)[:12] for u in fails],
+        # Controls are recorded by id too: a control miss (7/8) is only
+        # actionable if you can say which config missed.
+        "control_ids": [verify._tag(u)[:12] for u in controls],
         "counts": {"sampled": len(fails), "controls": len(controls)},
         "opened": {
             "ours": sum(1 for u in fails if a.get(u, {}).get("ok")),
