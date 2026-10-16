@@ -180,14 +180,27 @@ class _Quiet(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-def _mihomo_config(uris: list[str], base_port: int, ctrl_port: int, feed_port: int) -> str:
-    listeners = "".join(
-        f"  - name: ab-{i}\n    type: socks\n    port: {base_port + i}\n    proxy: ab-{i}\n"
-        for i in range(len(uris))
-    )
-    return f"""mode: rule
+def arm_b_selector(fails: list[str], controls: list[str], canary: list[str],
+                   root: pathlib.Path) -> dict[str, dict]:
+    """mihomo's own parser, driven through a selector group + one mixed port.
+
+    Why not `listeners`: a listener's `proxy:` field cannot resolve a proxy that
+    arrived through a *provider*. Measured in run 38975337589 -- every listener
+    logged "parse failed: proxy ab-N not found" and the arm opened 0/39, control
+    group included. A selector group resolves provider members normally (its
+    `all` list is the proof), so the selection is switched per config instead.
+    """
+    uris = fails + controls + canary
+    names = [f"ab-{i}" for i in range(len(uris))]
+    feed_port, ctrl_port, mixed_port = 8099, 9099, 22900
+    sub_dir = root / "abwork"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "subs.txt").write_text(
+        "\n".join(f"{_base(u)}#{n}" for u, n in zip(uris, names)) + "\n", encoding="utf-8")
+    (sub_dir / "mihomo.yaml").write_text(f"""mode: rule
 log-level: warning
 allow-lan: false
+mixed-port: {mixed_port}
 external-controller: 127.0.0.1:{ctrl_port}
 proxy-providers:
   ab:
@@ -196,33 +209,13 @@ proxy-providers:
     path: ./providers/ab.yaml
     interval: 3600
     health-check: {{enable: false}}
-listeners:
-{listeners}rules:
-  - MATCH,DIRECT
-"""
-
-
-def _wait_port(port: int, deadline: float) -> bool:
-    while time.time() < deadline:
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
-            return True
-        except OSError:
-            time.sleep(0.2)
-    return False
-
-
-def arm_b(fails: list[str], controls: list[str], canary: list[str], root: pathlib.Path) -> dict[str, dict]:
-    """mihomo's own parser, same raw links, same prober."""
-    uris = fails + controls + canary
-    feed_port, ctrl_port = 8099, 9099
-    base_port = 22000
-    sub_dir = root / "abwork"
-    sub_dir.mkdir(parents=True, exist_ok=True)
-    (sub_dir / "subs.txt").write_text(
-        "\n".join(f"{u}#ab-{i}" for i, u in enumerate(uris)) + "\n", encoding="utf-8")
-    (sub_dir / "mihomo.yaml").write_text(
-        _mihomo_config(uris, base_port, ctrl_port, feed_port), encoding="utf-8")
+proxy-groups:
+  - name: sel
+    type: select
+    use: [ab]
+rules:
+  - MATCH,sel
+""", encoding="utf-8")
 
     if os.getenv("AB_DRY_RUN"):
         return {}
@@ -230,59 +223,66 @@ def arm_b(fails: list[str], controls: list[str], canary: list[str], root: pathli
     handler = functools.partial(_Quiet, directory=str(sub_dir))
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", feed_port), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-
     mihomo = os.getenv("MIHOMO", "mihomo")
     log_path = sub_dir / "mihomo.log"
+    with open(log_path, "a") as log:
+        proc = subprocess.Popen([mihomo, "-f", str(sub_dir / "mihomo.yaml"), "-d", str(sub_dir)],
+                                stdout=log, stderr=subprocess.STDOUT)
 
-    def start() -> subprocess.Popen:
-        with open(log_path, "a") as log:
-            return subprocess.Popen([mihomo, "-f", str(sub_dir / "mihomo.yaml"), "-d", str(sub_dir)],
-                                    stdout=log, stderr=subprocess.STDOUT)
+    def api(path, method="GET", body=None, timeout=8):
+        req = urllib.request.Request(f"http://127.0.0.1:{ctrl_port}{path}", method=method,
+                                     data=json.dumps(body).encode() if body else None,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode() or "{}")
 
-    # First start populates the provider cache; second start resolves every
-    # listener's proxy synchronously from that cache. A provider that has not
-    # finished fetching leaves listeners pointing at nothing, and mihomo then
-    # serves them over DIRECT -- measured, not guessed: that is exactly how a
-    # `type: file` provider fooled an earlier version of this harness.
-    proc = start()
-    probe_port = base_port
-    deadline = time.time() + 30
-    good = False
+    # _base() first: mihomo takes everything after the FIRST "#" as the proxy
+    # name, so a link that already carries a fragment (#canary) would register as
+    # "canary#ab-9" and could never be selected.
+    # Readiness is mandatory and explicit: if either the provider or the group
+    # membership is wrong, this arm reports nothing rather than measurements of
+    # an empty proxy list. That is the bug that voided the previous run.
+    ready, deadline = False, time.time() + 45
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{ctrl_port}/providers/proxies", timeout=4) as r:
-                providers = json.loads(r.read().decode()).get("providers", {})
-            if len(providers.get("ab", {}).get("proxies", [])) >= len(uris):
-                good = True
+            have = {p["name"] for p in api("/providers/proxies")["providers"]["ab"]["proxies"]}
+            members = set(api("/proxies/sel").get("all", []))
+            if len(have) >= len(uris) and members >= set(names):
+                ready = True
                 break
         except Exception:
             pass
         time.sleep(1)
-    proc.terminate()
-    proc.wait(timeout=10)
-    if not good:
-        print("   [B] provider never loaded -- arm B is invalid")
-        srv.shutdown()
-        return {}
-
-    proc = start()
-    if not _wait_port(probe_port, time.time() + 30):
+    if not ready:
+        print(f"   [B] not ready: provider={len(have) if 'have' in dir() else '?'} "
+              f"group_members={len(members) if 'members' in dir() else '?'} -- arm B invalid")
         proc.terminate()
         srv.shutdown()
-        print("   [B] listeners never came up")
         return {}
 
-    log_text = log_path.read_text(errors="replace")
-    not_found = [l for l in log_text.splitlines() if "not found" in l]
-    if not_found:
-        print(f"   [B] {len(not_found)} 'proxy not found' warnings -- listeners would fall back to DIRECT")
-
-    ports = {u: base_port + i for i, u in enumerate(uris)}
-
-    async def run():
-        return await _probe_all(ports, "B: mihomo / its own parser")
+    async def run() -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for u, n in zip(uris, names):
+            if n not in members:
+                # mihomo's own parser refused this link: that is a finding, not a
+                # reason to void the run.
+                out[u] = {"ok": False, "latency_ms": None, "error": "mihomo_parser_dropped"}
+                continue
+            try:
+                api("/proxies/sel", method="PUT", body={"name": n})
+                now = api("/proxies/sel").get("now")
+                if now != n:
+                    out[u] = {"ok": False, "latency_ms": None, "error": f"select_failed:{now}"}
+                    continue
+                ok, latency = await verify._https_request(mixed_port, PROBE_URL, PROBE_TIMEOUT)
+                out[u] = {"ok": bool(ok), "latency_ms": round(latency, 1) if latency else None}
+            except Exception as exc:
+                out[u] = {"ok": False, "latency_ms": None, "error": type(exc).__name__}
+        return out
 
     res = asyncio.run(run())
+    opened = sum(1 for v in res.values() if v["ok"])
+    print(f"   [B: mihomo / its own parser] opened {opened}/{len(uris)}")
     proc.terminate()
     srv.shutdown()
     return res
@@ -355,7 +355,7 @@ def main() -> int:
         print("\n-- arm A: building sing-box config --")
         arm_a(fails, controls, canary)
         print("-- arm B: building mihomo config --")
-        arm_b(fails, controls, canary, root)
+        arm_b_selector(fails, controls, canary, root)
         print("-- validating both configs with their real cores --")
         work = pathlib.Path(os.getcwd()) / "abwork"
         sbc = subprocess.run(
@@ -373,7 +373,7 @@ def main() -> int:
     print("\n-- arm A: our translation (sing-box) --")
     a = arm_a(fails, controls, canary)
     print("-- arm B: mihomo's own parser --")
-    b = arm_b(fails, controls, canary, root)
+    b = arm_b_selector(fails, controls, canary, root)
 
     rc = report(a, b, fails, controls, canary)
     payload = {
