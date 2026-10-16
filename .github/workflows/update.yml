@@ -446,6 +446,7 @@ jobs:
           PY
 
       - name: Publish only the configs that passed verification
+        if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
@@ -460,6 +461,7 @@ jobs:
           python .github/workflows/publish_step.py
 
       - name: Deploy generated database to gh-pages
+        if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -485,7 +487,7 @@ jobs:
         # Heartbeat-dispatched and manual runs chain - not a push or PR.
         # (No schedule: trigger any more: the Cloudflare heartbeat is the
         # only activator, so repository_dispatch is the expected event.)
-        if: github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'repository_dispatch' || github.event_name == 'workflow_dispatch')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
