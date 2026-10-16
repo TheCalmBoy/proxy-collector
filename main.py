@@ -70,10 +70,24 @@ DEFAULT_SOURCE_URLS = (
     # It looked fine on the cheap Stage 1 gate (39% of 2891 endpoints alive) and
     # then produced almost nothing, so TCP liveness is not a proxy for yield.
     # Same shape as the two feeds removed in ca59542, four times the volume.
-    # Added patterniha/Free-Configs 2026-10-11. Single configs.txt endpoint,
-    # ~3400 candidates, all protocols mixed in one file (vless/vmess/trojan/ss).
-    # Tagged for a Stage 1 liveness probe; full survival_rate gates re-entry.
-    "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt",
+    # Removed patterniha/Free-Configs 2026-10-16 after two full runs measured
+    # it, the second one on the repaired tester:
+    #   run 38875727414: 279 candidates -> 0 survived (0.0%)
+    #   run 38881239614: 278 candidates -> 0 survived (0.0%)
+    # This is not another Stage 1 misprediction. The tester was fixed first
+    # (six silent field losses: reality without enabled, alpn, insecure, fp,
+    # httpupgrade/h2, and the hy2/tuic/anytls schemes - PR #12) and the number
+    # did not move, so the 0.0% belongs to the feed and not to us.
+    # Measured from a machine inside Iran with the tester out of the path:
+    # 186 of 264 configs pin 188.114.98.0, which is TCP-dead here (i/o timeout,
+    # 100% ICMP loss) while 188.114.96.1 opens in 89ms - the address is the
+    # problem, not the Cloudflare /20. Swapping in a live edge does not rescue
+    # them either: the two SNI names the feed uses are dropped during the TLS
+    # handshake (no reply, no alert) where a benign SNI on the same IP completes
+    # TLS 1.3 in ~30ms in the same second. mihomo 1.19.32 fails identically,
+    # with and without tcp-fragment, so no client-side bypass reaches it.
+    # 15% of the input volume for zero yield. Re-entry needs both a full-run
+    # survival_rate AND a handshake that survives from inside Iran.
     # Added iampedii/whitedns-sub 2026-10-16. A subs-check output repo,
     # auto-committed ~6x/day. It publishes no plain-text URI list, so we take
     # the base64 sibling; the fetcher's base64 auto-detect handles it.
