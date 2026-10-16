@@ -142,5 +142,5 @@ addition and removal, including the ones that were dropped again.
 
 - `0xRadikal/Free-v2ray-Configs` — `verified/configs.txt`; the only feed that has consistently earned its bandwidth
 - `hamedcode/port-based-v2ray-configs` — `sub/ss.txt` only; its vless/vmess/trojan files were dropped
-- `patterniha/Free-Configs` — `configs.txt`, added 2026-10-11
-- `iampedii/whitedns-sub` — `base64.txt`, added 2026-10-16; 142 endpoints with 68.3% already covered by the feeds above, pending a full-run survival number
+- ~~`patterniha/Free-Configs`~~ — dropped 2026-10-16: 0/278 twice, the second time on the repaired tester; its pinned edge is TCP-dead from Iran and its SNI names are dropped at the TLS handshake
+- `iampedii/whitedns-sub` — `base64.txt`, added 2026-10-16; 145 candidates → 22 survived (15.17%) on the repaired tester, up from 5.96% before the TLS/transport fixes

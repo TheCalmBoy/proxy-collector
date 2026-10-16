@@ -19,7 +19,7 @@
       "probe_interval": "~10-15 min (health >10 min old, plus chained after every update)"
     },
     "data_flow": [
-      "1. Upstream sources (0xRadikal + patterniha/Free-Configs) -> main.py",
+      "1. Upstream sources (0xRadikal + hamedcode + iampedii/whitedns-sub) -> main.py",
       "2. main.py decodes proxy URIs (vless/vmess/trojan/ss/socks/hysteria/tuic/etc.)",
       "3. DNS prewarm (32 threads) -> TCP probe -> HTTPS gate -> speed test",
       "4. Country verification via DB-IP Lite MMDB + ip-api (roaming egress pool)",
@@ -30,8 +30,8 @@
     ]
   },
   "upstream_sources": {
-    "0xRadikal": "Primary source: raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt (19.3% yield - the only feed that earns its cost)",
-    "patterniha/Free-Configs": "Secondary source, added 2026-10-11: raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt",
+    "0xRadikal": "Primary source: raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt (23.6% yield measured 2026-10-16 on the repaired tester - the only feed that earns its cost)",
+    "patterniha/Free-Configs": "REMOVED (0.0% yield in two full runs, 278 candidates; its pinned edge is TCP-dead and its SNI names are dropped at the TLS handshake from inside Iran - killed 2026-10-16)",
     "Epodonios/v2ray-configs": "REMOVED (0.6% yield, killed 2026-09-29)",
     "ebrasha": "REMOVED (0.0% yield)"
   },
@@ -137,6 +137,6 @@
     "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (heartbeat/).",
     "2026-10-11": "patterniha/Free-Configs added as a second source.",
     "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added.",
-    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew."
+    "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran)."
   }
 }
