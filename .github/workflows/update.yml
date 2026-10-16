@@ -446,6 +446,7 @@ jobs:
           PY
 
       - name: Publish only the configs that passed verification
+        if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
@@ -460,6 +461,7 @@ jobs:
           python .github/workflows/publish_step.py
 
       - name: Deploy generated database to gh-pages
+        if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -469,6 +471,7 @@ jobs:
           full_commit_message: "auto: update proxy database"
 
       - name: Dispatch the chained egress probe
+        if: github.ref == 'refs/heads/main'
         # The probe no longer runs on its own cron - it CHAINS off this run.
         # Publishing to gh-pages just happened (step above), so when the probe
         # starts and fetches gh-pages/enriched-configs.json it gets THIS
