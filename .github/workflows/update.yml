@@ -2,18 +2,23 @@ name: Update Proxy Database
 
 on:
   # NO schedule: here. The only activator is the external Cloudflare heartbeat
-  # (heartbeat/wrangler.jsonc crons */15) -> repository_dispatch(heartbeat) on
-  # freshness-watchdog.yml -> the watchdog dispatches THIS workflow when the
-  # pool is >30 min old. GitHub's free-tier crons skipped ticks on
-  # 2026-10-01 and were removed entirely: two clocks (CF heartbeat + GitHub
-  # schedule) produced double-runs and queue stacks. One clock, one path.
-  # The probe still chains off this run via `gh workflow run` (strict
-  # publish-then-probe ordering).
-  # External heartbeat path (0xRadikal pattern): the Cloudflare cron wakes the
-  # watchdog, and any external operator can wake this workflow directly by
-  # POSTing to /dispatches. This path cannot be skipped by GitHub's
-  # best-effort scheduler, which is the only reason the pipeline froze on
-  # 2026-10-01.
+  # (workers/proxy-pipeline-heartbeat, crons */30) -> repository_dispatch
+  # (update-now) straight into THIS workflow. GitHub's free-tier crons skipped
+  # ticks on 2026-10-01 and were removed entirely: two clocks (CF heartbeat +
+  # GitHub schedule) produced double-runs and queue stacks. One clock, one path.
+  # The probe chains off this run via `gh workflow run` (strict
+  # publish-then-probe ordering), so one beat yields one pool, measured once.
+  #
+  # The beat is 30 min, not 15, because this run plus its chained probe is
+  # ~11.7 min median / 18.4 min worst case. At a 15-min beat the next tick
+  # landed mid-chain, queued on this workflow's concurrency group instead of
+  # running, and its chained probe landed ~6 min after the previous probe with
+  # no new pool in between.
+  #
+  # External heartbeat path (0xRadikal pattern): any external operator can wake
+  # this workflow directly by POSTing to /dispatches. This path cannot be
+  # skipped by GitHub's best-effort scheduler, which is the only reason the
+  # pipeline froze on 2026-10-01.
   repository_dispatch:
     types: [update-now, update-proxy-database]
   workflow_dispatch:
@@ -474,9 +479,8 @@ jobs:
         # A `workflow_run` trigger was not viable: the egress worker 401s
         # without its Bearer token, and workflow_run jobs cannot read the
         # triggering workflow's secrets. `gh workflow run` (this job has
-        # actions:write) is the same mechanism freshness-watchdog.yml already
-        # uses, and the probe's own concurrency group serializes any overlap
-        # with a watchdog dispatch.
+        # actions:write) is the mechanism this repo already uses, and the
+        # probe's own concurrency group serializes any overlap.
         #
         # Heartbeat-dispatched and manual runs chain - not a push or PR.
         # (No schedule: trigger any more: the Cloudflare heartbeat is the

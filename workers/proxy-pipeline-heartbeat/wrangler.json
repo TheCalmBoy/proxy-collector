@@ -3,14 +3,9 @@
   "main": "index.js",
   "compatibility_date": "2026-10-11",
   "triggers": {
-    "crons": [
-      "*/15 * * * *"
-    ]
+    "crons": ["*/30 * * * *"]
   },
   "vars": {
-    "REPO": "TheCalmBoy/proxy-collector",
-    "UPDATE_EVENT": "update-now",
-    "PROBE_EVENT": "probe-egress",
-    "RUN_COUNTER_KEY": "run-counter"
+    "UPDATE_EVENT": "update-now"
   }
 }
