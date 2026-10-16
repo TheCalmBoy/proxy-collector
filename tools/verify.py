@@ -1046,23 +1046,51 @@ def _safe_ws_path(raw: Any) -> str:
 
 
 def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
-    net = _first(params, "type", "network", "net")
-    if not net:
+    """Build the sing-box transport block for one link.
+
+    Only transports sing-box 1.14 implements are handled. xhttp/splithttp are
+    Xray-only, and quic/kcp are gone from sing-box, so those links are rejected
+    outright: probing one as a plain TCP connection can only produce a false
+    negative, and a transport silently dropped is indistinguishable from a dead
+    server in the survival numbers.
+    """
+    net = (_first(params, "type", "network", "net") or "").strip().lower()
+    if net in ("", "tcp", "raw", "none"):
         return None
+
+    host = _first(params, "host")
     if net == "ws":
-        path = _safe_ws_path(_first(params, "path"))
-        host = _first(params, "host")
-        transport = {"type": "ws", "path": path}
+        transport: dict[str, Any] = {
+            "type": "ws",
+            "path": _safe_ws_path(_first(params, "path")),
+        }
         if host:
             transport["headers"] = {"Host": str(host)}
         return transport
     if net == "grpc":
-        service = _first(params, "serviceName", "service_name")
         transport = {"type": "grpc"}
+        service = _first(params, "serviceName", "service_name")
         if service:
             transport["service_name"] = service
         return transport
-    return None
+    if net == "httpupgrade":
+        transport = {
+            "type": "httpupgrade",
+            "path": _safe_ws_path(_first(params, "path")),
+        }
+        if host:
+            transport["headers"] = {"Host": str(host)}
+        return transport
+    if net in ("http", "h2", "h2mux"):
+        # sing-box wants the h2 host as a list; a bare string fails validation.
+        transport = {
+            "type": "http",
+            "path": _safe_ws_path(_first(params, "path")),
+        }
+        if host:
+            transport["host"] = [str(host)]
+        return transport
+    raise UnsupportedConfig(f"unsupported_transport:{net}")
 
 
 async def _read_socks5_greeting(
