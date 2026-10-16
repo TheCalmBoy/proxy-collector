@@ -74,6 +74,19 @@ DEFAULT_SOURCE_URLS = (
     # ~3400 candidates, all protocols mixed in one file (vless/vmess/trojan/ss).
     # Tagged for a Stage 1 liveness probe; full survival_rate gates re-entry.
     "https://raw.githubusercontent.com/patterniha/Free-Configs/main/configs.txt",
+    # Added iampedii/whitedns-sub 2026-10-16. A subs-check output repo,
+    # auto-committed ~6x/day. It publishes no plain-text URI list, so we take
+    # the base64 sibling; the fetcher's base64 auto-detect handles it.
+    # Measured 2026-10-16 by endpoint key (host:port), not lines:
+    #   base64.txt   271 URIs -> 142 endpoints
+    #     93 endpoints shared with 0xRadikal, 9 with hamedcode ss, 1 with
+    #     patterniha => 68.3% already covered, 45 new endpoints (31.7%).
+    # Protocol mix is unlike the other feeds: 167 vless, 48 trojan, 18 vmess,
+    # 17 hysteria2, 14 ss, 7 socks.
+    # Endpoint novelty is not yield. Per the rule above, this feed's place is
+    # settled only by a full-run survival_rate; drop it if that number does not
+    # cover the probe cost its 142 candidates add.
+    "https://raw.githubusercontent.com/iampedii/whitedns-sub/main/base64.txt",
 )
 # Comma-separated override. A single URL still works.
 SOURCE_URLS = tuple(
@@ -131,6 +144,28 @@ def safe_b64decode(value: str) -> bytes:
     value = value.strip().replace("-", "+").replace("_", "/")
     value += "=" * ((4 - len(value) % 4) % 4)
     return base64.b64decode(value, validate=False)
+
+
+def decode_base64_feed(text: str) -> str:
+    """Return a feed body as plain text, decoding a base64-only payload.
+
+    Some upstreams publish only a base64 sibling (no plain URI list), so a feed
+    body is sniffed and decoded when it is base64 and contains no URI at all.
+
+    Sniff the WHOLE body, not just line 1: a body whose first line is prose (a
+    header, an error page) would otherwise be decoded as base64 into noise,
+    silently yielding zero configs instead of the real ones. Requiring zero
+    "://" lines as well as pure base64 characters means a corrupt or HTML
+    response is never decoded -- it falls through as-is and yields nothing.
+    """
+    looks_like_plain = sum(1 for line in text.splitlines() if "://" in line)
+    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/=\s]", text)
+    if looks_like_b64 and looks_like_plain == 0:
+        try:
+            return base64.b64decode(text.strip() + "=" * (-len(text.strip()) % 4)).decode("utf-8", "replace")
+        except Exception:
+            return text
+    return text
 
 
 def parse_vmess(uri: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -321,7 +356,7 @@ def fetch_source_configs(
             continue
 
         added = 0
-        for raw_line in response.text.splitlines():
+        for raw_line in decode_base64_feed(response.text).splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or line in seen:
                 continue
@@ -363,18 +398,8 @@ def fetch_previous_verified(session: requests.Session) -> list[str]:
         return []
 
     # The published file is plain text, but accept the base64 sibling too so a
-    # bad guess at the URL degrades to a no-op instead of garbage input. Sniff
-    # the WHOLE body, not just line 1: a file whose first line is prose (a
-    # header, an error page) would otherwise be decoded as base64 into noise,
-    # silently yielding zero configs instead of the real ones.
-    text = response.text
-    looks_like_plain = sum(1 for line in text.splitlines() if "://" in line)
-    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/=\s]", text)
-    if looks_like_b64 and looks_like_plain == 0:
-        try:
-            text = base64.b64decode(text.strip() + "=" * (-len(text.strip()) % 4)).decode("utf-8", "replace")
-        except Exception:
-            pass
+    # bad guess at the URL degrades to a no-op instead of garbage input.
+    text = decode_base64_feed(response.text)
 
     lines: list[str] = []
     seen: set[str] = set()
