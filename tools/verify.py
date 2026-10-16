@@ -1001,7 +1001,10 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             outbound["flow"] = flow
         else:
             outbound["password"] = uuid
-        if _tls_requested(params):
+        # Trojan is TLS by definition: a link that carries sni (or any TLS
+        # material) but no explicit `security=tls` must still get a tls block.
+        # Emitting none dialled plaintext at a TLS server and always died.
+        if _tls_requested(params, implied=parsed.scheme == "trojan"):
             outbound["tls"] = _tls_block(params, host)
         transport = _common_transport(params)
         if transport:
@@ -1071,6 +1074,10 @@ def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
     rejected rather than dialled as raw TCP.
     """
     net = str(vmess.get("net") or "").lower()
+    # `raw` and `none` mean "no transport", exactly as the vless path already
+    # treats them. Rejecting them here dropped links sing-box can dial.
+    if net in ("raw", "none"):
+        net = "tcp"
     host = str(vmess.get("host") or "")
     if net == "tcp":
         if str(vmess.get("type") or "none").lower() != "http":
@@ -1083,7 +1090,11 @@ def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
             transport["host"] = [host]
         return transport
     if net in ("ws", "websocket"):
-        transport = {"type": "ws", "path": _safe_ws_path(vmess.get("path"))}
+        path, early = _ws_path_parts(vmess.get("path"))
+        transport = {"type": "ws", "path": path}
+        if early:
+            transport["max_early_data"] = early
+            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
         if host:
             transport["headers"] = {"Host": host}
         return transport
@@ -1141,6 +1152,26 @@ def _vmess_params(vmess: dict[str, Any]) -> dict[str, list[str]]:
     return params
 
 
+def _ws_path_parts(raw: Any) -> tuple[str, int | None]:
+    """Split a websocket path from its early-data query.
+
+    Links in the wild write `path=/x?ed=2560`. sing-box wants early data as
+    `max_early_data`, not as part of the request path: sending the query inside
+    the path makes the front answer a different route. Measured over
+    upstream's pool, configs of exactly that shape died 13/13 while other ws
+    configs survived at 13.4%.
+    """
+    path, _, query = str(raw or "").partition("?")
+    early: int | None = None
+    for key, value in urllib.parse.parse_qsl(query):
+        if key.lower() == "ed":
+            try:
+                early = int(value)
+            except (TypeError, ValueError):
+                early = None
+    return _safe_ws_path(path), early
+
+
 def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
     """Build the sing-box transport block for one link.
 
@@ -1154,12 +1185,17 @@ def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
     if net in ("", "tcp", "raw", "none"):
         return None
 
-    host = _first(params, "host")
+    # A ws link that names only `sni` still needs a Host header, because the
+    # front routes on it. Measured: ws configs with no host param survived at
+    # 6.2% against 14.0% with one, and a trojan+ws link carrying sni alone
+    # opened under mihomo while our transport sent no Host at all.
+    host = _first(params, "host") or _first(params, "sni")
     if net == "ws":
-        transport: dict[str, Any] = {
-            "type": "ws",
-            "path": _safe_ws_path(_first(params, "path")),
-        }
+        path, early = _ws_path_parts(_first(params, "path"))
+        transport: dict[str, Any] = {"type": "ws", "path": path}
+        if early:
+            transport["max_early_data"] = early
+            transport["early_data_header_name"] = "Sec-WebSocket-Protocol"
         if host:
             transport["headers"] = {"Host": str(host)}
         return transport
