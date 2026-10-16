@@ -1,0 +1,108 @@
+name: A/B translation (ours vs mihomo's own parser)
+
+# Analysis only. Deliberately has NO publish, deploy or dispatch step: it must
+# never be able to touch the live database, whatever ref it runs from.
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: "How many configs that WE drop to test (from 0xRadikal's verified pool)"
+        default: "30"
+        required: false
+      control:
+        description: "How many configs we already PUBLISH to use as a harness sanity control"
+        default: "8"
+        required: false
+      seed:
+        description: "Sampling seed (same seed = same sample)"
+        default: "1337"
+        required: false
+      ids:
+        description: "Replay these config ids instead of sampling (comma separated; see sample_ids in a prior result)"
+        default: ""
+        required: false
+      repeat:
+        description: "Probe attempts per config per arm; a config counts as open if any attempt succeeds"
+        default: "1"
+        required: false
+      mihomo_version:
+        description: "mihomo tag to test with (empty = latest release)"
+        default: ""
+        required: false
+
+concurrency:
+  group: ab-translate-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the ref this was dispatched from
+        uses: actions/checkout@v4
+
+      - name: Install sing-box (same version the pipeline uses)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="1.14.0"
+          archive="sing-box-${version}-linux-amd64.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}" \
+            -o "/tmp/${archive}"
+          echo "2375de6999f4f56ab46b4fc5ddf26a6aba1d3e61a0f4e7ddec2f4690457d5f63  /tmp/${archive}" | sha256sum --check --status
+          tar -xzf "/tmp/${archive}" -C /tmp
+          sudo install -m 0755 "/tmp/sing-box-${version}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      # The asset name is discovered from the API rather than hardcoded: the
+      # release CDN is not reachable from every vantage, so a hardcoded guess
+      # that 404s would fail the job for a reason unrelated to the test.
+      # The tag pattern excludes the "-compatible-" builds on purpose.
+      - name: Install mihomo (the core the subscription is actually used with)
+        shell: bash
+        env:
+          PIN: ${{ github.event.inputs.mihomo_version }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/MetaCubeX/mihomo/releases"
+          if [ -n "${PIN}" ]; then endpoint="${api}/tags/${PIN}"; else endpoint="${api}/latest"; fi
+          url=$(curl -fsSL "$endpoint" | tr ',' '\n' \
+            | grep -oE 'https://[^"]*/mihomo-linux-amd64-v[0-9.]+\.gz' | head -1)
+          if [ -z "$url" ]; then echo "could not find a linux-amd64 mihomo asset"; exit 1; fi
+          echo "asset: $url"
+          curl -fsSL "$url" -o /tmp/mihomo.gz
+          gunzip -c /tmp/mihomo.gz > /tmp/mihomo
+          sudo install -m 0755 /tmp/mihomo /usr/local/bin/mihomo
+          mihomo -v
+
+      - name: Raise fd limit
+        run: |
+          ulimit -n 65535 2>/dev/null || true
+          echo "fd soft limit: $(ulimit -n)"
+
+      - name: Run the A/B
+        env:
+          AB_SAMPLE: ${{ github.event.inputs.sample }}
+          AB_CONTROL: ${{ github.event.inputs.control }}
+          AB_SEED: ${{ github.event.inputs.seed }}
+          AB_IDS: ${{ github.event.inputs.ids }}
+          AB_REPEAT: ${{ github.event.inputs.repeat }}
+          AB_OUT: ab-translate-result.json
+        run: python3 tools/ab_translate.py
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ab-translate
+          path: |
+            ab-translate-result.json
+            abwork/*.json
+            abwork/mihomo.log
+          if-no-files-found: warn
+          retention-days: 14

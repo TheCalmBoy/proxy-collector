@@ -31,7 +31,7 @@ var LOCAL_DIRECT_RULES = [
   "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
   "DOMAIN-SUFFIX,local,DIRECT"
 ];
-var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard"]);
+var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
   return new Response(body, { status, headers });
@@ -316,7 +316,7 @@ function parseProxy(uri, index) {
     return null;
   }
   const type = u.protocol.slice(0, -1).toLowerCase();
-  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard"].includes(type))
+  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"].includes(type))
     return null;
   const server = u.hostname;
   const port = Number(u.port);
@@ -352,6 +352,33 @@ function parseProxy(uri, index) {
       ...first("wnoisecount") ? { wnoisecount: first("wnoisecount") } : {},
       ...first("wnoisedelay") ? { wnoisedelay: first("wnoisedelay") } : {},
       ...first("wpayloadsize") ? { wpayloadsize: first("wpayloadsize") } : {}
+    };
+  }
+  if (type === "masque") {
+    const first = /* @__PURE__ */ __name22((...keys) => keys.map((key) => u.searchParams.get(key)).find((value) => value !== null && value !== "") || "", "first");
+    const privateKey = first("private-key", "privatekey", "secret") || (u.username ? decodeURIComponent(u.username) : "");
+    const publicKey = first("public-key", "publickey", "publicKey");
+    const ip = first("ip", "ipv4", "address").split(",")[0].trim();
+    const ipv6 = first("ipv6").split(",")[0].trim();
+    if (!server || !port || !privateKey || !publicKey)
+      return null;
+    const handshakeTimeout = Number(first("handshake-timeout", "handshakeTimeout"));
+    return {
+      type,
+      name,
+      server,
+      port,
+      "private-key": privateKey,
+      "public-key": publicKey,
+      ...ip ? { ip } : {},
+      ...ipv6 ? { ipv6 } : {},
+      sni: first("sni") || "www.cloudflare.com",
+      network: (first("network") || "h2").toLowerCase(),
+      "skip-cert-verify": first("skip-cert-verify", "skipCertVerify", "insecure") !== "false",
+      udp: first("udp") !== "false",
+      mtu: Number(first("mtu")) || 1400,
+      ...handshakeTimeout ? { "handshake-timeout": handshakeTimeout } : {},
+      ...first("uri") ? { uri: first("uri") } : {}
     };
   }
   if (type === "vless") {
@@ -437,7 +464,7 @@ __name(parseEntry, "parseEntry");
 __name2(parseEntry, "parseEntry");
 __name22(parseEntry, "parseEntry");
 function entryName(entry, index) {
-  const protocol = { wireguard: "WARP", vless: "VLESS", vmess: "VMess", trojan: "Trojan", ss: "Shadowsocks", socks: "SOCKS", socks5: "SOCKS", http: "HTTP" }[entry.type] || "Proxy";
+  const protocol = { wireguard: "WARP", masque: "MASQUE", vless: "VLESS", vmess: "VMess", trojan: "Trojan", ss: "Shadowsocks", socks: "SOCKS", socks5: "SOCKS", http: "HTTP" }[entry.type] || "Proxy";
   return safeName(`ET${index} - ${entry.name || protocol}`, `ET${index}`);
 }
 __name(entryName, "entryName");
@@ -1116,6 +1143,8 @@ var index_default = {
       return fail("client_format_not_detected_use_format_override", 406);
     if (entries.some((entry) => entry.proxy.type === "wireguard") && format !== "mihomo" && format !== "xray" && format !== "links")
       return fail("wireguard_entry_requires_mihomo_xray_or_links_format", 406);
+    if (entries.some((entry) => entry.proxy.type === "masque") && format !== "mihomo")
+      return fail("masque_entry_requires_mihomo_format", 406);
     const origin = (env.FEED_ORIGIN || "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages").replace(/\/$/, "");
     const feedPath = country ? `countries/${country}.txt` : "all.txt";
     const feed = await fetch(`${origin}/${feedPath}`, {
@@ -1249,7 +1278,6 @@ var index_default = {
       grouped.get(code).push(item);
     }
     const endpointIndex = healthEndpointIndex;
-    let variantSerial = 0;
     const countries = [...grouped.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([code, items]) => {
       const ranked = items.map((item) => ({
         item,
@@ -1261,15 +1289,16 @@ var index_default = {
       const variants = [];
       for (let index = 0; index < exits.length; index += 1) {
         if (entries.length) {
-          const slot = variantSerial;
-          variantSerial += 1;
-          const entry = entries[slot % entries.length];
-          variants.push({
-            proxy: exits[index],
-            name: friendlyExitName(code, index, exits[index], healthById, null, speedByEndpoint),
-            tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot % entries.length + 1}`,
-            dialerProxy: entry.tag
-          });
+          for (let slot = 0; slot < entries.length; slot += 1) {
+            const entry = entries[slot];
+            const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
+            variants.push({
+              proxy: exits[index],
+              name: `${prefix} - ${baseNames[index]}`,
+              tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`,
+              dialerProxy: entry.tag
+            });
+          }
         } else {
           variants.push({ proxy: exits[index], name: baseNames[index] });
         }
