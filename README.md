@@ -137,5 +137,10 @@ country allow-list — every country present in the data gets its own file.
 
 ## Upstream sources
 
-- `0xRadikal/Free-v2ray-Configs` — primary
-- `patterniha/Free-Configs` — secondary, added 2026-10-11
+Feeds are kept only on measured yield — `main.py` records the numbers behind each
+addition and removal, including the ones that were dropped again.
+
+- `0xRadikal/Free-v2ray-Configs` — `verified/configs.txt`; the only feed that has consistently earned its bandwidth
+- `hamedcode/port-based-v2ray-configs` — `sub/ss.txt` only; its vless/vmess/trojan files were dropped
+- `patterniha/Free-Configs` — `configs.txt`, added 2026-10-11
+- `iampedii/whitedns-sub` — `base64.txt`, added 2026-10-16; 142 endpoints with 68.3% already covered by the feeds above, pending a full-run survival number
