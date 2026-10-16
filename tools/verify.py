@@ -189,10 +189,16 @@ HTTPS_CONCURRENCY = max(1, int(os.getenv("VERIFY_HTTPS_CONCURRENCY", "100")))
 # sing-box 1.14 rejects any other value, and the whole process refuses to
 # start, so unknown flows must be filtered out during parsing.
 SUPPORTED_VLESS_FLOWS = frozenset({"xtls-rprx-vision"})
-# sing-box 1.14 shadowsocks ciphers. chacha20-poly1305 and friends appear in
-# the upstream source but are not built into the release we run.
+# Shadowsocks ciphers sing-box 1.14 accepts, verified one at a time with
+# `sing-box check`. The legacy stream ciphers (aes-*-cfb, aes-*-ctr, rc4-md5)
+# are built into the release and show up throughout the upstream feeds, so
+# rejecting them discarded configs the core runs fine. Bare "chacha20" is the
+# one name that is genuinely absent; "chacha20-ietf" is accepted.
 SUPPORTED_SS_METHODS = frozenset({
     "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
+    "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+    "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+    "rc4-md5", "chacha20-ietf", "xchacha20",
     "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
     "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
     "2022-blake3-chacha20-poly1305",
@@ -911,16 +917,69 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
             "alter_id": int(vmess.get("aid") or vmess.get("alterId") or 0),
             "security": str(vmess.get("scy") or vmess.get("security") or "auto"),
         }
-        if vmess.get("net"):
-            outbound["transport"] = _vmess_transport(vmess)
+        transport = _vmess_transport(vmess) if vmess.get("net") else None
+        if transport:
+            outbound["transport"] = transport
+        # A vmess payload carries its own TLS fields. The `tls` key was never
+        # read, so vmess-over-TLS was dialled in plaintext against a TLS port
+        # and could only ever fail.
+        if str(vmess.get("tls") or "").strip().lower() in ("tls", "reality", "xtls"):
+            outbound["tls"] = _tls_block(_vmess_params(vmess), host)
         return outbound
 
     parsed = urllib.parse.urlsplit(clean)
-    if parsed.scheme not in ("vless", "trojan", "ss", "socks", "socks5", "http", "https"):
+    if parsed.scheme not in (
+        "vless", "trojan", "ss", "socks", "socks5", "http", "https",
+        "hysteria2", "hy2", "tuic", "anytls",
+    ):
         raise UnsupportedConfig(f"unsupported_scheme_{parsed.scheme}")
 
     host, port = _host_port(parsed)
     params = urllib.parse.parse_qs(parsed.query)
+
+    # hysteria2 and anytls are TLS by definition and carry no `security`
+    # parameter. Both run over QUIC, so they take no TCP transport block.
+    if parsed.scheme in ("hysteria2", "hy2", "anytls"):
+        password = urllib.parse.unquote(parsed.username or "") or _first(
+            params, "password", "auth"
+        )
+        if not password:
+            raise UnsupportedConfig("missing_password")
+        kind = "hysteria2" if parsed.scheme in ("hysteria2", "hy2") else "anytls"
+        outbound = {
+            "type": kind,
+            "server": host,
+            "server_port": port,
+            "password": password,
+        }
+        if kind == "hysteria2":
+            obfs = _first(params, "obfs")
+            if obfs:
+                outbound["obfs"] = {"type": obfs}
+                obfs_password = _first(params, "obfs-password", "obfs_password")
+                if obfs_password:
+                    outbound["obfs"]["password"] = obfs_password
+        outbound["tls"] = _tls_block(params, host)
+        return outbound
+
+    if parsed.scheme == "tuic":
+        uuid = urllib.parse.unquote(parsed.username or "") or _first(params, "uuid", "id")
+        if not uuid:
+            raise UnsupportedConfig("missing_uuid")
+        outbound = {
+            "type": "tuic",
+            "server": host,
+            "server_port": port,
+            "uuid": uuid,
+        }
+        password = urllib.parse.unquote(parsed.password or "") or _first(params, "password")
+        if password:
+            outbound["password"] = password
+        congestion = _first(params, "congestion_control", "congestion")
+        if congestion:
+            outbound["congestion_control"] = congestion
+        outbound["tls"] = _tls_block(params, host)
+        return outbound
 
     if parsed.scheme in ("vless", "trojan"):
         uuid = parsed.username or _first(params, "uuid", "id")
@@ -1004,26 +1063,47 @@ def parse_proxy_uri(uri: str) -> dict[str, Any]:
 
 
 def _vmess_transport(vmess: dict) -> dict[str, Any] | None:
+    """Transport block for a vmess payload, or None for plain TCP.
+
+    A vmess payload spells its transport in JSON keys (`net` for the transport,
+    `type` for the TCP header) instead of query parameters, and it is subject to
+    the same rule as _common_transport: a transport sing-box cannot build is
+    rejected rather than dialled as raw TCP.
+    """
     net = str(vmess.get("net") or "").lower()
+    host = str(vmess.get("host") or "")
     if net == "tcp":
-        header_type = str(vmess.get("type") or "none")
-        if header_type == "http":
-            return {"type": "http", "host": [vmess.get("host", "")]}
-        return None
+        if str(vmess.get("type") or "none").lower() != "http":
+            return None
+        transport: dict[str, Any] = {
+            "type": "http",
+            "path": _safe_ws_path(vmess.get("path")),
+        }
+        if host:
+            transport["host"] = [host]
+        return transport
     if net in ("ws", "websocket"):
-        path = _safe_ws_path(vmess.get("path"))
-        host = vmess.get("host", "")
-        transport = {"type": "ws", "path": path}
+        transport = {"type": "ws", "path": _safe_ws_path(vmess.get("path"))}
         if host:
             transport["headers"] = {"Host": host}
         return transport
     if net == "grpc":
-        service = vmess.get("serviceName", "")
         transport = {"type": "grpc"}
+        service = vmess.get("serviceName", "")
         if service:
-            transport["service_name"] = service
+            transport["service_name"] = str(service)
         return transport
-    return None
+    if net == "httpupgrade":
+        transport = {"type": "httpupgrade", "path": _safe_ws_path(vmess.get("path"))}
+        if host:
+            transport["headers"] = {"Host": host}
+        return transport
+    if net in ("h2", "http"):
+        transport = {"type": "http", "path": _safe_ws_path(vmess.get("path"))}
+        if host:
+            transport["host"] = [host]
+        return transport
+    raise UnsupportedConfig(f"unsupported_vmess_net:{net}")
 
 
 def _safe_ws_path(raw: Any) -> str:
@@ -1043,6 +1123,22 @@ def _safe_ws_path(raw: Any) -> str:
     if "%" in path and not re.search(r"%[0-9A-Fa-f]{2}", path):
         raise UnsupportedConfig("invalid_ws_path")
     return path
+
+
+def _vmess_params(vmess: dict[str, Any]) -> dict[str, list[str]]:
+    """Expose a vmess payload's TLS fields the way _tls_block reads them.
+
+    A vmess link keeps its TLS settings in the base64 JSON rather than in a
+    query string, so they need the same names the query parser produces.
+    """
+    params: dict[str, list[str]] = {}
+    for key in ("sni", "host", "alpn", "fp"):
+        value = vmess.get(key)
+        if value not in (None, ""):
+            params[key] = [str(value)]
+    if _truthy(vmess.get("allowInsecure")) or _truthy(vmess.get("insecure")):
+        params["insecure"] = ["1"]
+    return params
 
 
 def _common_transport(params: dict[str, list[str]]) -> dict[str, Any] | None:
