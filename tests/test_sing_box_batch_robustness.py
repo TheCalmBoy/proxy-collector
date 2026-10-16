@@ -97,5 +97,70 @@ class TestOffenderDrop(unittest.TestCase):
         self.assertEqual(len(config["outbounds"]), before)
 
 
+class TestRealityPublicKey(unittest.TestCase):
+    """A malformed `pbk` costs the whole batch at sing-box startup, so it has to
+    be rejected at build time, where it costs one candidate and gets a counter."""
+
+    @staticmethod
+    def _reality_uri(pbk: str) -> str:
+        base = (
+            "vless://00000000-0000-4000-8000-000000000000@9.9.9.9:443"
+            "?security=reality&type=tcp&sni=a.example&sid=abcd&pbk="
+        )
+        return base + pbk
+
+    def test_unpadded_base64url_key_is_accepted(self):
+        key = "A" * 43  # 43 base64url chars == 32 bytes
+        outbound = verify.parse_proxy_uri(self._reality_uri(key))
+        self.assertEqual(outbound["tls"]["reality"]["public_key"], key)
+
+    def test_padded_base64_key_is_accepted(self):
+        key = "A" * 43 + "="
+        outbound = verify.parse_proxy_uri(self._reality_uri(key))
+        self.assertEqual(outbound["tls"]["reality"]["public_key"], key)
+
+    def test_hex_key_is_accepted(self):
+        key = "ab" * 32
+        outbound = verify.parse_proxy_uri(self._reality_uri(key))
+        self.assertEqual(outbound["tls"]["reality"]["public_key"], key)
+
+    def test_bad_key_is_rejected_with_a_reason(self):
+        # "A" * 64 is deliberately absent: that is a valid 32-byte hex key.
+        for bad in ("notakey", "A" * 40, "A" * 60, "aa!!bb"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(verify.UnsupportedConfig) as ctx:
+                    verify.parse_proxy_uri(self._reality_uri(bad))
+                self.assertEqual(str(ctx.exception), "invalid_reality_public_key")
+
+    def test_missing_key_keeps_its_original_reason(self):
+        uri = (
+            "vless://00000000-0000-4000-8000-000000000000@9.9.9.9:443"
+            "?security=reality&type=tcp&sni=a.example"
+        )
+        with self.assertRaises(verify.UnsupportedConfig) as ctx:
+            verify.parse_proxy_uri(uri)
+        self.assertEqual(str(ctx.exception), "reality_without_public_key")
+
+    def test_bad_key_is_counted_not_fatal_in_a_batch(self):
+        config, records, stats = verify.build_sing_box_config(
+            [_uris()[0], self._reality_uri("notakey")]
+        )
+        self.assertEqual(stats["unsupported"], 1)
+        self.assertEqual(stats["supported"], 1)
+        self.assertEqual(len(records), 1)
+
+
+class TestStartupStyleErrors(unittest.TestCase):
+    def test_initialize_outbound_index_is_dropped(self):
+        config, _records, _stats = verify.build_sing_box_config(_uris())
+        index = next(
+            i for i, ob in enumerate(config["outbounds"])
+            if str(ob.get("tag", "")).startswith("proxy-")
+        )
+        cid = config["outbounds"][index]["tag"].removeprefix("proxy-")
+        stderr = f"FATAL[0000] initialize outbound[{index}]: invalid public_key"
+        self.assertEqual(verify._drop_offending_outbounds(config, stderr), [cid])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -260,6 +260,27 @@ def _tls_requested(params: dict[str, list[str]], *, implied: bool = False) -> bo
     return _truthy(security)
 
 
+def _is_reality_public_key(value: str) -> bool:
+    """True when `value` is a plausible 32-byte reality public key.
+
+    Keys normally travel as unpadded base64url (43 chars); feeds also carry
+    padded standard base64 and occasionally 64-char hex. sing-box rejects the
+    entire config on one bad key, so anything else has to be filtered here.
+    """
+    text = value.strip()
+    if not text or len(text) > 64:
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{64}", text):
+        return True
+    if not re.fullmatch(r"[A-Za-z0-9+/_=-]+", text):
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except Exception:
+        return False
+    return len(raw) == 32
+
+
 def _tls_block(params: dict[str, list[str]], host: str) -> dict[str, Any]:
     """Build the sing-box `tls` block for one link.
 
@@ -284,10 +305,16 @@ def _tls_block(params: dict[str, list[str]], host: str) -> dict[str, Any]:
 
     reality = (_first(params, "security", "tls") or "").strip().lower() == "reality"
     if reality:
-        public_key = _first(params, "pbk", "public_key")
+        public_key = (_first(params, "pbk", "public_key") or "").strip()
         if not public_key:
             # Probing this as plain TLS would guarantee a false negative.
             raise UnsupportedConfig("reality_without_public_key")
+        if not _is_reality_public_key(public_key):
+            # A malformed key is not one candidate's problem: sing-box refuses
+            # the ENTIRE batch ("initialize outbound[9534]: invalid public_key"),
+            # which cost a whole 22k-candidate run. Reject it here, where it
+            # costs one candidate and gets a reason counter.
+            raise UnsupportedConfig("invalid_reality_public_key")
         block: dict[str, Any] = {"enabled": True, "public_key": public_key}
         short_id = _first(params, "sid", "short_id")
         if short_id:
@@ -1656,7 +1683,12 @@ def _drop_offending_outbounds(config: dict, stderr_text: str) -> list[str]:
     Returns the dropped config ids, or [] when the error names nothing we can
     attribute to one outbound (in which case the caller must give up loudly).
     """
-    indices = sorted({int(m) for m in re.findall(r"outbounds\[(\d+)\]", stderr_text)}, reverse=True)
+    # sing-box names offenders in two shapes: `outbounds[N].field: ...` when the
+    # JSON decode fails, and `initialize outbound[N]: ...` when a decoded
+    # outbound fails validation at startup (e.g. a bogus reality public key).
+    indices = sorted(
+        {int(m) for m in re.findall(r"outbounds?\[(\d+)\]", stderr_text)}, reverse=True
+    )
     outbounds = list(config.get("outbounds") or [])
     final_tag = (config.get("route") or {}).get("final")
     dropped: list[str] = []
