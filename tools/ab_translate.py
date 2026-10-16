@@ -97,7 +97,7 @@ def _is_suspect(uri: str) -> bool:
     return sec in SUSPECT_SECURITY or (q.get("type") or "").lower() in SUSPECT_TRANSPORT
 
 
-def load_sample(n_fail: int, n_control: int, seed: int) -> tuple[list[str], list[str], list[str]]:
+def load_sample(n_fail: int, n_control: int, seed: int, ids: str = "") -> tuple[list[str], list[str], list[str]]:
     feed = [_base(l) for l in _fetch(RAD_URL).splitlines() if l.strip() and "://" in l]
     try:
         pub = json.loads(_fetch(PUBLISHED_URL))
@@ -111,6 +111,16 @@ def load_sample(n_fail: int, n_control: int, seed: int) -> tuple[list[str], list
     rng.shuffle(pool)
     fails = pool[:n_fail]
 
+    if ids:
+        # Pinned replay: re-dial the exact configs an earlier run named. The pool
+        # shifts between runs (the feed is live and our published set moves), so a
+        # pinned list is the only way to compare two builds on the same configs.
+        want = {i.strip().upper() for i in ids.split(",") if i.strip()}
+        fails = sorted({u for u in feed if verify._tag(u)[:12].upper() in want})
+        missing = sorted(want - {verify._tag(u)[:12].upper() for u in fails})
+        print(f"PINNED replay: {len(fails)}/{len(want)} requested ids found in the feed"
+              + (f" | not in feed: {missing}" if missing else ""))
+
     ctrl_pool = sorted({u for u in feed if u in live and _is_suspect(u)})
     rng.shuffle(ctrl_pool)
     controls = ctrl_pool[:n_control]
@@ -118,6 +128,22 @@ def load_sample(n_fail: int, n_control: int, seed: int) -> tuple[list[str], list
     print(f"feed={len(feed)} published={len(live)} suspect+dead pool={len(pool)} "
           f"sampled_fails={len(fails)} controls={len(controls)} canary=1")
     return fails, controls, [CANARY]
+
+
+async def _probe_retry(port: int, repeat: int) -> tuple[bool, float | None]:
+    """Probe one config up to `repeat` times; it counts as open if ANY try works.
+
+    One attempt cannot separate "our translation emitted a broken config" from
+    "this entry is flaky right now". At 4 mismatches out of 30 that difference
+    decides the verdict, and the same entry did open under mihomo while failing
+    under ours, then behave differently on the next run.
+    """
+    latency: float | None = None
+    for _ in range(max(1, repeat)):
+        ok, latency = await verify._https_request(port, PROBE_URL, PROBE_TIMEOUT)
+        if ok:
+            return True, latency
+    return False, latency
 
 
 async def _probe_all(ports: dict[str, int], label: str) -> dict[str, dict]:
@@ -128,7 +154,7 @@ async def _probe_all(ports: dict[str, int], label: str) -> dict[str, dict]:
     async def one(uri: str):
         async with sem:
             try:
-                ok, latency = await verify._https_request(ports[uri], PROBE_URL, PROBE_TIMEOUT)
+                ok, latency = await _probe_retry(ports[uri], int(os.getenv("AB_REPEAT", "1")))
             except Exception as exc:
                 ok, latency = False, None
                 out[uri] = {"ok": False, "latency_ms": None, "error": f"{type(exc).__name__}"}
@@ -274,7 +300,7 @@ rules:
                 if now != n:
                     out[u] = {"ok": False, "latency_ms": None, "error": f"select_failed:{now}"}
                     continue
-                ok, latency = await verify._https_request(mixed_port, PROBE_URL, PROBE_TIMEOUT)
+                ok, latency = await _probe_retry(mixed_port, int(os.getenv("AB_REPEAT", "1")))
                 out[u] = {"ok": bool(ok), "latency_ms": round(latency, 1) if latency else None}
             except Exception as exc:
                 out[u] = {"ok": False, "latency_ms": None, "error": type(exc).__name__}
@@ -343,6 +369,10 @@ def main() -> int:
     ap.add_argument("--sample", type=int, default=int(os.getenv("AB_SAMPLE", "30")))
     ap.add_argument("--control", type=int, default=int(os.getenv("AB_CONTROL", "8")))
     ap.add_argument("--seed", type=int, default=int(os.getenv("AB_SEED", "1337")))
+    ap.add_argument("--ids", default=os.getenv("AB_IDS", ""),
+                    help="comma-separated config ids to replay (see sample_ids in a result)")
+    ap.add_argument("--repeat", type=int, default=int(os.getenv("AB_REPEAT", "1")),
+                    help="probe attempts per config per arm; opened if any attempt works")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--out", default=os.getenv("AB_OUT", "ab-translate-result.json"))
     args = ap.parse_args()
@@ -350,7 +380,8 @@ def main() -> int:
         os.environ["AB_DRY_RUN"] = "1"
 
     root = pathlib.Path(os.getcwd())
-    fails, controls, canary = load_sample(args.sample, args.control, args.seed)
+    os.environ["AB_REPEAT"] = str(args.repeat)
+    fails, controls, canary = load_sample(args.sample, args.control, args.seed, args.ids)
     if args.dry_run:
         print("\n-- arm A: building sing-box config --")
         arm_a(fails, controls, canary)
@@ -379,6 +410,9 @@ def main() -> int:
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "probe_url": PROBE_URL,
+        # Recorded so an identical config set can be replayed later; ids are
+        # sha256 prefixes, never credentials.
+        "sample_ids": [verify._tag(u)[:12] for u in fails],
         "counts": {"sampled": len(fails), "controls": len(controls)},
         "opened": {
             "ours": sum(1 for u in fails if a.get(u, {}).get("ok")),

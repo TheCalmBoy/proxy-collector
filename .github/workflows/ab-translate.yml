@@ -17,6 +17,14 @@ on:
         description: "Sampling seed (same seed = same sample)"
         default: "1337"
         required: false
+      ids:
+        description: "Replay these config ids instead of sampling (comma separated; see sample_ids in a prior result)"
+        default: ""
+        required: false
+      repeat:
+        description: "Probe attempts per config per arm; a config counts as open if any attempt succeeds"
+        default: "1"
+        required: false
       mihomo_version:
         description: "mihomo tag to test with (empty = latest release)"
         default: ""
@@ -82,6 +90,8 @@ jobs:
           AB_SAMPLE: ${{ github.event.inputs.sample }}
           AB_CONTROL: ${{ github.event.inputs.control }}
           AB_SEED: ${{ github.event.inputs.seed }}
+          AB_IDS: ${{ github.event.inputs.ids }}
+          AB_REPEAT: ${{ github.event.inputs.repeat }}
           AB_OUT: ab-translate-result.json
         run: python3 tools/ab_translate.py
 
