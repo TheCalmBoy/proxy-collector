@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "/home/pedi/proxy-collector-ech/workers/proxy-chain-subscription/index.js";
+import worker from "../index.js";
 
 const FEED = "http://1.2.3.4:8080#DE-1\nhttp://5.6.7.8:8080#NL-1\nhttp://6.6.6.6:8080#FR-1\n";
 

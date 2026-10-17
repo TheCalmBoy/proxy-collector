@@ -59,7 +59,7 @@ jobs:
           node-version: "22"
 
       - name: Run Worker test suite
-        run: node --test workers/proxy-chain-subscription/test/
+        run: node --test workers/proxy-chain-subscription/test/*.test.mjs
 
       # The consistency checker exits non-zero only past --max-mismatch, so at
       # the default 10% budget this passes on live data (measured 6.2%). Raise
