@@ -1,0 +1,11 @@
+trojan://UX82473651@3.34.131.153:443?security=tls&sni=pretty-rat.rooster465.autos#KR-DC-AS16509-A71E599E5373
+trojan://UX82473651@3.34.192.47:443?sni=central-jawfish.rooster465.autos&type=tcp#KR-DC-AS16509-BB0EC58FD72C
+trojan://UX82473651@3.35.168.225:443?allowInsecure=1&sni=noted-cougar.rooster465.autos&type=tcp#KR-DC-AS16509-A1C31FCA53AC
+trojan://UX82473651@43.201.100.203:443?security=tls&insecure=0&headerType=none&fp=chrome&type=tcp&allowInsecure=0&sni=optimum-snapper.rooster465.autos#KR-DC-AS16509-DE1635E713E7
+trojan://UX82473651@central-jawfish.rooster465.autos:443?sni=central-jawfish.rooster465.autos&type=tcp&fp=chrome#KR-DC-AS16509-CAFBC9A1313A
+trojan://UX82473651@noted-cougar.rooster465.autos:443?allowInsecure=1&sni=noted-cougar.rooster465.autos&type=tcp#KR-DC-AS16509-5D963D97C0CC
+trojan://UX82473651@optimum-snapper.rooster465.autos:443?allowInsecure=1&sni=optimum-snapper.rooster465.autos&type=tcp#KR-DC-AS16509-E3D83CAB66BF
+trojan://UX82473651@pretty-rat.rooster465.autos:443?security=tls&sni=pretty-rat.rooster465.autos#KR-DC-AS16509-1757216C1F62
+vless://583cc910-b57c-4dd0-a4a7-cea51a30b032@64.176.231.183:443?flow=xtls-rprx-vision&fp=chrome&host=www.apple.com&path=%2F&pbk=GR_zPAgxF9PZ70Z9UpSmMlcd2STyoAC0fZTSHkTTCGE&security=reality&sid=ca193e889d958f81&sni=www.apple.com&type=tcp#KR-DC-AS20473-CB7DEEEAE685
+vless://a2de9567-9646-45a9-a410-7303a43bdb6c@151.245.106.49:2053?fp=chrome&pbk=F6C33iIbfmt1mUsuLTarIC8ygdHKMqsaGvrSQltyxUo&security=reality&sid=429499c03d4cc8a0&sni=www.cloudflare.com&type=tcp#KR-RES-AS63473-DAB7E157FD7C
+vmess://eyJ2IjoiMiIsInBzIjoi8J+HsPCfh7cgfCBAV2hpdGVETlMgfCBLUjEwMnwxLjFNQi9zfEROU09LfEdQVOKBui1LUiIsImFkZCI6IjE0MC4yMzguMi4yNTAiLCJwb3J0IjoiNDQzIiwiaWQiOiI0MWE3MDg5YS0wNDBiLTQ1MzgtOGI4ZC0wMTA5MDI0MDViZGUiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6InRjcCIsInR5cGUiOiIiLCJ0bHMiOiIifQ==#KR-DC-AS31898-156D1A77077D
