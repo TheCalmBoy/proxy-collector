@@ -497,6 +497,18 @@ function yamlScalar(value) {
 __name(yamlScalar, "yamlScalar");
 __name2(yamlScalar, "yamlScalar");
 __name22(yamlScalar, "yamlScalar");
+// `socks` is the sing-box spelling of the protocol; mihomo only knows `socks5`.
+// mihomo refuses the ENTIRE profile when a single proxy names a type it does not
+// have ("proxy 74: unsupport proxy type: socks"), so one SOCKS5 exit node made
+// every client fail to load the subscription -- the failure looks like a broken
+// subscription, not like one bad node. Translate at the dialect boundary, which
+// is here: the sing-box emitter keeps its own spelling.
+function mihomoType(type) {
+  return type === "socks" ? "socks5" : type;
+}
+__name(mihomoType, "mihomoType");
+__name2(mihomoType, "mihomoType");
+__name22(mihomoType, "mihomoType");
 // Normalises the share-link `ech` param. Accepts:
 //   base64 ECHConfigList                           -> { config }
 //   "cloudflare-ech.com"                           -> { queryServerName }
@@ -674,7 +686,7 @@ function mihomo(entries, countries, healthById, speedByEndpoint = null, options 
         ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
       );
     } else {
-      const { ech, ...scalarProxy } = { ...proxy, name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
+      const { ech, ...scalarProxy } = { ...proxy, type: mihomoType(proxy.type), name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
       lines.push(`  -\n${scalarFields(scalarProxy)}`);
       if (proxy.reality)
         lines.push(`    reality-opts:
