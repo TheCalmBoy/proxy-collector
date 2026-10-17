@@ -46,6 +46,21 @@ jobs:
       - name: Run test suite
         run: python -m unittest discover -s tests -v
 
+      # The Worker has its own suite (node:test) and nothing ran it, so a broken
+      # profile could reach a live subscription with every gate green: mihomo
+      # refuses the ENTIRE profile when one proxy names a type it does not have
+      # ("unsupport proxy type: socks"), and one SOCKS5 exit node was enough to
+      # make every client fail to load the subscription. Network-free: every
+      # fetch in these tests is stubbed, so it belongs here rather than in
+      # update.yml.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Worker test suite
+        run: node --test workers/proxy-chain-subscription/test/*.test.mjs
+
       # The consistency checker exits non-zero only past --max-mismatch, so at
       # the default 10% budget this passes on live data (measured 6.2%). Raise
       # it deliberately once the upstream geolocation paths agree, not before.

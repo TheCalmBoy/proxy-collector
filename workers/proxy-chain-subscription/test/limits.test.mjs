@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker, { reply } from "/home/pedi/proxy-collector-ech/workers/proxy-chain-subscription/index.js";
+import worker, { reply } from "../index.js";
 
 // The worker deliberately has NO size caps: no per-entry byte limit, no entry
 // count limit, and no response byte budget. This file pins that contract, so
