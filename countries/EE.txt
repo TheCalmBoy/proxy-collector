@@ -1,0 +1,1 @@
+vless://78559873-84ef-4cab-a0b2-46d4cd20de4a@est.luxes.network:8443?encryption=none&type=ws&security=tls&sni=est.luxes.network&fp=firefox&alpn=http/1.1&path=/assets#CA-DC-AS13335-A9363FE9EA30

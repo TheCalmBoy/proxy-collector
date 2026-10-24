@@ -1,0 +1,2 @@
+vless://39947382-3212-41c9-bc3a-589574ac8b23@84.235.244.108:22573?host=uae.unixzone.us&security=none&type=ws#AE-DC-AS31898-6FF358797D42
+vless://39947382-3212-41c9-bc3a-589574ac8b23@uae.unixzone.us:22573?fp=chrome&security=none&sni=uae.unixzone.us&type=ws#AE-DC-AS31898-A5684F076F7A

@@ -1,0 +1,2 @@
+ss://YWVzLTI1Ni1nY206bEdxczk1UWtGSG8yTlY=@141.164.45.187:5498#KR-DC-AS20473-DA48489E59AE
+vless://a2de9567-9646-45a9-a410-7303a43bdb6c@151.245.106.49:2053?fp=random&host=www.cloudflare.com&pbk=F6C33iIbfmt1mUsuLTarIC8ygdHKMqsaGvrSQltyxUo&security=reality&sid=429499c03d4cc8a0&sni=www.cloudflare.com&type=tcp#KR-RES-AS63473-480E050D52CA

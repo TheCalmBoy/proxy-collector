@@ -1,0 +1,13 @@
+ss://YWVzLTEyOC1nY206c2hhZG93c29ja3M=@141.98.101.181:443#GB-RES-AS9009-FA3A32A8EA55
+ss://YWVzLTI1Ni1nY206UmV4bkJnVTdFVjVBRHhH@94.156.250.148:7001#BG-RES-AS136258-7A78B88243DF
+ss://YWVzLTI1Ni1nY206WlJwZ2FCZUd4dEVOSVhndmhwa1pCS3o5R25XUlMyZFljeDlPK2EyaXdOND0=@185.176.206.9:19999#GB-RES-AS63023-6C214AF72224
+vless://0b6a937e-5b0e-49ca-b31e-f03f290e97cf@103.91.147.208:443?security=reality&type=tcp&sni=gb.ozon.ru&fp=edge&flow=xtls-rprx-vision&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&encryption=none#FR-RES-AS219202-B74539B7BD7A
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@193.160.140.125:443?security=reality&type=tcp&packetEncoding=none&allowInsecure=1&sni=gb.ozon.ru&fp=qq&flow=xtls-rprx-vision&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc#RU-DC-AS216334-36A78755E51E
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@193.223.104.143:443?security=reality&type=tcp&packetEncoding=none&allowInsecure=1&sni=gb.ozon.ru&fp=chrome&flow=xtls-rprx-vision&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc#RU-DC-AS216334-3364239C5F15
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@45.151.71.142:443?encryption=none&flow=xtls-rprx-vision&fp=firefox&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&security=reality&sni=gb.ozon.ru&type=tcp#RU-RES-AS219202-9093C518A197
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@45.151.71.165:443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=gb.ozon.ru&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&fp=firefox#RU-RES-AS219202-A351538B829E
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@51.77.108.218:8443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=ozon.ru&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc&fp=firefox#GB-DC-AS16276-5B97AF2B67D7
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@54.37.2.245:8443?security=reality&type=tcp&packetEncoding=none&allowInsecure=1&sni=ozon.ru&fp=firefox&flow=xtls-rprx-vision&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc#GB-DC-AS16276-6751DFC5E999
+vless://8a1f8853-9a71-4ef2-a64c-4f0a94c2e14b@54.37.5.203:8443?security=reality&type=tcp&packetEncoding=none&allowInsecure=1&sni=ozon.ru&fp=firefox&flow=xtls-rprx-vision&pbk=SbVKOEMjK0sIlbwg4akyBg5mL5KZwwB-ed4eEE7YnRc#GB-DC-AS16276-76E93CDA4D24
+vless://8e790f25-1d71-4601-9fb0-d503931dcfca@51.89.194.151:2053?fp=random&host=www.apple.com&pbk=xPEBx4wUmwAAv4ikUALNBf5wH6TRhyeQ0Q2pcNELsV0&security=reality&sid=d051f678212f9d54&sni=www.apple.com&type=tcp#GB-DC-AS16276-E21FE385B70F
+vless://c6362720-0931-4b91-b187-d8ecf3149734@connect.hondamotor.site:10002?host=connect.hondamotor.site&path=%2F&type=tcp#FR-DC-AS16276-8D0115EDFCE2

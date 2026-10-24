@@ -1,0 +1,2 @@
+vless://7aec627e-a258-4ded-9fd9-fbd7c024f950@151.242.85.236:443?flow=xtls-rprx-vision&fp=firefox&host=addons.mozilla.org&path=%2F&pbk=gUu1n11Ef_GEoatNQzJJucvIjGTt4qxOWdxMzjoHwDM&security=reality&sid=9b6fa4047c24629f&sni=addons.mozilla.org&type=tcp#HK-RES-AS63473-B6901C3B1C89
+vless://91ad30e9-ab06-4b4c-9fb9-1c2aa97d8b3a@165.154.63.139:443?flow=xtls-rprx-vision&fp=chrome&pbk=AE81BrwMc8-kwGEIA1LhzaL03er0Qwt2V-fFy76F5jQ&security=reality&sid=ca4aedd4&sni=www.amazon.com&type=tcp#HK-DC-AS135377-035ADCFEDA19
