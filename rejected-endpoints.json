@@ -1,0 +1,124 @@
+{
+  "generated_at": "2026-10-24T12:42:51.176117+00:00",
+  "endpoints": [
+    {
+      "server": "103.91.147.208",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.155994+00:00"
+    },
+    {
+      "server": "188.225.27.229",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-mixed",
+      "rejected_at": "2026-10-24T12:42:51.151729+00:00"
+    },
+    {
+      "server": "193.151.160.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.159494+00:00"
+    },
+    {
+      "server": "193.151.163.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.154524+00:00"
+    },
+    {
+      "server": "193.160.140.125",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.157130+00:00"
+    },
+    {
+      "server": "193.223.104.143",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.163229+00:00"
+    },
+    {
+      "server": "195.123.235.177",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.152483+00:00"
+    },
+    {
+      "server": "202.50.253.36",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.154058+00:00"
+    },
+    {
+      "server": "202.50.253.54",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.166567+00:00"
+    },
+    {
+      "server": "202.50.253.72",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.151536+00:00"
+    },
+    {
+      "server": "202.50.253.81",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.146156+00:00"
+    },
+    {
+      "server": "202.50.253.99",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.156814+00:00"
+    },
+    {
+      "server": "45.151.71.142",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.154718+00:00"
+    },
+    {
+      "server": "45.151.71.164",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-mixed",
+      "rejected_at": "2026-10-24T12:42:51.152198+00:00"
+    },
+    {
+      "server": "45.151.71.165",
+      "server_port": 443,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.158995+00:00"
+    },
+    {
+      "server": "82.110.60.9",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-10-24T12:42:51.151059+00:00"
+    },
+    {
+      "server": "edge10.cyrionflare.com",
+      "server_port": 2052,
+      "scheme": "vless",
+      "reason": "egress-dynamic-mixed",
+      "rejected_at": "2026-10-24T12:42:51.146900+00:00"
+    }
+  ]
+}
