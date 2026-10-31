@@ -1,0 +1,5 @@
+trojan://5t6i121em5lkmsmk@158.247.255.150:48851?type=tcp&security=tls&sni=kr002.zestapp778.com&fp=firefox#KR-DC-AS20473-110A4D32ADEC
+trojan://5t6i121em5lkmsmk@kr002.zestapp778.com:48851?allowInsecure=1&sni=kr002.zestapp778.com&type=tcp#KR-DC-AS20473-34FDF2F54BAD
+trojan://dc9e33c7a6df4164@168.110.119.243:20039?security=tls&sni=ikr100a.zxom.eu.org#KR-DC-AS31898-8E00ACB5FE2D
+vless://27c5483f-17f4-48ae-9a04-def53d88440d@152.69.226.63:25555?path=%2F&security=none&type=ws#KR-DC-AS31898-2088966570B2
+vless://a2de9567-9646-45a9-a410-7303a43bdb6c@151.245.106.49:2053?fp=chrome&pbk=F6C33iIbfmt1mUsuLTarIC8ygdHKMqsaGvrSQltyxUo&security=reality&sid=429499c03d4cc8a0&sni=www.cloudflare.com&type=raw#KR-RES-AS63473-899628395BB0
