@@ -1,0 +1,2 @@
+vless://db80088c-32a1-4cb8-a907-0f3cb7844152@85.155.149.190:443?encryption=none&flow=xtls-rprx-vision&pbk=pGCqNljaUIUVC7xpHa9nFnu6vsQ0OX3QyfvYMhLZuWY&security=reality&sid=bee10b047804c637&sni=hk1.japancase.site&type=tcp&fp=chrome#HK-RES-AS213535-1420D380AD0D
+vless://db80088c-32a1-4cb8-a907-0f3cb7844152@hk1.japancase.site:443?encryption=none&flow=xtls-rprx-vision&pbk=pGCqNljaUIUVC7xpHa9nFnu6vsQ0OX3QyfvYMhLZuWY&security=reality&sid=bee10b047804c637&sni=hk1.japancase.site&type=tcp&fp=chrome#HK-RES-AS213535-D03168035C32

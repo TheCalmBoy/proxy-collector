@@ -1,0 +1,5 @@
+vless://1d4e18bd-1f26-4915-b35a-7ace4826e76a@194.61.31.126:2053?fp=random&host=www.apple.com&pbk=PuAGLfJy6cu1TNoHuKIKSxPetCbZI41fc8hQDjWPIAU&security=reality&sid=9980e0609b0d3891&sni=www.apple.com&type=tcp#FR-DC-AS141995-D6E2E17889B9
+vless://6bdc8320-7eae-46fc-be08-f5f54e65dfc8@178.212.35.198:443?fp=firefox&pbk=3LbVuwKpQv55GngyRhvGl9KyAHIDAgvJx_VRM5mUD2Q&security=reality&sid=6bdc8320&sni=www.cloudflare.com&type=tcp#FR-DC-AS141995-069FF214E5DC
+vless://6bdc8320-7eae-46fc-be08-f5f54e65dfc8@in.smrtai.top:443?fp=chrome&path=%2F&pbk=3LbVuwKpQv55GngyRhvGl9KyAHIDAgvJx_VRM5mUD2Q&security=reality&sid=6bdc8320&sni=www.cloudflare.com&type=tcp#FR-DC-AS141995-68A8458D35F9
+vless://db80088c-32a1-4cb8-a907-0f3cb7844152@107.181.139.144:443?type=tcp&security=reality&flow=xtls-rprx-vision&fp=firefox&pbk=lDBwW08dYwPP-7dVxYQ_clzfFwsDHLlclz9K2cEV6DM&sid=df7b054cfc29800c&sni=in1.japancase.site#IN-RES-AS213535-7C7306C2110F
+vless://db80088c-32a1-4cb8-a907-0f3cb7844152@in1.japancase.site:443?type=tcp&security=reality&flow=xtls-rprx-vision&fp=ios&pbk=lDBwW08dYwPP-7dVxYQ_clzfFwsDHLlclz9K2cEV6DM&sid=df7b054cfc29800c&sni=in1.japancase.site#IN-RES-AS213535-4CA36F178F0D

@@ -1,0 +1,2 @@
+trojan://5t6i121em5lkmsmk@38.60.233.126:33079?security=tls&sni=th001.zestapp778.com&type=tcp&fp=chrome#TH-DC-AS154177-8715507AB94B
+trojan://5t6i121em5lkmsmk@th001.zestapp778.com:33079?allowInsecure=1&sni=th001.zestapp778.com&type=tcp#TH-DC-AS154177-AFCB462662A7

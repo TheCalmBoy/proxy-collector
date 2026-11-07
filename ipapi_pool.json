@@ -1,0 +1,167 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11080
+    },
+    {
+      "type": "mixed",
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11081
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "server": "129.153.77.162",
+      "server_port": 8443,
+      "password": "1r0d8slwbpg1iebe",
+      "obfs": {
+        "type": "salamander",
+        "password": "f7yrrbc9h6b1krnk"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "www.apple.com",
+        "insecure": true
+      },
+      "tag": "p0"
+    },
+    {
+      "type": "hysteria2",
+      "server": "155.248.209.237",
+      "server_port": 33333,
+      "password": "bce6c821-200d-421f-bf3d-7159e5246ea0",
+      "tls": {
+        "enabled": true,
+        "server_name": "155.248.209.237",
+        "insecure": true
+      },
+      "tag": "p1"
+    },
+    {
+      "type": "hysteria2",
+      "server": "hy2.123266.xyz",
+      "server_port": 33333,
+      "password": "bce6c821-200d-421f-bf3d-7159e5246ea0",
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2.123266.xyz",
+        "insecure": true
+      },
+      "tag": "p2"
+    },
+    {
+      "type": "hysteria2",
+      "server": "5.45.100.100",
+      "server_port": 51511,
+      "password": "miaoge110",
+      "tls": {
+        "enabled": true,
+        "server_name": "5.45.100.100",
+        "insecure": true
+      },
+      "tag": "p3"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "38.145.220.193",
+      "server_port": 8443,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "jUbDNsFamcyDfpm+rI3Zyw==",
+      "tag": "p4"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "193.29.139.234",
+      "server_port": 8080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "4a2rfixophdjffa8KVA4Aa",
+      "tag": "p5"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "54.36.174.140",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "6heexyz",
+      "tag": "p6"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "pl140.vpnbook.com",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "6heexyz",
+      "tag": "p7"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "185.213.23.63",
+      "server_port": 990,
+      "method": "chacha20-ietf-poly1305",
+      "password": "ARgvGZywA+gacgGV26Bvmu05+wZmRW/j+AdU+Z8Bt44=",
+      "tag": "p8"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "152.53.1.57",
+      "server_port": 8388,
+      "method": "chacha20-ietf-poly1305",
+      "password": "AdawffFMHymlasRb0VOP3HFf7sTG5sJx",
+      "tag": "p9"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "193.29.139.168",
+      "server_port": 8080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "QCXDxuDlTTMD7jtgHUjIoj",
+      "tag": "p10"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "193.29.139.212",
+      "server_port": 8080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "QCXDxuDlTTMD7jtgHUjIoj",
+      "tag": "p11"
+    },
+    {
+      "type": "selector",
+      "tag": "pool",
+      "outbounds": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9",
+        "p10",
+        "p11"
+      ],
+      "default": "p0",
+      "interrupt_exist_connections": false
+    }
+  ],
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:11082"
+    }
+  },
+  "route": {
+    "final": "pool",
+    "auto_detect_interface": true
+  }
+}
