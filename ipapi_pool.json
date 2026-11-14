@@ -1,0 +1,189 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11080
+    },
+    {
+      "type": "mixed",
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11081
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "server": "177.202.65.158",
+      "server_port": 443,
+      "password": "247802ca-0fbb-428a-b807-91a6e571b5c7",
+      "obfs": {
+        "type": "salamander",
+        "password": "AJyvWNsoDgVkMkboZ3juMJXYNRf6uEQE"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2-fi2.snobvpn.online",
+        "insecure": true
+      },
+      "tag": "p0"
+    },
+    {
+      "type": "hysteria2",
+      "server": "201.58.190.235",
+      "server_port": 443,
+      "password": "247802ca-0fbb-428a-b807-91a6e571b5c7",
+      "obfs": {
+        "type": "salamander",
+        "password": "sFQIE4F3SbaXCYoCQTY-4YvYiif8__By"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2-pl.snobvpn.online",
+        "insecure": true
+      },
+      "tag": "p1"
+    },
+    {
+      "type": "hysteria2",
+      "server": "51.15.19.206",
+      "server_port": 8443,
+      "password": "HowdyHysteria2023w0W",
+      "obfs": {
+        "type": "salamander",
+        "password": "HysteriaHowdy"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vkvd127.mycdn.me",
+        "insecure": true
+      },
+      "tag": "p2"
+    },
+    {
+      "type": "hysteria2",
+      "server": "155.248.209.237",
+      "server_port": 33333,
+      "password": "bce6c821-200d-421f-bf3d-7159e5246ea0",
+      "tls": {
+        "enabled": true,
+        "server_name": "155.248.209.2",
+        "insecure": true
+      },
+      "tag": "p3"
+    },
+    {
+      "type": "hysteria2",
+      "server": "hy2.123266.xyz",
+      "server_port": 33333,
+      "password": "bce6c821-200d-421f-bf3d-7159e5246ea0",
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2.123266.xyz"
+      },
+      "tag": "p4"
+    },
+    {
+      "type": "hysteria2",
+      "server": "62.210.124.146",
+      "server_port": 22000,
+      "password": "dongtaiwang.com",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "insecure": true
+      },
+      "tag": "p5"
+    },
+    {
+      "type": "hysteria2",
+      "server": "130.49.161.70",
+      "server_port": 443,
+      "password": "p7Q76LzlnS4hIzr1W3staBOnUe_WwSkR",
+      "obfs": {
+        "type": "salamander",
+        "password": "rG07s3COMIEvdnQipRyWzx_H_2xygNC3"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "hy2.aspidnet.xyz"
+      },
+      "tag": "p6"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "47.254.169.3",
+      "server_port": 443,
+      "method": "2022-blake3-chacha20-poly1305",
+      "password": "8yO3ANWefuuGs1lRKXECQA1FEhxlWFV2ppQMcBaZo5Y=",
+      "tag": "p7"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "103.11.76.248",
+      "server_port": 28679,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "NzJlOTQ5NWYtM2ZkYi00Cg==",
+      "tag": "p8"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "35.236.180.222",
+      "server_port": 14514,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "b7I6g7l7fJhBaMInJ+zkzw==",
+      "tag": "p9"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "amasoid.ddns.net",
+      "server_port": 14514,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "b7I6g7l7fJhBaMInJ+zkzw==",
+      "tag": "p10"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "38.145.220.193",
+      "server_port": 8443,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "jUbDNsFamcyDfpm+rI3Zyw==",
+      "tag": "p11"
+    },
+    {
+      "type": "selector",
+      "tag": "pool",
+      "outbounds": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9",
+        "p10",
+        "p11"
+      ],
+      "default": "p0",
+      "interrupt_exist_connections": false
+    }
+  ],
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:11082"
+    }
+  },
+  "route": {
+    "final": "pool",
+    "auto_detect_interface": true
+  }
+}
