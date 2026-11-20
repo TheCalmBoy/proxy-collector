@@ -127,10 +127,10 @@ function configDisplayName(proxy) {
 __name(configDisplayName, "configDisplayName");
 __name2(configDisplayName, "configDisplayName");
 __name22(configDisplayName, "configDisplayName");
-function friendlyExitName(country, index, proxy, healthById, entrypointNumber = null, speedByEndpoint = null) {
+function friendlyExitName(country, index, proxy, healthById, entrypointNumber = null, speedByEndpoint = null, endpointIndex = null) {
   const serial = String(index + 1).padStart(2, "0");
   const remark = /^([A-Z]{2})-(RES|DC|UNKNOWN)-(.+)-([A-F0-9]{6,12})$/.exec(proxy.name || "");
-  const health = resolveHealthFor({ proxy }, healthById, buildEndpointIndex(healthById)) || (remark ? healthById[remark[4]] : null);
+  const health = resolveHealthFor({ proxy }, healthById, endpointIndex || buildEndpointIndex(healthById)) || (remark ? healthById[remark[4]] : null);
   const healthClassification = health && typeof health.classification === "object" ? health.classification : health;
   const rotatesAcrossCountries = !!healthClassification && (String(healthClassification.type || "").startsWith("dynamic") || String(healthClassification.subgroup || "").startsWith("dynamic")) && String(healthClassification.same_country) === "false";
   const flag = countryFlag(country, rotatesAcrossCountries);
@@ -145,7 +145,7 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
     const riskFromScore = Number.isFinite(fraud) ? fraud < 20 ? "low" : fraud < 50 ? "medium" : fraud < 80 ? "high" : "critical" : "";
     const risk = { low: "Low", medium: "Med", high: "High", critical: "Crit" }[riskValue || riskFromScore] || "Unrated";
     const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
-    const geminiTag = gemini?.flagged === true ? "Gem \u2717" : gemini?.clean === true ? "Gem \u2713" : "";
+    const geminiTag = gemini?.flagged === true ? "Gem web \u2717" : gemini?.clean === true ? "Gem web \u2713" : "";
     const kindRaw = classification.connection_type ?? health.connection_type;
     const kindValue = typeof kindRaw === "string" ? kindRaw.replace(/[^a-z0-9 -]/gi, "").trim() : "";
     const kind = /resi/i.test(kindValue) ? "Resi" : /data.?center|hosting/i.test(kindValue) ? "DC" : "";
@@ -1319,7 +1319,7 @@ var index_default = {
       })).sort((left, right) => right.score - left.score);
       const capped = code === RAINBOW_KEY ? ranked : ranked.slice(0, COUNTRY_CAP);
       const exits = capped.map((entry) => entry.item.proxy);
-      const baseNames = exits.map((proxy, index) => friendlyExitName(code, index, proxy, healthById, null, speedByEndpoint));
+      const baseNames = exits.map((proxy, index) => friendlyExitName(code, index, proxy, healthById, null, speedByEndpoint, endpointIndex));
       const variants = [];
       for (let index = 0; index < exits.length; index += 1) {
         if (entries.length) {

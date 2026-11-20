@@ -613,20 +613,19 @@ GEMINI_URL = os.getenv("GEMINI_PROBE_URL", "https://gemini.google.com/")
 
 
 async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
-    """Ask Gemini for a page through the proxy and report the raw verdict.
+    """Check Gemini front-page reachability through this exit.
 
-    Returns ``ok`` only when Gemini actually served content (HTTP 2xx/3xx). A
-    403 is the interesting answer, not an error to swallow: it means the egress
-    IP is flagged. A curl timeout or a 5xx means we learned nothing and is
-    reported as ``ok: False`` with a distinct reason, so the worker can tell
-    "flagged" apart from "we did not manage to check".
+    ``ok`` is True for 2xx/3xx, False only for reputation-style 401/403/429,
+    and None when inconclusive. This unauthenticated check does not prove that
+    a user's Gemini account/session can use Gemini. Discard the page body; only
+    the status is needed and retaining it wastes bandwidth and memory.
     """
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{proxy_port}"',
         f'url = "{GEMINI_URL}"',
         "silent",
         "show-error",
-        "fail",
+        'output = "/dev/null"',
         "connect-timeout = 5",
         "max-time = 15",
     ]
@@ -640,22 +639,26 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
     stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
     if process.returncode != 0:
-        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+        return {"ok": None, "error": f"curl_exit_{process.returncode}"}
 
     try:
         text = stdout.decode(errors="replace").strip()
-        body, _, code = text.rpartition("\n")
+        _, _, code = text.rpartition("\n")
         status = int(code.strip()) if code.strip().isdigit() else 0
     except Exception:
-        return {"ok": False, "error": "parse_failed"}
+        return {"ok": None, "error": "parse_failed"}
 
     if status == 0:
-        return {"ok": False, "error": "no_status"}
-    # 2xx and 3xx mean Gemini served us. 401/403/429 are the reputation gates:
-    # the exit is reachable but flagged, which is exactly what we want to know.
+        return {"ok": None, "error": "no_status"}
+    # Only explicit reputation-style responses count as flagged. Server errors
+    # and unexpected statuses are inconclusive, not evidence against the exit.
+    if status in (401, 403, 429):
+        return {"ok": False, "flagged": True, "http_status": status}
+    if status >= 400:
+        return {"ok": None, "flagged": None, "http_status": status}
     return {
-        "ok": 200 <= status < 400,
-        "flagged": status in (401, 403, 429),
+        "ok": True,
+        "flagged": False,
         "http_status": status,
     }
 
