@@ -238,15 +238,10 @@ def parse_endpoint(uri: str) -> tuple[str | None, str | None]:
 
 def is_public_ip(value: str) -> bool:
     try:
-        ip = ipaddress.ip_address(value)
-        return not (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        )
+        # `not private/reserved` is not the same as globally routable: e.g.
+        # shared carrier-grade NAT space (100.64.0.0/10) has historically
+        # slipped through those exclusions. Only accept globally reachable IPs.
+        return ipaddress.ip_address(value).is_global
     except ValueError:
         return False
 
