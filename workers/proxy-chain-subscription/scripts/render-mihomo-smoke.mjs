@@ -12,6 +12,21 @@ const proxies = [
 ];
 const countries = [{
   code: "US",
-  variants: proxies.map((proxy, index) => ({ proxy, name: `${proxy.name}-${index + 1}` })),
+  variants: proxies.map((proxy, index) => ({
+    proxy,
+    name: `${proxy.name}-${index + 1}`,
+    dialerProxy: "Entry-1",
+  })),
 }];
-process.stdout.write(mihomo([], countries, {}, null));
+const entries = [{
+  tag: "Entry-1",
+  proxy: {
+    type: "vless",
+    name: "entry",
+    server: "192.0.2.10",
+    port: 443,
+    uuid: "11111111-2222-3333-4444-555555555555",
+    tls: true,
+  },
+}];
+process.stdout.write(mihomo(entries, countries, {}, null));
