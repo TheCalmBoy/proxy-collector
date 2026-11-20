@@ -114,7 +114,7 @@ SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URLS[0])
 
 
 def source_label(url: str) -> str:
-    """A log-safe source identifier that omits paths, credentials, and query tokens."""
+    """A source identifier that preserves public paths but strips URL secrets."""
     try:
         parsed = urllib.parse.urlsplit(url)
         if not parsed.scheme or not parsed.hostname:
@@ -122,7 +122,8 @@ def source_label(url: str) -> str:
         host = parsed.hostname
         if parsed.port:
             host = f"{host}:{parsed.port}"
-        return f"{parsed.scheme}://{host}/…"
+        path = parsed.path or "/"
+        return f"{parsed.scheme}://{host}{path}"
     except ValueError:
         return "<invalid source URL>"
 IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
