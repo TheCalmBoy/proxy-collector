@@ -17,6 +17,8 @@ from typing import Any
 
 import geoip2.database
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 # One upstream, and that is a measured decision rather than a default.
@@ -846,6 +848,23 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
 def main() -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
+    # Feed and carry-over reads are idempotent GETs. Retry transient upstream
+    # failures with bounded backoff so one temporary 429/5xx does not silently
+    # shrink the candidate pool. POST geolocation batches are deliberately not
+    # retried here; query_ip_api owns their rate-limit behavior.
+    source_retries = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=source_retries, pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
     if not Path(MMDB_PATH).exists():
         raise FileNotFoundError(

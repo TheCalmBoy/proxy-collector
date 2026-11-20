@@ -68,10 +68,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          url=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((a["browser_download_url"] for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), ""))')
+          release=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)
+          asset=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); a=next((a for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), {}); print(a.get("browser_download_url", "")); print(a.get("digest", ""))' "$release")
+          url=$(printf '%s\n' "$asset" | sed -n '1p')
+          digest=$(printf '%s\n' "$asset" | sed -n '2p')
           test -n "$url" || { echo "No linux-amd64 Mihomo release asset found"; exit 1; }
           curl --fail --location --silent --show-error --retry 3 "$url" -o /tmp/mihomo.gz
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "${digest#sha256:}  /tmp/mihomo.gz" | sha256sum --check
+          else
+            echo "GitHub release did not provide an asset digest; checksum verification unavailable"
+          fi
           gzip -dc /tmp/mihomo.gz > /tmp/mihomo
           sudo install -m 0755 /tmp/mihomo /usr/local/bin/mihomo
           mihomo -v
