@@ -102,9 +102,15 @@ A `masque://` entrypoint (Cloudflare WARP over HTTP/2) carries no share-link for
 mihomo has no masque node scheme; it is a worker-internal shape that renders for
 `format=mihomo` only. The other formats return 406 `masque_entry_requires_mihomo_format`.
 
-**Size.** There is no cap on how many entrypoints you send, how long one may be, or how
-large the response grows: the worker renders the whole feed. Per-country exits are still
-capped at `COUNTRY_CAP`, which is what keeps the output a sane size.
+**Size.** The Mihomo response is streamed, and entrypoint/exit variants are generated on
+demand. The Worker does not truncate a valid profile to a fixed output count or byte
+budget. Per-country exits are still capped at `COUNTRY_CAP`. Cloudflare still limits
+request URLs to 16 KB and each Worker to 128 MB of memory, and the Worker parses the
+upstream feed before it starts streaming ([Cloudflare limits](https://developers.cloudflare.com/workers/platform/limits/),
+[Workers Streams API](https://developers.cloudflare.com/workers/runtime-apis/streams/)).
+Streaming avoids buffering the final YAML body, but it cannot remove the CPU and memory
+cost of parsing the feed or guarantee that arbitrarily large source data will finish
+within the Worker's runtime limits.
 
 ### ECH
 

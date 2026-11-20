@@ -78,6 +78,33 @@ async function replyWithEtag(request, body, type, extra = null) {
 __name(replyWithEtag, "replyWithEtag");
 __name2(replyWithEtag, "replyWithEtag");
 __name22(replyWithEtag, "replyWithEtag");
+async function digestToken(value) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  return btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+__name(digestToken, "digestToken");
+function requestMatchesEtag(request, etag) {
+  const condition = request.headers.get("if-none-match");
+  return Boolean(condition && condition.split(",").some((candidate) => {
+    const value = candidate.trim();
+    return value === "*" || value.replace(/^W\//, "") === etag.replace(/^W\//, "");
+  }));
+}
+__name(requestMatchesEtag, "requestMatchesEtag");
+async function replyWithStreamEtag(request, body, type, extra = null, seed = "") {
+  const etag = `W/"${await digestToken(seed)}"`;
+  const headers = {
+    "content-type": type,
+    "cache-control": "private, no-cache, must-revalidate",
+    "x-content-type-options": "nosniff",
+    etag,
+    ...extra || {}
+  };
+  if (requestMatchesEtag(request, etag))
+    return new Response(null, { status: 304, headers });
+  return new Response(body, { status: 200, headers });
+}
+__name(replyWithStreamEtag, "replyWithStreamEtag");
 function fail(error, status = 400, extra = null) {
   return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
@@ -805,129 +832,143 @@ function dnsLines(enabled = true) {
 }
 __name(dnsLines, "dnsLines");
 function mihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
-  const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint);
-  const lines = ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"];
-  const appendProxy = /* @__PURE__ */ __name22((proxy, name, dialerProxy = void 0) => {
-    if (proxy.type === "wireguard") {
-      const localIp = proxy.address?.find((value) => value.includes(".")) || proxy.address?.[0] || "";
-      lines.push(
-        `  - name: ${yamlScalar(name)}`,
-        "    type: wireguard",
-        `    ip: ${yamlScalar(localIp.split("/")[0])}`,
-        `    private-key: ${yamlScalar(proxy.secretKey)}`,
-        "    peers:",
-        `      - server: ${yamlScalar(proxy.server)}`,
-        `        port: ${proxy.port}`,
-        `        public-key: ${yamlScalar(proxy.publicKey)}`,
-        '        allowed-ips: ["0.0.0.0/0", "::/0"]',
-        ...proxy.reserved?.length ? [`        reserved: [${proxy.reserved.join(", ")}]`] : [],
-        "    udp: true",
-        ...proxy.mtu ? [`    mtu: ${proxy.mtu}`] : [],
-        ...proxy.keepAlive ? [`    persistent-keepalive: ${proxy.keepAlive}`] : [],
-        ...amneziaWgOption(proxy),
-        ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
-      );
-    } else {
-      const { ech, ...scalarProxy } = { ...proxy, type: mihomoType(proxy.type), name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
-      lines.push(`  -\n${scalarFields(scalarProxy)}`);
-      if (proxy.reality)
-        lines.push(`    reality-opts:
-      public-key: ${yamlScalar(proxy.reality["public-key"])}
-      short-id: ${yamlScalar(proxy.reality["short-id"])}`);
-      if (proxy.alpn?.length)
-        lines.push(`    alpn:
-${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
-      if (proxy["ws-opts"])
-        lines.push(`    ws-opts:
-      path: ${yamlScalar(proxy["ws-opts"].path)}
-      headers:
-        Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
-      const echOpts = proxy.tls ? parseEch(ech) : null;
-      if (echOpts) {
-        lines.push("    ech-opts:", "      enable: true");
-        if (echOpts.config)
-          lines.push(`      config: ${yamlScalar(echOpts.config)}`);
-        if (echOpts.queryServerName)
-          lines.push(`      query-server-name: ${yamlScalar(echOpts.queryServerName)}`);
-      }
-    }
-  }, "appendProxy");
-  for (const entry of entries)
-    appendProxy(entry.proxy, entry.tag);
-  for (const country of countries) {
-    for (const item of country.variants)
-      appendProxy(item.proxy, item.name, item.dialerProxy);
-  }
-  lines.push("proxy-groups:");
-  const rootGroups = [];
-  if (entries.length) {
-    lines.push(`  - name: ${yamlScalar("EntryPoints")}`, "    type: select", "    proxies:");
-    entries.forEach((entry) => lines.push(`      - ${yamlScalar(entry.tag)}`));
-    rootGroups.push("EntryPoints");
-  }
-  if (countries.length === 1) {
-    const only = countries[0];
-    lines.push(`  - name: ${yamlScalar(`${countryName(only.code)} ${countryFlag(only.code)}`.trim())}`, "    type: select", "    proxies:");
-    only.variants.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    if (autoBest.length > 1) {
-      lines.push(
-        `  - name: ${yamlScalar("Best")}`,
-        "    type: url-test",
-        "    url: http://www.gstatic.com/generate_204",
-        "    interval: 300",
-        "    tolerance: 50",
-        "    lazy: true",
-        "    proxies:"
-      );
-      autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-      pushRules(lines, "MATCH,Best");
-    } else {
-      pushRules(lines, `MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
-    }
-    return lines.join("\n") + "\n";
-  }
-  if (countries.length > 1) {
-    const groupTitle = /* @__PURE__ */ __name2((code) => `${countryName(code)} ${countryFlag(code)}`.trim(), "groupTitle");
-    const cardNames = countries.map((country) => groupTitle(country.code));
-    lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
-    if (autoBest.length > 1)
-      lines.push(`      - ${yamlScalar("Best")}`);
-    rootGroups.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-    cardNames.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-    for (const country of countries) {
-      lines.push(`  - name: ${yamlScalar(groupTitle(country.code))}`, "    type: select", "    proxies:");
-      country.variants.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    }
-    if (autoBest.length > 1) {
-      lines.push(
-        `  - name: ${yamlScalar("Best")}`,
-        "    type: url-test",
-        "    url: http://www.gstatic.com/generate_204",
-        "    interval: 300",
-        "    tolerance: 50",
-        "    lazy: true",
-        "    proxies:"
-      );
-      autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    }
-    pushRules(lines, "MATCH,Proxy");
-    return lines.join("\n") + "\n";
-  }
-  const ordered = [];
-  for (const country of countries) {
-    for (const item of country.variants)
-      ordered.push(item.name);
-  }
-  for (const entry of entries)
-    ordered.push(entry.tag);
-  lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
-  ordered.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-  pushRules(lines, "MATCH,Proxy");
-  return lines.join("\n") + "\n";
+  return [...mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options)].join("");
 }
 __name(mihomo, "mihomo");
 __name2(mihomo, "mihomo");
 __name22(mihomo, "mihomo");
+function mihomoVariantsForExit(country, index, entries = []) {
+  if (Array.isArray(country.variants)) {
+    const marker = `${country.code}-${String(index + 1).padStart(2, "0")}e`;
+    return country.variants.filter((item) => (item.tag || "").startsWith(marker));
+  }
+  const exits = country.exits || (country.items || []).map((item) => item.proxy);
+  const names = country.baseNames || exits.map((proxy, itemIndex) => proxy.name || `${country.code} ${itemIndex + 1}`);
+  if (index >= exits.length) return [];
+  if (!entries.length) return [{ proxy: exits[index], name: names[index] }];
+  return entries.map((entry, slot) => {
+    const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
+    return { proxy: exits[index], name: `${prefix} - ${names[index]}`, tag: `${country.code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`, dialerProxy: entry.tag };
+  });
+}
+__name(mihomoVariantsForExit, "mihomoVariantsForExit");
+function* eachCountryVariant(country, entries = []) {
+  if (Array.isArray(country.variants)) {
+    yield* country.variants;
+    return;
+  }
+  const exits = country.exits || (country.items || []).map((item) => item.proxy);
+  for (let index = 0; index < exits.length; index += 1)
+    yield* mihomoVariantsForExit(country, index, entries);
+}
+__name(eachCountryVariant, "eachCountryVariant");
+function mihomoProxyBlock(proxy, name, dialerProxy = void 0) {
+  const lines = [];
+  if (proxy.type === "wireguard") {
+    const localIp = proxy.address?.find((value) => value.includes(".")) || proxy.address?.[0] || "";
+    lines.push(
+      `  - name: ${yamlScalar(name)}`, "    type: wireguard",
+      `    ip: ${yamlScalar(localIp.split("/")[0])}`,
+      `    private-key: ${yamlScalar(proxy.secretKey)}`, "    peers:",
+      `      - server: ${yamlScalar(proxy.server)}`, `        port: ${proxy.port}`,
+      `        public-key: ${yamlScalar(proxy.publicKey)}`,
+      '        allowed-ips: ["0.0.0.0/0", "::/0"]',
+      ...proxy.reserved?.length ? [`        reserved: [${proxy.reserved.join(", ")}]`] : [],
+      "    udp: true", ...proxy.mtu ? [`    mtu: ${proxy.mtu}`] : [],
+      ...proxy.keepAlive ? [`    persistent-keepalive: ${proxy.keepAlive}`] : [],
+      ...amneziaWgOption(proxy), ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
+    );
+  } else {
+    const { ech, ...scalarProxy } = { ...proxy, type: mihomoType(proxy.type), name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
+    lines.push(`  -\n${scalarFields(scalarProxy)}`);
+    if (proxy.reality)
+      lines.push(`    reality-opts:\n      public-key: ${yamlScalar(proxy.reality["public-key"])}\n      short-id: ${yamlScalar(proxy.reality["short-id"])}`);
+    if (proxy.alpn?.length)
+      lines.push(`    alpn:\n${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
+    if (proxy["ws-opts"])
+      lines.push(`    ws-opts:\n      path: ${yamlScalar(proxy["ws-opts"].path)}\n      headers:\n        Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
+    const echOpts = proxy.tls ? parseEch(ech) : null;
+    if (echOpts) {
+      lines.push("    ech-opts:", "      enable: true");
+      if (echOpts.config) lines.push(`      config: ${yamlScalar(echOpts.config)}`);
+      if (echOpts.queryServerName) lines.push(`      query-server-name: ${yamlScalar(echOpts.queryServerName)}`);
+    }
+  }
+  return lines.join("\n");
+}
+__name(mihomoProxyBlock, "mihomoProxyBlock");
+function* mihomoStreamChunks(entries, countries, healthById, speedByEndpoint = null, options = {}) {
+  const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint, entries);
+  yield ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"].join("\n") + "\n";
+  for (const entry of entries) yield mihomoProxyBlock(entry.proxy, entry.tag) + "\n";
+  for (const country of countries)
+    for (const item of eachCountryVariant(country, entries))
+      yield mihomoProxyBlock(item.proxy, item.name, item.dialerProxy) + "\n";
+
+  yield "proxy-groups:\n";
+  if (entries.length)
+    yield [`  - name: ${yamlScalar("EntryPoints")}`, "    type: select", "    proxies:", ...entries.map((entry) => `      - ${yamlScalar(entry.tag)}`)].join("\n") + "\n";
+  if (countries.length === 1) {
+    const only = countries[0];
+    const title = `${countryName(only.code)} ${countryFlag(only.code)}`.trim();
+    yield [`  - name: ${yamlScalar(title)}`, "    type: select", "    proxies:"].join("\n") + "\n";
+    for (const item of eachCountryVariant(only, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+    if (autoBest.length > 1) {
+      yield [`  - name: ${yamlScalar("Best")}`, "    type: url-test", "    url: http://www.gstatic.com/generate_204", "    interval: 300", "    tolerance: 50", "    lazy: true", "    proxies:", ...autoBest.map((item) => `      - ${yamlScalar(item.name)}`)].join("\n") + "\n";
+      yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Best"].join("\n") + "\n";
+    } else {
+      yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), `  - MATCH,${title}`].join("\n") + "\n";
+    }
+    return;
+  }
+  if (countries.length > 1) {
+    const groupTitle = (code) => `${countryName(code)} ${countryFlag(code)}`.trim();
+    const root = [`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:"];
+    if (autoBest.length > 1) root.push(`      - ${yamlScalar("Best")}`);
+    if (entries.length) root.push(`      - ${yamlScalar("EntryPoints")}`);
+    for (const country of countries) root.push(`      - ${yamlScalar(groupTitle(country.code))}`);
+    yield root.join("\n") + "\n";
+    for (const country of countries) {
+      yield [`  - name: ${yamlScalar(groupTitle(country.code))}`, "    type: select", "    proxies:"].join("\n") + "\n";
+      for (const item of eachCountryVariant(country, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+    }
+    if (autoBest.length > 1)
+      yield [`  - name: ${yamlScalar("Best")}`, "    type: url-test", "    url: http://www.gstatic.com/generate_204", "    interval: 300", "    tolerance: 50", "    lazy: true", "    proxies:", ...autoBest.map((item) => `      - ${yamlScalar(item.name)}`)].join("\n") + "\n";
+    yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Proxy"].join("\n") + "\n";
+    return;
+  }
+  yield [`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:"].join("\n") + "\n";
+  for (const country of countries)
+    for (const item of eachCountryVariant(country, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+  for (const entry of entries) yield `      - ${yamlScalar(entry.tag)}\n`;
+  yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Proxy"].join("\n") + "\n";
+}
+__name(mihomoStreamChunks, "mihomoStreamChunks");
+function streamMihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
+  const iterator = mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options);
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    pull(controller) {
+      let chunk = "";
+      try {
+        while (chunk.length < 16 * 1024) {
+          const next = iterator.next();
+          if (next.done) {
+            if (chunk) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+            return;
+          }
+          chunk += next.value;
+        }
+        controller.enqueue(encoder.encode(chunk));
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel() { iterator.return?.(); }
+  });
+}
+__name(streamMihomo, "streamMihomo");
 function pushRules(lines, match) {
   lines.push("rules:");
   for (const rule of LOCAL_DIRECT_RULES)
@@ -1094,20 +1135,50 @@ __name2(scoreForProxy, "scoreForProxy");
 __name22(scoreForProxy, "scoreForProxy");
 var TOP_N = 10;
 var COUNTRY_CAP = 60;
-function topQualityVariants(countries, healthById, speedByEndpoint = null) {
+function topQualityVariants(countries, healthById, speedByEndpoint = null, entries = []) {
   const endpointIndex = buildEndpointIndex(healthById || {});
   const scored = [];
+  const keepCandidate = (candidate) => {
+    let index = 0;
+    // Keep equal scores in their original feed order, matching stable sort.
+    while (index < scored.length && scored[index].score >= candidate.score) index += 1;
+    if (index >= TOP_N) return;
+    scored.splice(index, 0, candidate);
+    if (scored.length > TOP_N) scored.pop();
+  };
   for (const country of countries) {
-    for (const item of country.variants) {
-      const proxy = item.proxy || item;
-      const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
-      const score = qualityScore(resolveHealthFor(item, healthById, endpointIndex), measured);
-      if (score >= 0)
-        scored.push({ item, score });
+    if (!Array.isArray(country.variants) && Array.isArray(country.exits)) {
+      for (let index = 0; index < country.exits.length; index += 1) {
+        const proxy = country.exits[index];
+        const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
+        const score = qualityScore(resolveHealthFor({ proxy }, healthById, endpointIndex), measured);
+        if (score >= 0)
+          keepCandidate({ country, index, score });
+      }
+    } else {
+      for (const item of country.variants || []) {
+        const proxy = item.proxy || item;
+        const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
+        const score = qualityScore(resolveHealthFor(item, healthById, endpointIndex), measured);
+        if (score >= 0)
+          keepCandidate({ item, score });
+      }
     }
   }
-  scored.sort((left, right) => right.score - left.score);
-  return scored.slice(0, TOP_N).map((entry) => entry.item);
+  const top = [];
+  for (const candidate of scored) {
+    if (candidate.item) {
+      top.push(candidate.item);
+      if (top.length === TOP_N) break;
+      continue;
+    }
+    for (const item of mihomoVariantsForExit(candidate.country, candidate.index, entries)) {
+      top.push(item);
+      if (top.length === TOP_N) break;
+    }
+    if (top.length === TOP_N) break;
+  }
+  return top;
 }
 __name(topQualityVariants, "topQualityVariants");
 __name2(topQualityVariants, "topQualityVariants");
@@ -1365,7 +1436,9 @@ var index_default = {
       return fail("country_feed_not_found", 404);
     if (!feed.ok)
       return fail("country_feed_unavailable", 502);
-    const rows = (await feed.text()).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const feedText = await feed.text();
+    const feedVersionToken = feed.headers.get("etag") || feed.headers.get("last-modified") || await digestToken(feedText);
+    const rows = feedText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
     let parsed = rows.map((uri, i) => {
       const scheme = uri.slice(0, uri.indexOf(":")).toLowerCase();
       if (protocolFilter && !protocolFilter.has(canonicalProtocol(scheme)))
@@ -1392,6 +1465,7 @@ var index_default = {
     // Off by default, because mihomo 1.19.x has no ECH rejection fallback, so a
     // key that rotates takes the config with it.
     let echEmbedded = 0;
+    let echVersionToken = "none";
     if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
       const pending = new Map();
       for (const proxy of [...entries.map((entry) => entry.proxy), ...parsed.map((item) => item.proxy)]) {
@@ -1405,6 +1479,7 @@ var index_default = {
       const resolved = new Map(await Promise.all(
         [...pending.keys()].map(async (name) => [name, await fetchEchConfig(name)])
       ));
+      echVersionToken = await digestToken([...resolved.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([name, config]) => `${name}:${config || ""}`).join("\n"));
       for (const [name, proxies] of pending) {
         const config = resolved.get(name);
         if (!config)
@@ -1423,8 +1498,9 @@ var index_default = {
     let healthIndexState = "missing";
     let healthJoin = null;
     let healthAgeMs = null;
+    const healthVersion = Math.floor(Date.now() / (5 * 6e4));
+    let healthVersionToken = `missing:${healthVersion}`;
     try {
-      const healthVersion = Math.floor(Date.now() / (5 * 6e4));
       const healthResponse = await fetch(`${origin}/egress-health.json?v=${healthVersion}`, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(5e3),
@@ -1433,7 +1509,9 @@ var index_default = {
       if (healthResponse.status !== 404)
         healthIndexState = healthResponse.ok ? "stale" : "unavailable";
       if (healthResponse.ok) {
-        const healthDocument = await healthResponse.json();
+        const healthText = await healthResponse.text();
+        healthVersionToken = healthResponse.headers.get("etag") || healthResponse.headers.get("last-modified") || await digestToken(healthText);
+        const healthDocument = JSON.parse(healthText);
         const generatedAt = Date.parse(healthDocument?.generated_at || "");
         const ageMs = Date.now() - generatedAt;
         if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= HEALTH_HARD_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
@@ -1446,19 +1524,24 @@ var index_default = {
       }
     } catch {
       healthIndexState = "unavailable";
+      healthVersionToken = `unavailable:${healthVersion}`;
     }
     let speedByEndpoint = {};
+    const enrichedVersion = Math.floor(Date.now() / (5 * 6e4));
+    let enrichedVersionToken = `missing:${enrichedVersion}`;
     try {
-      const enrichedVersion = Math.floor(Date.now() / (5 * 6e4));
       const enrichedResponse = await fetch(`${origin}/enriched-configs.json?v=${enrichedVersion}`, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(5e3),
         cf: { cacheTtl: 300, cacheEverything: true }
       });
       if (enrichedResponse.ok) {
-        speedByEndpoint = buildSpeedIndex(await enrichedResponse.json());
+        const enrichedText = await enrichedResponse.text();
+        enrichedVersionToken = enrichedResponse.headers.get("etag") || enrichedResponse.headers.get("last-modified") || await digestToken(enrichedText);
+        speedByEndpoint = buildSpeedIndex(JSON.parse(enrichedText));
       }
     } catch {
+      enrichedVersionToken = `unavailable:${enrichedVersion}`;
     }
     const healthEndpointIndex = buildEndpointIndex(healthById);
     const healthHeaders = () => ({
@@ -1508,24 +1591,28 @@ var index_default = {
       const capped = code === RAINBOW_KEY ? ranked : ranked.slice(0, COUNTRY_CAP);
       const exits = capped.map((entry) => entry.item.proxy);
       const baseNames = exits.map((proxy, index) => friendlyExitName(code, index, proxy, healthById, null, speedByEndpoint, endpointIndex));
-      const variants = [];
-      for (let index = 0; index < exits.length; index += 1) {
-        if (entries.length) {
-          for (let slot = 0; slot < entries.length; slot += 1) {
-            const entry = entries[slot];
-            const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
-            variants.push({
-              proxy: exits[index],
-              name: `${prefix} - ${baseNames[index]}`,
-              tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`,
-              dialerProxy: entry.tag
-            });
+      const result = { code, items: capped.map((entry) => entry.item), exits, baseNames };
+      if (format !== "mihomo") {
+        const variants = [];
+        for (let index = 0; index < exits.length; index += 1) {
+          if (entries.length) {
+            for (let slot = 0; slot < entries.length; slot += 1) {
+              const entry = entries[slot];
+              const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
+              variants.push({
+                proxy: exits[index],
+                name: `${prefix} - ${baseNames[index]}`,
+                tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`,
+                dialerProxy: entry.tag
+              });
+            }
+          } else {
+            variants.push({ proxy: exits[index], name: baseNames[index] });
           }
-        } else {
-          variants.push({ proxy: exits[index], name: baseNames[index] });
         }
+        result.variants = variants;
       }
-      return { code, items: capped.map((entry) => entry.item), exits, baseNames, variants };
+      return result;
     });
     if (!countries.length)
       return excludedCountries.size
@@ -1539,7 +1626,21 @@ var index_default = {
       return replyWithEtag(request, b64(links.join("\n")), "text/plain; charset=utf-8", joinHeaders);
     }
     const dnsPref = url.searchParams.get("dns") !== "0";
-    const render = format === "mihomo" ? (e, c, h, s) => mihomo(e, c, h, s, { dns: dnsPref }) : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
+    if (format === "mihomo") {
+      const seed = JSON.stringify({
+        renderer: "mihomo-stream-v1",
+        url: request.url,
+        format,
+        feedVersionToken,
+        healthVersionToken,
+        healthIndexState,
+        enrichedVersionToken,
+        echVersionToken,
+        healthMinute: Math.floor(Date.now() / 6e4)
+      });
+      return replyWithStreamEtag(request, streamMihomo(entries, countries, healthById, speedByEndpoint, { dns: dnsPref }), "text/yaml; charset=utf-8", joinHeaders, seed);
+    }
+    const render = format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
     return replyWithEtag(request, render(entries, countries, healthById, speedByEndpoint), format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
   }
 };

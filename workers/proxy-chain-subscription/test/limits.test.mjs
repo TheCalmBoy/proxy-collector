@@ -22,6 +22,7 @@ const FEED = CODES.flatMap((c, ci) =>
 
 const ENTRY_URI =
   "vless://11111111-2222-3333-4444-555555555555@9.9.9.9:443?encryption=none&type=tcp&security=none#entry";
+const SECOND_ENTRY_URI = "socks://10.0.0.1:1080#second-entry";
 
 function entry64(uri) {
   let bin = "";
@@ -61,18 +62,30 @@ test("a feed past the old 900 KB budget renders every exit, not a prefix", async
   serveFeed();
   const started = Date.now();
   const res = await worker.fetch(
-    new Request(`https://w.example/sub?format=mihomo&entry64=${entry64(ENTRY_URI)}`), {});
+    new Request(`https://w.example/sub?format=mihomo&entry64=${entry64(ENTRY_URI)}&entry64=${entry64(SECOND_ENTRY_URI)}`), {});
   const elapsed = Date.now() - started;
-  const body = await res.text();
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  let chunks = 0;
+  for (;;) {
+    const part = await reader.read();
+    if (part.done) break;
+    chunks += 1;
+    body += decoder.decode(part.value, { stream: true });
+  }
+  body += decoder.decode();
 
   assert.equal(res.status, 200);
+  assert.ok(chunks > 1, `expected a streamed body, got ${chunks} chunk(s)`);
   // Nothing reports a trim, because nothing is trimmed any more.
   assert.equal(res.headers.get("x-body-truncated"), null);
   assert.equal(res.headers.get("x-exits-dropped"), null);
 
   // Every exit is present: one dialer-proxy line per chained exit.
   const chained = [...body.matchAll(/^    dialer-proxy: (".*")$/gm)].length;
-  assert.equal(chained, TOTAL_EXITS, `expected ${TOTAL_EXITS} exits, saw ${chained}`);
+  assert.equal(chained, TOTAL_EXITS * 2, `expected ${TOTAL_EXITS * 2} exit variants, saw ${chained}`);
+  assert.ok(chained > 10_000, "the regression fixture must exercise a 10k+ profile");
 
   // And the body really is past the budget that used to bind here.
   assert.ok(byteLength(body) > 900_000, `body was only ${byteLength(body)} bytes`);
