@@ -14,6 +14,7 @@ Two failures, each of which cost an entire 22k-candidate measurement run:
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -29,7 +30,18 @@ def _uris():
     ]
 
 
-class TestHttpsOutboundTls(unittest.TestCase):
+class PublicEndpointFixture:
+    def setUp(self):
+        self.endpoint_patch = mock.patch.object(
+            verify,
+            "resolve_public_endpoint",
+            side_effect=lambda host: host if host in {"1.2.3.4", "5.6.7.8", "9.9.9.9"} else "93.184.216.34",
+        )
+        self.endpoint_patch.start()
+        self.addCleanup(self.endpoint_patch.stop)
+
+
+class TestHttpsOutboundTls(PublicEndpointFixture, unittest.TestCase):
     def test_https_outbound_emits_a_tls_object(self):
         config, _records, _stats = verify.build_sing_box_config(["https://user:pass@example.com:8443"])
         http_ob = [ob for ob in config["outbounds"] if ob["type"] == "http"]
@@ -50,7 +62,7 @@ class TestHttpsOutboundTls(unittest.TestCase):
                 self.assertIsInstance(ob["tls"], dict, f"bool tls on {ob.get('tag')}")
 
 
-class TestOffenderDrop(unittest.TestCase):
+class TestOffenderDrop(PublicEndpointFixture, unittest.TestCase):
     def test_named_outbound_loses_outbound_inbound_and_rule(self):
         config, _records, _stats = verify.build_sing_box_config(_uris())
         index = next(
@@ -97,7 +109,7 @@ class TestOffenderDrop(unittest.TestCase):
         self.assertEqual(len(config["outbounds"]), before)
 
 
-class TestRealityPublicKey(unittest.TestCase):
+class TestRealityPublicKey(PublicEndpointFixture, unittest.TestCase):
     """A malformed `pbk` costs the whole batch at sing-box startup, so it has to
     be rejected at build time, where it costs one candidate and gets a counter."""
 
@@ -150,7 +162,7 @@ class TestRealityPublicKey(unittest.TestCase):
         self.assertEqual(len(records), 1)
 
 
-class TestStartupStyleErrors(unittest.TestCase):
+class TestStartupStyleErrors(PublicEndpointFixture, unittest.TestCase):
     def test_initialize_outbound_index_is_dropped(self):
         config, _records, _stats = verify.build_sing_box_config(_uris())
         index = next(

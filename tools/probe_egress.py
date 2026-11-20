@@ -31,6 +31,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.endpoint_safety import prewarm_public_endpoints, resolve_public_endpoint
+
 ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 SING_BOX = os.getenv("SING_BOX", "sing-box")
@@ -506,6 +509,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     # contiguous and outside the ephemeral range.
     base_port = _pick_inbound_base(len(uris))
 
+    prepared: list[tuple[str, dict[str, Any]]] = []
     for uri in uris:
         try:
             outbound = parse_proxy_uri(uri)
@@ -513,6 +517,19 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             stats["unsupported"] += 1
             reasons[str(exc)] = reasons.get(str(exc), 0) + 1
             continue
+        prepared.append((uri, outbound))
+
+    prewarm_public_endpoints([outbound.get("server", "") for _, outbound in prepared])
+    for uri, outbound in prepared:
+        original_server = outbound.get("server")
+        resolved_server = resolve_public_endpoint(original_server)
+        if not resolved_server:
+            stats["unsupported"] += 1
+            reason = "non_global_or_unresolved_endpoint"
+            reasons[reason] = reasons.get(reason, 0) + 1
+            continue
+        outbound["server"] = resolved_server
+
         identifier = _record_id(uri)
         inbound_tag = f"in-{identifier}"
         outbound_tag = f"proxy-{identifier}"
@@ -530,7 +547,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             # egress-health.json, and it was reading these off the record.
             # They were never stored, so the run raised KeyError: 'server'
             # as soon as a config survived long enough to be classified.
-            "server": outbound.get("server"),
+            "server": original_server,
             "server_port": outbound.get("server_port"),
         })
         stats["supported"] += 1

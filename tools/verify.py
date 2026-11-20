@@ -29,6 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.endpoint_safety import prewarm_public_endpoints, resolve_public_endpoint
+
 # Config
 # Config. One curated upstream: it already aggregates ~19 sources and applies
 # its own verification, so adding a second feed only duplicates entries.
@@ -1567,6 +1570,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     # batches and killed the run with a bare "exit 1".
     base_port = _pick_inbound_base(len(uris))
 
+    prepared: list[tuple[str, dict[str, Any]]] = []
     for uri in uris:
         try:
             outbound = parse_proxy_uri(uri)
@@ -1581,6 +1585,18 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             key = f"unparseable:{type(exc).__name__}"
             reasons[key] = reasons.get(key, 0) + 1
             continue
+        prepared.append((uri, outbound))
+
+    prewarm_public_endpoints([outbound.get("server", "") for _, outbound in prepared])
+    for uri, outbound in prepared:
+        original_server = outbound.get("server")
+        resolved_server = resolve_public_endpoint(original_server)
+        if not resolved_server:
+            stats["unsupported"] += 1
+            reason = "non_global_or_unresolved_endpoint"
+            reasons[reason] = reasons.get(reason, 0) + 1
+            continue
+        outbound["server"] = resolved_server
 
         identifier = _tag(uri)
         inbound_tag = f"in-{identifier}"
@@ -1605,7 +1621,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
         records.append({
             "id": identifier,
             "scheme": outbound["type"],
-            "server": outbound["server"],
+            "server": original_server,
             "server_port": outbound["server_port"],
             "port": port,
             "uri": uri,

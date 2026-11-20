@@ -6,7 +6,6 @@ import ipaddress
 import json
 import os
 import re
-import socket
 import time
 import urllib.parse
 from collections import Counter, defaultdict
@@ -19,6 +18,7 @@ import geoip2.database
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from tools.endpoint_safety import resolve_public_endpoint
 
 
 # One upstream, and that is a measured decision rather than a default.
@@ -147,7 +147,7 @@ HTTP_TIMEOUT = 30
 # thread/process ceiling and well under the file-descriptor limit, and DNS
 # lookups are pure network wait, so this is I/O bound rather than CPU bound.
 DNS_WARMUP_WORKERS = 32
-USER_AGENT = "proxy-collector/1.0 (+https://github.com/your-repo)"
+USER_AGENT = "proxy-collector/1.0 (+https://github.com/TheCalmBoy/proxy-collector)"
 
 
 # Protocols whose endpoint can normally be extracted from a URI using urlsplit().
@@ -341,31 +341,7 @@ def _resolve_host_uncached(host: str) -> str | None:
     if any(len(label) > 63 for label in host.split(".")):
         return None
 
-    try:
-        ipaddress.ip_address(host)
-        return host if is_public_ip(host) else None
-    except ValueError:
-        pass
-
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError, ValueError):
-        # gaierror/herror/timeout are OSError; UnicodeError covers the idna
-        # failures above; ValueError keeps the ip_address branch honest.
-        return None
-
-    candidates: list[str] = []
-    for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            continue
-        address = sockaddr[0]
-        if is_public_ip(address) and address not in candidates:
-            candidates.append(address)
-
-    # Prefer IPv4 for compatibility with downstream APIs and simpler diagnostics.
-    candidates.sort(key=lambda value: (":" in value, value))
-    return candidates[0] if candidates else None
+    return resolve_public_endpoint(host)
 
 
 def fetch_source_configs(

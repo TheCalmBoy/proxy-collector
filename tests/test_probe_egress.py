@@ -1,11 +1,26 @@
 import base64
 import json
 import unittest
+from unittest import mock
 
 from tools.probe_egress import UnsupportedConfig, build_sing_box_config, parse_proxy_uri
 
 
 class ParseProxyUriTests(unittest.TestCase):
+    def setUp(self):
+        def public_fixture(host):
+            try:
+                from ipaddress import ip_address
+                return host if ip_address(host).is_global else None
+            except ValueError:
+                return "93.184.216.34"
+
+        self.endpoint_patch = mock.patch(
+            "tools.probe_egress.resolve_public_endpoint", side_effect=public_fixture
+        )
+        self.endpoint_patch.start()
+        self.addCleanup(self.endpoint_patch.stop)
+
     def test_vless_reality(self):
         outbound = parse_proxy_uri(
             "vless://user-id@example.com:443?security=reality&type=tcp&"
@@ -93,6 +108,22 @@ class ParseProxyUriTests(unittest.TestCase):
         self.assertEqual(len(config["route"]["rules"]), 2)
         self.assertEqual(stats["supported"], 2)
         self.assertEqual(config["route"]["rules"][0]["action"], "route")
+
+    def test_probe_outbound_is_pinned_and_records_keep_the_uri_host(self):
+        with mock.patch("tools.probe_egress.resolve_public_endpoint", return_value="8.8.8.8"):
+            config, rows, _ = build_sing_box_config(
+                ["trojan://secret@example.com:443?sni=front.example"]
+            )
+        self.assertEqual(config["outbounds"][0]["server"], "8.8.8.8")
+        self.assertEqual(config["outbounds"][0]["tls"]["server_name"], "front.example")
+        self.assertEqual(rows[0]["server"], "example.com")
+
+    def test_non_global_literal_is_rejected(self):
+        config, rows, stats = build_sing_box_config(["socks5://100.64.0.1:1080"])
+        self.assertEqual(rows, [])
+        self.assertEqual(stats["unsupported"], 1)
+        self.assertEqual(stats["skip_non_global_or_unresolved_endpoint"], 1)
+        self.assertEqual(config["outbounds"], [{"type": "direct", "tag": "direct"}])
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import probe_egress  # noqa: E402
 
 
-SS = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@203.0.113.10:8388#node"
+SS = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@1.2.3.10:8388#node"
 
 
 class InboundBaseAvoidsEphemeralRange(unittest.TestCase):
