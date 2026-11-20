@@ -462,9 +462,10 @@ jobs:
 
       - name: Set up Node for the production renderer
         if: github.ref == 'refs/heads/main'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Install pinned Mihomo for live-feed validation
         if: github.ref == 'refs/heads/main'
