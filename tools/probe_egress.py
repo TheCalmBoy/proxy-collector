@@ -684,7 +684,14 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
     }
 
 
-async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
+async def _speed_test(
+    record: dict[str, Any],
+    worker_url: str,
+    token: str,
+    semaphore: asyncio.Semaphore,
+    *,
+    probe_gemini: bool = True,
+) -> dict[str, Any]:
     """Ask the Worker which IP this config egresses from.
 
     Phase 1 already measures real throughput (Stage 3's 5 MB transfer), and
@@ -747,12 +754,12 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     # too quickly to satisfy MIN_DOWNLOAD_MB_S.
     ok = bool(result.get("ip"))
 
-    # Ask Gemini from the same exit, on the same SOCKS port we just used. This
-    # is one extra request per config per round, and it is the only place we
-    # learn whether Google will actually serve this IP. A node we never asked
-    # gets None, never True.
+    # Ask Gemini at most once per config per full run. The final speed pass
+    # skips it for configs that answered in the initial pass; if the initial
+    # pass failed, the final pass gets the one attempt. This is only a
+    # reachability signal, not a logged-in usability check.
     gemini: dict[str, Any] = {}
-    if ok:
+    if ok and probe_gemini:
         try:
             gemini = await _gemini_probe(record["port"])
         except Exception as exc:  # a failed reputation check must not drop a
@@ -809,16 +816,15 @@ async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def _gemini_verdict(history: list[bool | None]) -> dict[str, Any]:
-    """Roll per-round Gemini verdicts into one honest answer.
+    """Reduce the one per-run Gemini probe to one honest answer.
 
     Three outcomes, kept distinct on purpose:
-      clean    - at least one round served us, and no round was flagged
-      flagged  - a round came back 401/403, an explicit access rejection
+      clean    - the probe served us
+      flagged  - the probe came back 401/403, an explicit access rejection
       unknown  - we never got an answer we can act on
 
-    A config that fails the check on one round and passes on another is
-    "flagged", not "clean": a user who hits the 403 has still lost the node, and
-    averaging the two would hide exactly the case worth knowing about.
+    It accepts a list to fit the existing health aggregation flow, but current
+    runs append at most one result for this signal.
     """
     known = [v for v in history if v is not None]
     if not known:
@@ -994,7 +1000,11 @@ def merge_previous_health(
       - a row this run actually measured always wins - fresh beats stale;
       - rows older than max_age_hours are dropped: beyond that the exit may
         have moved and the row would claim a country/speed that no longer
-        holds (the worker's own document gate is also 24h);
+        holds (the worker filters on fresh documents through 24h and ignores
+        documents older than 48h);
+      - carried rows retain their original measurement timestamp and are
+        explicitly marked stale so the worker can keep them available for
+        manual selection without ranking them into Best;
       - a missing or malformed previous index is a no-op, not an error - the
         probe must still publish this run's measurements.
     """
@@ -1022,7 +1032,9 @@ def merge_previous_health(
             updated = updated.replace(tzinfo=timezone.utc)
         if updated < cutoff:
             continue
-        merged[rid] = row
+        carried_row = dict(row)
+        carried_row["stale"] = True
+        merged[rid] = carried_row
         carried += 1
     return merged, carried
 
@@ -1201,8 +1213,8 @@ async def main() -> int:
         fraud_history = {r["id"]: [] for r in records}
         country_history = {r["id"]: [] for r in records}
         hosting_history = {r["id"]: [] for r in records}
-        # Gemini verdicts, same shape as the other per-round histories. A None
-        # entry means the probe did not answer this round; it is not a pass.
+        # Retain the Gemini answer in the same aggregation shape as the other
+        # observations. Current runs probe each config at most once.
         gemini_history = {r["id"]: [] for r in records}
 
         # Include initial results
@@ -1268,7 +1280,17 @@ async def main() -> int:
         # Final speed test via Worker
         print("Running final speed test via Worker...", flush=True)
         await _ensure_core()
-        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r, _ in live))
+        first_by_id = {record["id"]: result for record, result in zip(records, first)}
+        final = await asyncio.gather(*(
+            _speed_test(
+                record,
+                worker_url,
+                worker_token,
+                semaphore,
+                probe_gemini=not first_by_id.get(record["id"], {}).get("ok", False),
+            )
+            for record, _ in live
+        ))
         ok = sum(1 for r in final if r.get("ok"))
         print(f"Final: {ok}/{len(live)} returned an IP", flush=True)
         print(f"[t3] final round done in {time.monotonic() - phase_started:.0f}s total", flush=True)
@@ -1339,6 +1361,7 @@ async def main() -> int:
         # so the same config resolves to the same key on every run - the
         # deterministic, non-random "naming system" used to track a config's
         # egress IP across the 5-min probes (see `ip_changed` below).
+        measured_at = datetime.now(timezone.utc).isoformat()
         health[rid] = {
             "scheme": record["scheme"],
             "server": record["server"],
@@ -1369,7 +1392,9 @@ async def main() -> int:
             # without this the two are indistinguishable in the index.
             "ip_family": families_of(ips),
             "primary_country": classification.get("country"),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": measured_at,
+            "measured_at": measured_at,
+            "stale": False,
         }
 
     # Rolling union: fold the previously-published index back in for any pool
