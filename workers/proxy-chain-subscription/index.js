@@ -31,7 +31,8 @@ var LOCAL_DIRECT_RULES = [
   "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
   "DOMAIN-SUFFIX,local,DIRECT"
 ];
-var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"]);
+var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque", "hysteria2", "hy2", "tuic", "anytls"]);
+var MIHOMO_SS_CIPHERS = /* @__PURE__ */ new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "rc4-md5", "chacha20-ietf", "xchacha20", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305", "none"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
   return new Response(body, { status, headers });
@@ -145,7 +146,7 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
     const riskFromScore = Number.isFinite(fraud) ? fraud < 20 ? "low" : fraud < 50 ? "medium" : fraud < 80 ? "high" : "critical" : "";
     const risk = { low: "Low", medium: "Med", high: "High", critical: "Crit" }[riskValue || riskFromScore] || "Unrated";
     const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
-    const geminiTag = gemini?.flagged === true ? "Gem web \u2717" : gemini?.clean === true ? "Gem web \u2713" : "";
+    const geminiTag = gemini?.flagged === true ? "Gemini HTTP 401/403" : gemini?.clean === true ? "Gemini HTTP 2xx/3xx" : "";
     const kindRaw = classification.connection_type ?? health.connection_type;
     const kindValue = typeof kindRaw === "string" ? kindRaw.replace(/[^a-z0-9 -]/gi, "").trim() : "";
     const kind = /resi/i.test(kindValue) ? "Resi" : /data.?center|hosting/i.test(kindValue) ? "DC" : "";
@@ -283,8 +284,11 @@ function parseProxy(uri, index) {
     } catch {
       return null;
     }
+    if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.add !== "string" || typeof data.id !== "string")
+      return null;
     const port2 = Number(data.port);
-    if (!data.add || !port2)
+    const alterId = Number(data.aid || 0);
+    if (!data.add.trim() || !data.id.trim() || !Number.isInteger(port2) || port2 < 1 || port2 > 65535 || !Number.isInteger(alterId) || alterId < 0)
       return null;
     let displayName = fragment || data.ps;
     try {
@@ -297,7 +301,7 @@ function parseProxy(uri, index) {
       server: data.add,
       port: port2,
       uuid: data.id,
-      alterId: Number(data.aid || 0),
+      alterId,
       cipher: data.scy || "auto",
       tls: data.tls === "tls",
       network: data.net || "tcp",
@@ -316,7 +320,7 @@ function parseProxy(uri, index) {
     return null;
   }
   const type = u.protocol.slice(0, -1).toLowerCase();
-  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"].includes(type))
+  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque", "hysteria2", "hy2", "tuic", "anytls"].includes(type))
     return null;
   const server = u.hostname;
   const port = Number(u.port);
@@ -381,15 +385,94 @@ function parseProxy(uri, index) {
       ...first("uri") ? { uri: first("uri") } : {}
     };
   }
+  if (type === "hysteria2" || type === "hy2") {
+    let password;
+    try {
+      password = decodeURIComponent(u.username || "") || u.searchParams.get("password") || u.searchParams.get("auth") || "";
+    } catch {
+      return null;
+    }
+    if (!password)
+      return null;
+    const obfs = u.searchParams.get("obfs") || "";
+    const obfsPassword = u.searchParams.get("obfs-password") || u.searchParams.get("obfs_password") || "";
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const up = u.searchParams.get("up") || u.searchParams.get("upmbps") || "";
+    const down = u.searchParams.get("down") || u.searchParams.get("downmbps") || "";
+    return {
+      type: "hysteria2", name, server, port, password,
+      ...obfs ? { obfs } : {},
+      ...obfsPassword ? { "obfs-password": obfsPassword } : {},
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...alpn.length ? { alpn } : {},
+      ...up ? { up } : {},
+      ...down ? { down } : {},
+      udp: true
+    };
+  }
+  if (type === "tuic") {
+    let uuid, password;
+    try {
+      uuid = decodeURIComponent(u.username || "") || u.searchParams.get("uuid") || u.searchParams.get("id") || "";
+      password = decodeURIComponent(u.password || "") || u.searchParams.get("password") || "";
+    } catch {
+      return null;
+    }
+    const token = u.searchParams.get("token") || "";
+    if (!token && (!uuid || !password))
+      return null;
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const heartbeat = Number(u.searchParams.get("heartbeat-interval") || 0);
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    const proxy = {
+      type, name, server, port,
+      ...uuid ? { uuid } : {},
+      ...password ? { password } : {},
+      ...token ? { token } : {},
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...alpn.length ? { alpn } : {},
+      ...u.searchParams.get("udp-relay-mode") ? { "udp-relay-mode": u.searchParams.get("udp-relay-mode") } : {},
+      ...u.searchParams.get("congestion-controller") || u.searchParams.get("congestion_control") ? { "congestion-controller": u.searchParams.get("congestion-controller") || u.searchParams.get("congestion_control") } : {},
+      ...Number.isFinite(heartbeat) && heartbeat > 0 ? { "heartbeat-interval": heartbeat } : {},
+      udp: true
+    };
+    return proxy;
+  }
+  if (type === "anytls") {
+    let password;
+    try {
+      password = decodeURIComponent(u.username || "") || u.searchParams.get("password") || "";
+    } catch {
+      return null;
+    }
+    if (!password)
+      return null;
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    return {
+      type, name, server, port, password,
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...u.searchParams.get("fp") ? { "client-fingerprint": u.searchParams.get("fp") } : {},
+      ...alpn.length ? { alpn } : {},
+      udp: true
+    };
+  }
   if (type === "vless") {
     const network = u.searchParams.get("type") || "tcp";
     const tlsMode = u.searchParams.get("security") || "none";
+    let uuid;
+    try { uuid = decodeURIComponent(u.username); } catch { return null; }
+    if (!uuid) return null;
     const proxy = {
       type,
       name,
       server,
       port,
-      uuid: decodeURIComponent(u.username),
+      uuid,
       tls: tlsMode !== "none",
       servername: u.searchParams.get("sni") || u.searchParams.get("servername") || void 0,
       network,
@@ -413,16 +496,20 @@ function parseProxy(uri, index) {
       proxy["ws-opts"] = { path, headers: { Host: u.searchParams.get("host") || server } };
     return proxy;
   }
-  if (type === "trojan")
+  if (type === "trojan") {
+    let password;
+    try { password = decodeURIComponent(u.username); } catch { return null; }
+    if (!password) return null;
     return {
       type,
       name,
       server,
       port,
-      password: decodeURIComponent(u.username),
+      password,
       sni: u.searchParams.get("sni") || void 0,
       udp: true
     };
+  }
   if (type === "ss") {
     let credentials;
     if (u.password) {
@@ -445,14 +532,29 @@ function parseProxy(uri, index) {
     const colon = credentials.indexOf(":");
     if (colon < 1)
       return null;
-    return { type, name, server, port, cipher: credentials.slice(0, colon), password: credentials.slice(colon + 1), udp: true };
+    const cipher = credentials.slice(0, colon);
+    const password = credentials.slice(colon + 1);
+    if (!MIHOMO_SS_CIPHERS.has(cipher) || !password)
+      return null;
+    return { type, name, server, port, cipher, password, udp: true };
   }
-  const user = decodeURIComponent(u.username || ""), password = decodeURIComponent(u.password || "");
+  let user, password;
+  try { user = decodeURIComponent(u.username || ""); password = decodeURIComponent(u.password || ""); } catch { return null; }
   return { type: type === "socks5" ? "socks5" : type, name, server, port, ...user ? { username: user } : {}, ...password ? { password } : {}, udp: true };
 }
 __name(parseProxy, "parseProxy");
 __name2(parseProxy, "parseProxy");
 __name22(parseProxy, "parseProxy");
+function parseProxySafely(uri, index) {
+  try {
+    return parseProxy(uri, index);
+  } catch {
+    return null;
+  }
+}
+__name(parseProxySafely, "parseProxySafely");
+__name2(parseProxySafely, "parseProxySafely");
+__name22(parseProxySafely, "parseProxySafely");
 function parseEntry(uri) {
   const proxy = parseProxy(uri, 0);
   if (!proxy)
@@ -928,9 +1030,7 @@ function qualityScore(health, stage3Speed = null) {
   const type = String(health?.classification?.connection_type ?? health?.connection_type ?? "").toLowerCase();
   const speedPart = Math.min(1, speed / GOOD_ENOUGH_MB_S);
   const residential = /resi/.test(type) ? 0.4 : 0;
-  const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
-  const geminiPenalty = gemini?.flagged === true ? -2.5 : 0;
-  return 1.5 * speedPart + residential - 1 * (risk / 100) + geminiPenalty;
+  return 1.5 * speedPart + residential - 1 * (risk / 100);
 }
 __name(qualityScore, "qualityScore");
 __name2(qualityScore, "qualityScore");
@@ -1001,7 +1101,22 @@ __name2(xrayConfig, "xrayConfig");
 __name22(xrayConfig, "xrayConfig");
 function singboxOutbound(proxy, tag, detour = void 0) {
   const out = { type: proxy.type === "socks5" ? "socks" : proxy.type, tag, server: proxy.server, server_port: proxy.port };
-  if (proxy.type === "vless") {
+  if (proxy.type === "hysteria2") {
+    out.password = proxy.password;
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+    if (proxy.obfs)
+      out.obfs = { type: proxy.obfs, ...proxy["obfs-password"] ? { password: proxy["obfs-password"] } : {} };
+  } else if (proxy.type === "tuic") {
+    if (proxy.uuid) out.uuid = proxy.uuid;
+    if (proxy.password) out.password = proxy.password;
+    if (proxy.token) out.token = proxy.token;
+    if (proxy["congestion-controller"]) out.congestion_control = proxy["congestion-controller"];
+    if (proxy["udp-relay-mode"]) out.udp_relay_mode = proxy["udp-relay-mode"];
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+  } else if (proxy.type === "anytls") {
+    out.password = proxy.password;
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+  } else if (proxy.type === "vless") {
     out.uuid = proxy.uuid;
     if (proxy.flow)
       out.flow = proxy.flow;
@@ -1179,6 +1294,8 @@ var index_default = {
       return fail("wireguard_entry_requires_mihomo_xray_or_links_format", 406);
     if (entries.some((entry) => entry.proxy.type === "masque") && format !== "mihomo")
       return fail("masque_entry_requires_mihomo_format", 406);
+    if (entries.some((entry) => ["hysteria2", "tuic", "anytls"].includes(entry.proxy.type)) && format === "xray")
+      return fail("quic_or_anytls_entry_requires_mihomo_or_sing_box_format", 406);
     const origin = (env.FEED_ORIGIN || "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages").replace(/\/$/, "");
     const feedPath = country ? `countries/${country}.txt` : "all.txt";
     const feed = await fetch(`${origin}/${feedPath}`, {
@@ -1193,7 +1310,9 @@ var index_default = {
     if (!feed.ok)
       return fail("country_feed_unavailable", 502);
     const rows = (await feed.text()).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-    let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxy(uri, i + 1) })).filter((item) => item.proxy);
+    let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxySafely(uri, i + 1) })).filter((item) => item.proxy);
+    if (format === "xray")
+      parsed = parsed.filter((item) => !["hysteria2", "tuic", "anytls"].includes(item.proxy.type));
     if (!parsed.length)
       return fail("feed_has_no_supported_proxies", 404);
     // ?secure=1 keeps only exits whose hop is TLS: something is better than a

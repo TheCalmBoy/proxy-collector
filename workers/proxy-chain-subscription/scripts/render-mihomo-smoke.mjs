@@ -9,6 +9,9 @@ const proxies = [
   { type: "ss", name: "shadowsocks", server: "192.0.2.4", port: 8388, cipher: "aes-128-gcm", password: "fixture-password" },
   { type: "socks", name: "socks", server: "192.0.2.5", port: 1080, username: "fixture", password: "fixture-password" },
   { type: "http", name: "http", server: "192.0.2.6", port: 8080 },
+  { type: "hysteria2", name: "hysteria2", server: "192.0.2.7", port: 443, password: "fixture-password", sni: "example.com", obfs: "salamander", "obfs-password": "fixture-obfs" },
+  { type: "tuic", name: "tuic", server: "192.0.2.8", port: 443, uuid: "11111111-2222-3333-4444-555555555555", password: "fixture-password", sni: "example.com", "udp-relay-mode": "native" },
+  { type: "anytls", name: "anytls", server: "192.0.2.9", port: 443, password: "fixture-password", sni: "example.com", "client-fingerprint": "chrome" },
 ];
 const countries = [{
   code: "US",

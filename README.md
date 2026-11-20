@@ -75,12 +75,13 @@ client's User-Agent; override it when detection gets it wrong.
 Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
 `x-health-join`, `x-ech-mode`.
 
-The `Gem web` label is only an unauthenticated Gemini web-front-page reachability
-signal measured from the pipeline runner. It does not prove that Gemini will
-work with a subscriber's Google account, client session, or network. HTTP
-401/403 responses are marked flagged. HTTP 429 is treated as rate-limited and
-unknown because probe volume or shared exits can cause it; transport failures
-and server errors are also unknown rather than evidence of an IP block.
+The `Gemini HTTP 2xx/3xx` label means only that an unauthenticated request to
+the Gemini front page returned that status class from the pipeline runner. It
+does not prove that Gemini will work with a subscriber's Google account, client
+session, or network. HTTP 401/403 are shown separately and do not affect proxy
+ranking. HTTP 429 is treated as rate-limited and unknown because probe volume
+or shared exits can cause it; transport failures and server errors are also
+unknown rather than evidence of an IP block.
 
 **Entrypoints and exits.** `entry64` is the hop that gets out of a filtered network; the
 Worker chains the feed's exits behind it with `dialer-proxy`. Every exit is rendered once
