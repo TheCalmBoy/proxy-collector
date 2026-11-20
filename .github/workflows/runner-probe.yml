@@ -4,6 +4,7 @@ name: Runner capacity probe
 # guesswork. Not part of the proxy pipeline.
 on:
   workflow_dispatch:
+permissions: {}
 jobs:
   probe:
     runs-on: ubuntu-latest

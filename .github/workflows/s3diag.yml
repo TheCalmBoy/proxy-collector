@@ -29,6 +29,9 @@ on:
         type: choice
         options: [published, source]
 
+permissions:
+  contents: read
+
 jobs:
   diagnose:
     runs-on: ubuntu-latest
