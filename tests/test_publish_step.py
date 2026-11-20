@@ -94,6 +94,16 @@ class TestPublishStep(unittest.TestCase):
         self.assertIn("vless://aaaa1111@example.com:443?type=ws#node-us", all_txt)
         self.assertFalse(any("stale" in line for line in all_txt))
 
+    def test_publisher_requires_every_mandatory_stage(self):
+        data = realistic_enriched()
+        candidate = data["configs"][0]
+        candidate["stages"]["speed"]["passed"] = False
+        (self.root / "verify-output" / "enriched-configs.json").write_text(json.dumps(data))
+        proc = self._run_publish()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        all_txt = (self.root / "output" / "all.txt").read_text()
+        self.assertNotIn(candidate["uri"], all_txt)
+
     def test_country_files_written(self):
         self.assertEqual(self._run_publish().returncode, 0)
         us = (self.root / "output" / "countries" / "US.txt").read_text().splitlines()

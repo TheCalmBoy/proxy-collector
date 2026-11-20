@@ -25,7 +25,11 @@ UNKNOWN_COUNTRY = "ZZ"
 def load_records(path: Path) -> list[dict]:
     data = json.loads(path.read_text())
     records = data["configs"] if isinstance(data, dict) else data
-    return [r for r in records if r.get("stages", {}).get("https", {}).get("passed")]
+    required_stages = ("tcp", "speed", "https")
+    return [
+        record for record in records
+        if all(record.get("stages", {}).get(stage, {}).get("passed") is True for stage in required_stages)
+    ]
 
 
 def country_of(record: dict) -> str:
