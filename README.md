@@ -109,7 +109,7 @@ every 30–60 minutes if you use it.
 ```bash
 python3 run_tests.py                  # all pipeline tests
 python3 run_tests.py classify         # only files whose name matches "classify"
-cd workers/proxy-chain-subscription && node --test   # Worker tests
+node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
 ```
 
 CI runs both the Python and Worker suites on every push and pull request
