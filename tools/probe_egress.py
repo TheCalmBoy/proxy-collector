@@ -652,8 +652,12 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
         return {"ok": None, "error": "no_status"}
     # Only explicit reputation-style responses count as flagged. Server errors
     # and unexpected statuses are inconclusive, not evidence against the exit.
-    if status in (401, 403, 429):
+    if status in (401, 403):
         return {"ok": False, "flagged": True, "http_status": status}
+    if status == 429:
+        # A rate limit can be caused by probe volume/shared exits; it is not
+        # sufficient evidence that Google has reputation-blocked this IP.
+        return {"ok": None, "flagged": None, "http_status": status, "error": "rate_limited"}
     if status >= 400:
         return {"ok": None, "flagged": None, "http_status": status}
     return {
@@ -792,7 +796,7 @@ def _gemini_verdict(history: list[bool | None]) -> dict[str, Any]:
 
     Three outcomes, kept distinct on purpose:
       clean    - at least one round served us, and no round was flagged
-      flagged  - any round came back 401/403/429; the IP is on a reputation list
+      flagged  - a round came back 401/403, an explicit access rejection
       unknown  - we never got an answer we can act on
 
     A config that fails the check on one round and passes on another is
