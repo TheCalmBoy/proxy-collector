@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           release=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)
-          asset=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); a=next((a for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), {}); print(a.get("browser_download_url", "")); print(a.get("digest", ""))' "$release")
+          asset=$(printf '%s' "$release" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=next((a for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), {}); print(a.get("browser_download_url", "")); print(a.get("digest", ""))')
           url=$(printf '%s\n' "$asset" | sed -n '1p')
           digest=$(printf '%s\n' "$asset" | sed -n '2p')
           test -n "$url" || { echo "No linux-amd64 Mihomo release asset found"; exit 1; }
