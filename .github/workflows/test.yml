@@ -61,6 +61,26 @@ jobs:
       - name: Run Worker test suite
         run: node --test workers/proxy-chain-subscription/test/*.test.mjs
 
+      # Exercise the production subscription renderer with Mihomo itself.
+      # This catches profile-level incompatibilities that string assertions
+      # cannot detect (one unsupported node can invalidate the entire feed).
+      - name: Install Mihomo
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((a["browser_download_url"] for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), ""))')
+          test -n "$url" || { echo "No linux-amd64 Mihomo release asset found"; exit 1; }
+          curl --fail --location --silent --show-error --retry 3 "$url" -o /tmp/mihomo.gz
+          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
+          sudo install -m 0755 /tmp/mihomo /usr/local/bin/mihomo
+          mihomo -v
+
+      - name: Validate rendered subscription with Mihomo
+        run: |
+          node workers/proxy-chain-subscription/scripts/render-mihomo-smoke.mjs > /tmp/proxy-collector-mihomo.yaml
+          mihomo -t -f /tmp/proxy-collector-mihomo.yaml -d /tmp
+
       # The consistency checker exits non-zero only past --max-mismatch, so at
       # the default 10% budget this passes on live data (measured 6.2%). Raise
       # it deliberately once the upstream geolocation paths agree, not before.
