@@ -44,7 +44,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install --require-hashes -r requirements.txt
 
       - name: Run test suite
         run: python -m unittest discover -s tests -v
@@ -68,28 +68,12 @@ jobs:
       # This catches profile-level incompatibilities that string assertions
       # cannot detect (one unsupported node can invalidate the entire feed).
       - name: Install Mihomo
-        shell: bash
-        run: |
-          set -euo pipefail
-          release=$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)
-          asset=$(printf '%s' "$release" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=next((a for a in d["assets"] if "mihomo-linux-amd64-v" in a["name"] and a["name"].endswith(".gz")), {}); print(a.get("browser_download_url", "")); print(a.get("digest", ""))')
-          url=$(printf '%s\n' "$asset" | sed -n '1p')
-          digest=$(printf '%s\n' "$asset" | sed -n '2p')
-          test -n "$url" || { echo "No linux-amd64 Mihomo release asset found"; exit 1; }
-          curl --fail --location --silent --show-error --retry 3 "$url" -o /tmp/mihomo.gz
-          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "${digest#sha256:}  /tmp/mihomo.gz" | sha256sum --check
-          else
-            echo "GitHub release did not provide an asset digest; checksum verification unavailable"
-          fi
-          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
-          sudo install -m 0755 /tmp/mihomo /usr/local/bin/mihomo
-          mihomo -v
+        run: bash scripts/install-mihomo.sh /tmp/mihomo
 
       - name: Validate rendered subscription with Mihomo
         run: |
           node workers/proxy-chain-subscription/scripts/render-mihomo-smoke.mjs > /tmp/proxy-collector-mihomo.yaml
-          mihomo -t -f /tmp/proxy-collector-mihomo.yaml -d /tmp
+          /tmp/mihomo -t -f /tmp/proxy-collector-mihomo.yaml -d /tmp
 
       # The consistency checker exits non-zero only past --max-mismatch, so at
       # the default 10% budget this passes on live data (measured 6.2%). Raise

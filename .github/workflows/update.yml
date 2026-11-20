@@ -109,7 +109,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install --require-hashes -r requirements.txt
 
       # Gate the publish on the suite. test.yml also runs these on every push,
       # but that is a separate workflow: without this step a failing commit
@@ -459,6 +459,22 @@ jobs:
           # same layout main.py produces so clients see no difference.
           # Logic lives in publish_step.py so it is covered by tests.
           python .github/workflows/publish_step.py
+
+      - name: Set up Node for the production renderer
+        if: github.ref == 'refs/heads/main'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pinned Mihomo for live-feed validation
+        if: github.ref == 'refs/heads/main'
+        run: bash scripts/install-mihomo.sh /tmp/mihomo
+
+      - name: Validate the exact feed being published with Mihomo
+        if: github.ref == 'refs/heads/main'
+        run: |
+          node workers/proxy-chain-subscription/scripts/render-mihomo-feed.mjs output/all.txt > /tmp/proxy-collector-live.yaml
+          /tmp/mihomo -t -f /tmp/proxy-collector-live.yaml -d /tmp
 
       - name: Deploy generated database to gh-pages
         if: github.ref == 'refs/heads/main'
