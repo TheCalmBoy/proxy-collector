@@ -36,6 +36,10 @@ best-effort scheduler cannot skip it. `update.yml` receives that event directly:
 verify → publish to `gh-pages`, then chain `probe-egress.yml` with `gh workflow run`, so
 the probe measures the pool that was just published. One beat, one pool, measured once.
 
+The heartbeat's manual HTTP trigger requires a separate `MANUAL_TRIGGER_TOKEN` secret
+and an `Authorization: Bearer <token>` header. The scheduled cron dispatch does not use
+this manual token.
+
 The beat is 30 minutes rather than 15 because a full chain is update (~6.5 min median,
 12.5 max) plus probe (~5.2 min). At a 15-minute beat the next tick landed mid-chain, the
 update queued on its concurrency group instead of running, and its chained probe landed
@@ -49,7 +53,7 @@ Every workflow is also runnable by hand via `workflow_dispatch`.
 |---|---|
 | `all.txt` | every verified proxy URI, annotated |
 | `countries/<CC>.txt` | the same, split by endpoint country |
-| `all.txt.base64`, `countries/<CC>.base64.txt` | base64 of the above |
+| `all.base64.txt`, `countries/<CC>.base64.txt` | whole-file base64 mirrors of the corresponding plain-text feeds |
 | `manifest.json`, `ATTRIBUTION.txt`, `source_map.json` | index, credits, URI → source |
 | `enriched-configs.json` | configs with their probe and country metadata |
 | `egress-health.json` | measured egress health per exit, refreshed by `probe-egress` |
@@ -108,9 +112,8 @@ python3 run_tests.py classify         # only files whose name matches "classify"
 cd workers/proxy-chain-subscription && node --test   # Worker tests
 ```
 
-CI runs the Python suite on every push and pull request
-(`.github/workflows/test.yml`). The Worker tests are not wired into CI — run them with
-`node --test` as above.
+CI runs both the Python and Worker suites on every push and pull request
+(`.github/workflows/test.yml`). Run the Worker tests locally with `node --test` as above.
 
 `workers/proxy-chain-subscription/scripts/verify-chain.sh` is the end-to-end check
 against a live Worker: it parses the rendered YAML, starts mihomo on it, fetches through

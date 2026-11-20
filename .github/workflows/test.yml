@@ -62,7 +62,7 @@ jobs:
           node-version: "22"
 
       - name: Run Worker test suite
-        run: node --test workers/proxy-chain-subscription/test/*.test.mjs
+        run: node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
 
       # Exercise the production subscription renderer with Mihomo itself.
       # This catches profile-level incompatibilities that string assertions

@@ -108,11 +108,9 @@ class TestPublishStep(unittest.TestCase):
 
     def test_base64_mirror_matches_main_py_convention(self):
         self.assertEqual(self._run_publish().returncode, 0)
-        plain = (self.root / "output" / "all.txt").read_text().splitlines()
-        encoded = (self.root / "output" / "all.base64.txt").read_text().splitlines()
-        self.assertEqual(
-            [base64.b64decode(e).decode() for e in encoded], plain
-        )
+        plain = (self.root / "output" / "all.txt").read_bytes()
+        encoded = (self.root / "output" / "all.base64.txt").read_text().strip()
+        self.assertEqual(base64.b64decode(encoded), plain)
 
     def test_enriched_data_is_published(self):
         self.assertEqual(self._run_publish().returncode, 0)

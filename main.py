@@ -190,10 +190,10 @@ def decode_base64_feed(text: str) -> str:
     response is never decoded -- it falls through as-is and yields nothing.
     """
     looks_like_plain = sum(1 for line in text.splitlines() if "://" in line)
-    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/=\s]", text)
+    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/_=\-\s]", text)
     if looks_like_b64 and looks_like_plain == 0:
         try:
-            return base64.b64decode(text.strip() + "=" * (-len(text.strip()) % 4)).decode("utf-8", "replace")
+            return safe_b64decode(text).decode("utf-8", "replace")
         except Exception:
             return text
     return text
