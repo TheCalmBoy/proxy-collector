@@ -111,6 +111,20 @@ SOURCE_URLS = tuple(
     if url.strip()
 ) or DEFAULT_SOURCE_URLS
 SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URLS[0])
+
+
+def source_label(url: str) -> str:
+    """A log-safe source identifier that omits paths, credentials, and query tokens."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<invalid source URL>"
+        host = parsed.hostname
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return f"{parsed.scheme}://{host}/…"
+    except ValueError:
+        return "<invalid source URL>"
 IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
 # The free ip-api tier rate-limits per source IP, and one runner resolving every
 # config in the corpus trips it long before the batch/pacing logic can help.
@@ -376,7 +390,7 @@ def fetch_source_configs(
             response = session.get(url, timeout=HTTP_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as error:
-            print(f"Source unavailable, skipping: {url} ({error})")
+            print(f"Source unavailable, skipping: {source_label(url)} ({type(error).__name__})")
             continue
 
         added = 0
@@ -388,7 +402,7 @@ def fetch_source_configs(
             lines.append(line)
             provenance[line] = url
             added += 1
-        print(f"  {added:>6} new  {url}")
+        print(f"  {added:>6} new  {source_label(url)}")
 
     if not lines:
         raise RuntimeError("No upstream source returned any configs")
@@ -411,14 +425,14 @@ def fetch_previous_verified(session: requests.Session) -> list[str]:
     if not url:
         return []
 
-    print(f"Re-seeding from previous verified output: {url}")
+    print(f"Re-seeding from previous verified output: {source_label(url)}")
     try:
         response = session.get(url, timeout=HTTP_TIMEOUT)
         response.raise_for_status()
     except requests.RequestException as error:
         # Never fail the run because the carry-over is unavailable; upstream is
         # still a valid source on its own.
-        print(f"Previous verified output unavailable ({error}); continuing without it.")
+        print(f"Previous verified output unavailable ({type(error).__name__}); continuing without it.")
         return []
 
     # The published file is plain text, but accept the base64 sibling too so a
