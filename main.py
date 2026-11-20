@@ -400,7 +400,7 @@ def fetch_source_configs(
                 continue
             seen.add(line)
             lines.append(line)
-            provenance[line] = url
+            provenance[line] = source_label(url)
             added += 1
         print(f"  {added:>6} new  {source_label(url)}")
 
@@ -807,7 +807,8 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": SOURCE_URL,
+        "source": source_label(SOURCE_URL),
+        "sources": [source_label(url) for url in SOURCE_URLS],
         "geoip_database": "DB-IP Lite IP to Country MMDB",
         "geoip_license": "CC BY 4.0 (attribution: https://db-ip.com)",
         "ip_classification": "ip-api.com batch (hosting -> DC/RES)",
