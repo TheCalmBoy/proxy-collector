@@ -71,9 +71,14 @@ client's User-Agent; override it when detection gets it wrong.
 | `entry64` | none | base64 proxy URI for an entrypoint; repeatable. A node link, or a `masque://` URI for the mihomo formats |
 | `secure=1` | off | keep only exits whose hop is TLS |
 | `ech=embed` | off | pin the ECH key into the config instead of leaving it to the client's DNS |
+| `protocol` | all supported | comma-separated exit protocols, such as `vless,vmess,hysteria2,tuic,anytls` |
+| `exclude` | none | comma-separated country codes to omit, such as `CN,RU`; dynamic exits observed in an excluded country are omitted too |
 
-Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
-`x-health-join`, `x-ech-mode`.
+Successful responses include an `ETag` and honor `If-None-Match`, so clients that
+support conditional requests can avoid downloading an unchanged config. The
+response is marked private because entrypoint links can contain credentials.
+Other headers report pipeline state: `x-health-index` (`fresh` / `aged`),
+`x-health-join`, `x-health-age`, and `x-ech-mode`.
 
 The `Gemini HTTP 2xx/3xx` label means only that an unauthenticated request to
 the Gemini front page returned that status class from the pipeline runner. It
@@ -82,6 +87,10 @@ session, or network. HTTP 401/403 are shown separately and do not affect proxy
 ranking. HTTP 429 is treated as rate-limited and unknown because probe volume
 or shared exits can cause it; transport failures and server errors are also
 unknown rather than evidence of an IP block.
+
+Health rows carried from an earlier probe remain available for manual selection
+for at most 24 hours. They are labeled `Stale health` and are excluded from the
+automatic `Best` group; health documents older than 48 hours are ignored.
 
 **Entrypoints and exits.** `entry64` is the hop that gets out of a filtered network; the
 Worker chains the feed's exits behind it with `dialer-proxy`. Every exit is rendered once
@@ -131,8 +140,17 @@ Needs a DB-IP Lite MMDB named `GeoLite2-Country.mmdb` in the repository root:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt
 python main.py
+```
+
+`requirements.in` holds the allowed dependency ranges; `requirements.txt` is
+the Python 3.13 hash-locked resolution used by CI. Regenerate it after an
+intentional dependency update with:
+
+```bash
+uv pip compile requirements.in --generate-hashes --python-version 3.13 \
+  --output-file requirements.txt
 ```
 
 Output lands in `output/`. `MMDB_PATH`, `OUTPUT_DIR`, and `IP_API_URL` are overridable by

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "../index.js";
+import worker, { qualityScore } from "../index.js";
 
 // Two plain-text in-transit exits. plain http => never depends on the health index.
 const FEED = "http://1.2.3.4:8080#DE-1\nhttp://5.6.7.8:8080#NL-1\n";
@@ -31,6 +31,10 @@ function stub({ healthStatus = 404, health = null } = {}) {
 const call = () =>
   worker.fetch(new Request(`https://w.example/sub?format=mihomo&entry64=${ENTRY}`), {});
 
+test("carried health cannot rank a node into Best", () => {
+  assert.equal(qualityScore({ stale: true, classification: { min_fraud_score: 1 } }, 20), -1);
+});
+
 test("missing health doc serves instead of 503", async () => {
   stub({ healthStatus: 404 });
   const res = await call();
@@ -39,16 +43,14 @@ test("missing health doc serves instead of 503", async () => {
   assert.match(await res.text(), /^proxies:/m);
 });
 
-test("aged health doc (3 days) serves with an age header", async () => {
+test("health older than 48 hours is ignored and served without filtering", async () => {
   stub({
     healthStatus: 200,
     health: { generated_at: new Date(Date.now() - 3 * DAY).toISOString(), configs: {} },
   });
   const res = await call();
   assert.equal(res.status, 200);
-  assert.equal(res.headers.get("x-health-index"), "aged");
-  const age = Number(res.headers.get("x-health-age"));
-  assert.ok(Math.abs(age - 3 * 86400) < 120, `age header was ${age}`);
+  assert.equal(res.headers.get("x-health-index"), "unusable");
 });
 
 test("unparseable generated_at degrades instead of 503", async () => {
@@ -65,7 +67,7 @@ test("health endpoint 500 degrades instead of 503", async () => {
   assert.equal(res.headers.get("x-health-index"), "unavailable");
 });
 
-test("older than the 7-day ceiling is ignored, still serves", async () => {
+test("older than the 48-hour ceiling is ignored, still serves", async () => {
   stub({
     healthStatus: 200,
     health: { generated_at: new Date(Date.now() - 8 * DAY).toISOString(), configs: {} },
@@ -106,7 +108,7 @@ test("fresh data that verifies nothing still 503s (preserved)", async () => {
 test("successful aged response still produces a usable mihomo config", async () => {
   stub({
     healthStatus: 200,
-    health: { generated_at: new Date(Date.now() - 2 * DAY).toISOString(), configs: {} },
+    health: { generated_at: new Date(Date.now() - 36 * 3600e3).toISOString(), configs: {} },
   });
   const res = await call();
   const body = await res.text();

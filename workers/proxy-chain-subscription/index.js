@@ -9,8 +9,25 @@ var __name22 = /* @__PURE__ */ __name2((target, value) => __defProp22(target, "n
 var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
 // Above the soft threshold we still serve the index (aged) instead of hard-failing
 // the whole subscription; above this we ignore it entirely and serve unfiltered.
-var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
+var HEALTH_HARD_MAX_AGE_MS = 48 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
+var PROTOCOL_ALIASES = {
+  ss: "ss",
+  shadowsocks: "ss",
+  socks: "socks5",
+  socks5: "socks5",
+  hy2: "hysteria2"
+};
+var FILTERABLE_PROTOCOLS = /* @__PURE__ */ new Set([
+  "vless", "vmess", "trojan", "ss", "socks5", "http", "wireguard",
+  "masque", "hysteria2", "tuic", "anytls"
+]);
+function canonicalProtocol(type) {
+  return PROTOCOL_ALIASES[type] || type;
+}
+__name(canonicalProtocol, "canonicalProtocol");
+__name2(canonicalProtocol, "canonicalProtocol");
+__name22(canonicalProtocol, "canonicalProtocol");
 // Local traffic must never be sent through an exit node. Without these the only
 // rule is MATCH,<proxy>, so the router, NAS, printers, mDNS names and loopback
 // all get tunnelled to a foreign exit - where they simply fail. no-resolve
@@ -40,6 +57,27 @@ function reply(body, status = 200, type = "application/json; charset=utf-8", ext
 __name(reply, "reply");
 __name2(reply, "reply");
 __name22(reply, "reply");
+async function replyWithEtag(request, body, type, extra = null) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+  const encoded = btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const etag = `"${encoded}"`;
+  const headers = {
+    "content-type": type,
+    "cache-control": "private, no-cache, must-revalidate",
+    "x-content-type-options": "nosniff",
+    etag,
+    ...extra || {}
+  };
+  const condition = request.headers.get("if-none-match");
+  const matches = condition && condition.split(",").some((candidate) => {
+    const value = candidate.trim();
+    return value === "*" || value.replace(/^W\//, "") === etag;
+  });
+  return matches ? new Response(null, { status: 304, headers }) : new Response(body, { status: 200, headers });
+}
+__name(replyWithEtag, "replyWithEtag");
+__name2(replyWithEtag, "replyWithEtag");
+__name22(replyWithEtag, "replyWithEtag");
 function fail(error, status = 400, extra = null) {
   return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
@@ -151,6 +189,8 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
     const kindValue = typeof kindRaw === "string" ? kindRaw.replace(/[^a-z0-9 -]/gi, "").trim() : "";
     const kind = /resi/i.test(kindValue) ? "Resi" : /data.?center|hosting/i.test(kindValue) ? "DC" : "";
     const tags = [`${risk}${kind ? " " + kind : ""}`];
+    if (health.stale === true)
+      tags.push("Stale health");
     if (geminiTag)
       tags.push(geminiTag);
     const stability = health.stability || (String(classification.type || "").startsWith("dynamic") ? "Changed" : null);
@@ -1020,7 +1060,7 @@ __name2(xrayOutbound, "xrayOutbound");
 __name22(xrayOutbound, "xrayOutbound");
 var GOOD_ENOUGH_MB_S = 50;
 function qualityScore(health, stage3Speed = null) {
-  if (!health)
+  if (!health || health.stale === true)
     return -1;
   const speed = Number(stage3Speed);
   if (!Number.isFinite(speed) || speed < 0.01)
@@ -1278,6 +1318,22 @@ var index_default = {
     if (requestedCountry && requestedCountry !== "ALL" && !COUNTRY_RE.test(requestedCountry))
       return fail("country_must_be_two_letter_iso_code_or_ALL");
     const country = requestedCountry === "ALL" ? "" : requestedCountry;
+    const rawProtocols = url.searchParams.get("protocol");
+    let protocolFilter = null;
+    if (rawProtocols !== null) {
+      const requestedProtocols = rawProtocols.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+      if (!requestedProtocols.length || requestedProtocols.some((item) => !FILTERABLE_PROTOCOLS.has(canonicalProtocol(item))))
+        return fail("protocol_must_be_a_comma_separated_list_of_supported_protocols");
+      protocolFilter = new Set(requestedProtocols.map(canonicalProtocol));
+    }
+    const rawExcludedCountries = url.searchParams.get("exclude");
+    let excludedCountries = new Set();
+    if (rawExcludedCountries !== null) {
+      const excluded = rawExcludedCountries.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);
+      if (excluded.some((item) => !COUNTRY_RE.test(item)))
+        return fail("exclude_must_be_a_comma_separated_list_of_two_letter_country_codes");
+      excludedCountries = new Set(excluded);
+    }
     let entries;
     try {
       entries = decodeEntries(url);
@@ -1310,11 +1366,17 @@ var index_default = {
     if (!feed.ok)
       return fail("country_feed_unavailable", 502);
     const rows = (await feed.text()).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-    let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxySafely(uri, i + 1) })).filter((item) => item.proxy);
+    let parsed = rows.map((uri, i) => {
+      const scheme = uri.slice(0, uri.indexOf(":")).toLowerCase();
+      if (protocolFilter && !protocolFilter.has(canonicalProtocol(scheme)))
+        return null;
+      const proxy = parseProxySafely(uri, i + 1);
+      return proxy ? { uri, proxy } : null;
+    }).filter(Boolean);
     if (format === "xray")
       parsed = parsed.filter((item) => !["hysteria2", "tuic", "anytls"].includes(item.proxy.type));
     if (!parsed.length)
-      return fail("feed_has_no_supported_proxies", 404);
+      return fail(protocolFilter ? "no_proxies_match_protocol_filter" : "feed_has_no_supported_proxies", 404);
     // ?secure=1 keeps only exits whose hop is TLS: something is better than a
     // bare protocol when the ISP is the threat model.
     if (url.searchParams.get("secure") === "1") {
@@ -1417,6 +1479,13 @@ var index_default = {
     const RAINBOW_KEY = "ZZ-RAINBOW";
     for (const item of parsed) {
       const health = resolveHealthFor(item.proxy, healthById, healthEndpointIndex);
+      const classification = health?.classification && typeof health.classification === "object" ? health.classification : health || {};
+      const remarkCountry = /^([A-Z]{2})-/.exec(item.proxy.name || "")?.[1];
+      const observedCountries = [health?.primary_country, classification.country, remarkCountry, ...(Array.isArray(classification.countries) ? classification.countries : [])]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.toUpperCase());
+      if (observedCountries.some((code) => excludedCountries.has(code)))
+        continue;
       const crossesBorders = !!health && String(health.classification?.same_country) === "false" && Array.isArray(health.classification?.countries) && health.classification.countries.length > 1;
       if (crossesBorders) {
         if (!grouped.has(RAINBOW_KEY))
@@ -1459,17 +1528,19 @@ var index_default = {
       return { code, items: capped.map((entry) => entry.item), exits, baseNames, variants };
     });
     if (!countries.length)
-      return fail("no_recently_verified_proxies", 503, healthHeaders());
+      return excludedCountries.size
+        ? fail("no_proxies_match_filters", 404, healthHeaders())
+        : fail("no_recently_verified_proxies", 503, healthHeaders());
     const joinHeaders = { ...healthHeaders(), ...echHeaders };
     if (format === "links" || !entries.length && (format === "xray" || format === "unknown")) {
       const links = countries.flatMap((group) => group.items.map((item, index) => withUriName(item.uri, group.baseNames[index])));
       if (entries.length)
         links.unshift(...entries.map((entry) => withUriName(entry.uri, entry.tag)));
-      return reply(b64(links.join("\n")), 200, "text/plain; charset=utf-8", joinHeaders);
+      return replyWithEtag(request, b64(links.join("\n")), "text/plain; charset=utf-8", joinHeaders);
     }
     const dnsPref = url.searchParams.get("dns") !== "0";
     const render = format === "mihomo" ? (e, c, h, s) => mihomo(e, c, h, s, { dns: dnsPref }) : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
-    return reply(render(entries, countries, healthById, speedByEndpoint), 200, format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
+    return replyWithEtag(request, render(entries, countries, healthById, speedByEndpoint), format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
   }
 };
 export {
