@@ -476,6 +476,10 @@ jobs:
           node workers/proxy-chain-subscription/scripts/render-mihomo-feed.mjs output/all.txt > /tmp/proxy-collector-live.yaml
           /tmp/mihomo -t -f /tmp/proxy-collector-live.yaml -d /tmp
 
+      - name: Add the public pool dashboard
+        if: github.ref == 'refs/heads/main'
+        run: cp dashboard/index.html output/index.html
+
       - name: Deploy generated database to gh-pages
         if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4.1.0

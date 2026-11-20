@@ -51,6 +51,7 @@ Every workflow is also runnable by hand via `workflow_dispatch`.
 
 | File | Contents |
 |---|---|
+| `index.html` | static dashboard with pool size, protocol mix, country labels, and health freshness |
 | `all.txt` | every verified proxy URI, annotated |
 | `countries/<CC>.txt` | the same, split by endpoint country |
 | `all.base64.txt`, `countries/<CC>.base64.txt` | whole-file base64 mirrors of the corresponding plain-text feeds |
