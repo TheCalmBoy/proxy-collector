@@ -745,6 +745,7 @@ def write_text_and_b64(path: Path, lines: list[str]) -> None:
 
 
 def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
+    output_started = time.monotonic()
     countries_dir = OUTPUT_DIR / "countries"
     countries_dir.mkdir(parents=True, exist_ok=True)
 
@@ -806,6 +807,9 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
         for source in sorted(per_source_published | per_source_candidates)
     }
 
+    stats.setdefault("durations_seconds", {})["build_outputs_before_manifest"] = round(
+        time.monotonic() - output_started, 3
+    )
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": source_label(SOURCE_URL),
@@ -857,6 +861,7 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    run_started = time.monotonic()
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
     # Feed and carry-over reads are idempotent GETs. Retry transient upstream
@@ -883,8 +888,10 @@ def main() -> None:
             "The GitHub Actions workflow should download DB-IP Lite before running main.py."
         )
 
+    stage_started = time.monotonic()
     upstream_lines, line_sources = fetch_source_configs(session)
     carryover_lines = fetch_previous_verified(session)
+    fetch_seconds = time.monotonic() - stage_started
     print(f"Loaded {len(upstream_lines)} unique config lines from the source.")
 
     # Union upstream with our own last winners. Dedup on the base URI (the part
@@ -931,10 +938,12 @@ def main() -> None:
     # and would otherwise block on the first lookup for each distinct name.
     # Collecting hosts first costs one extra cheap pass over the lines and
     # makes the wait a single measurable, concurrent step.
+    stage_started = time.monotonic()
     endpoints = [parse_endpoint(line) for line in source_lines]
     distinct_hosts = {host for _, host in endpoints if host}
     print(f"Collected {len(distinct_hosts)} distinct hosts from {len(source_lines)} lines.")
     prewarm_dns(sorted(distinct_hosts))
+    dns_seconds = time.monotonic() - stage_started
 
     stats: dict[str, Any] = {
         "source_entries": len(source_lines),
@@ -950,6 +959,7 @@ def main() -> None:
         "classifications": {},
     }
 
+    stage_started = time.monotonic()
     records: list[dict[str, Any]] = []
     protocol_counter: Counter[str] = Counter()
     ip_to_records: defaultdict[str, list[int]] = defaultdict(list)
@@ -984,9 +994,11 @@ def main() -> None:
 
     unique_ips = sorted(ip_to_records)
     stats["unique_ips"] = len(unique_ips)
+    parse_geoip_seconds = time.monotonic() - stage_started
 
     print(f"Parsed {stats['parsed_entries']} entries; {len(unique_ips)} unique public IPs.")
     print("Querying hosting/ISP metadata...")
+    stage_started = time.monotonic()
     api_results = query_ip_api(build_ip_api_session(session), unique_ips)
 
     classifications: Counter[str] = Counter()
@@ -1009,6 +1021,13 @@ def main() -> None:
 
     stats["protocols"] = dict(sorted(protocol_counter.items()))
     stats["classifications"] = dict(sorted(classifications.items()))
+    stats["durations_seconds"] = {
+        "fetch_sources": round(fetch_seconds, 3),
+        "parse_and_dns": round(dns_seconds, 3),
+        "parse_and_geoip": round(parse_geoip_seconds, 3),
+        "ip_api_and_annotation": round(time.monotonic() - stage_started, 3),
+        "before_output": round(time.monotonic() - run_started, 3),
+    }
 
     build_outputs(records, stats)
 

@@ -72,8 +72,8 @@ class TestProvenanceMap(unittest.TestCase):
             main.SOURCE_URLS = original
 
         self.assertEqual(len(lines), 2)
-        self.assertEqual(sources["vless://one@1.1.1.1:443"], A)
-        self.assertEqual(sources["vless://two@2.2.2.2:443"], B)
+        self.assertEqual(sources["vless://one@1.1.1.1:443"], main.source_label(A))
+        self.assertEqual(sources["vless://two@2.2.2.2:443"], main.source_label(B))
 
     def test_duplicate_line_credited_to_first_source(self):
         shared = "vless://same@3.3.3.3:443"
@@ -87,7 +87,7 @@ class TestProvenanceMap(unittest.TestCase):
 
         self.assertEqual(len(lines), 2)
         # First-wins keeps the per-source counts summing to the union total.
-        self.assertEqual(sources[shared], A)
+        self.assertEqual(sources[shared], main.source_label(A))
 
     def test_failed_source_does_not_lose_the_others(self):
         session = _FakeSession({B: "vless://ok@5.5.5.5:443\n"}, fail={A})
@@ -99,7 +99,7 @@ class TestProvenanceMap(unittest.TestCase):
             main.SOURCE_URLS = original
 
         self.assertEqual(lines, ["vless://ok@5.5.5.5:443"])
-        self.assertEqual(sources["vless://ok@5.5.5.5:443"], B)
+        self.assertEqual(sources["vless://ok@5.5.5.5:443"], main.source_label(B))
 
     def test_all_sources_failing_still_raises(self):
         session = _FakeSession({}, fail={A, B})
@@ -110,6 +110,12 @@ class TestProvenanceMap(unittest.TestCase):
                 main.fetch_source_configs(session)
         finally:
             main.SOURCE_URLS = original
+
+    def test_source_label_removes_url_credentials_and_query_tokens(self):
+        self.assertEqual(
+            main.source_label("https://user:pass@example.invalid/a.txt?token=secret#fragment"),
+            "https://example.invalid/a.txt",
+        )
 
 
 class TestPerSourceTally(unittest.TestCase):
