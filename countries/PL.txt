@@ -1,0 +1,3 @@
+vless://352a250d-080b-47b5-b7db-f9f8fa31c551@45.194.66.177:443?encryption=none&flow=xtls-rprx-vision&fp=chrome&security=tls&sni=31tawwo0.virtual-network.lol&type=tcp#PL-RES-AS197574-F821500BDE42
+vless://e1cf85dd-8de4-44de-86f9-86dd81ae677a@191.217.244.244:443?encryption=none&flow=xtls-rprx-vision&pbk=n7jBvniXhdIPJbvDf85x0Q9o067VlnnnJplSJd5KDX8&security=reality&sni=gmb.bachidze.com&type=tcp&fp=ios#PL-RES-AS207513-C064C159F38C
+vless://e1cf85dd-8de4-44de-86f9-86dd81ae677a@gmb.bachidze.com:443?type=tcp&headerType=none&security=reality&encryption=none&sni=gmb.bachidze.com&fp=firefox&pbk=n7jBvniXhdIPJbvDf85x0Q9o067VlnnnJplSJd5KDX8&flow=xtls-rprx-vision#PL-RES-AS207513-1685FB089661

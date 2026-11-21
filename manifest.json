@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-11-21T15:00:58.053310+00:00",
+  "source": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+  "geoip_database": "DB-IP Lite IP to Country MMDB",
+  "geoip_license": "CC BY 4.0 (attribution: https://db-ip.com)",
+  "ip_classification": "ip-api.com batch (hosting -> DC/RES)",
+  "stats": {
+    "source_entries": 1558,
+    "upstream_entries": 3028,
+    "carryover_entries": 0,
+    "parsed_entries": 1558,
+    "unresolved_entries": 0,
+    "unsupported_entries": 0,
+    "unique_ips": 876,
+    "ip_api_success": 1558,
+    "ip_api_failed": 0,
+    "protocols": {
+      "hysteria2": 9,
+      "socks": 2,
+      "ss": 626,
+      "trojan": 137,
+      "vless": 585,
+      "vmess": 199
+    },
+    "classifications": {
+      "DC": 667,
+      "RES": 890,
+      "UNKNOWN": 1
+    },
+    "country_counts": {
+      "AE": 6,
+      "AL": 5,
+      "AT": 2,
+      "AU": 7,
+      "BG": 4,
+      "BR": 4,
+      "BY": 13,
+      "CA": 118,
+      "CH": 18,
+      "CL": 3,
+      "CN": 1,
+      "CY": 2,
+      "CZ": 1,
+      "DE": 166,
+      "DK": 1,
+      "EE": 15,
+      "ES": 28,
+      "FI": 27,
+      "FR": 71,
+      "GB": 59,
+      "HK": 17,
+      "IE": 3,
+      "IN": 2,
+      "IR": 12,
+      "IT": 40,
+      "JP": 40,
+      "KR": 23,
+      "KZ": 10,
+      "LT": 4,
+      "LV": 2,
+      "NE": 1,
+      "NL": 217,
+      "NO": 3,
+      "PL": 20,
+      "RO": 3,
+      "RU": 24,
+      "SE": 24,
+      "SG": 60,
+      "SK": 4,
+      "TH": 1,
+      "TR": 17,
+      "TW": 4,
+      "UA": 4,
+      "US": 467,
+      "VN": 1,
+      "ZA": 4
+    },
+    "output_entries": 1558,
+    "per_source": {
+      "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt": {
+        "candidates": 1027,
+        "after_dedup": 1027,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt": {
+        "candidates": 400,
+        "after_dedup": 400,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/iampedii/whitedns-sub/main/base64.txt": {
+        "candidates": 131,
+        "after_dedup": 131,
+        "overlap": 0
+      }
+    },
+    "verified_survivors": 412,
+    "verified_countries": 31
+  },
+  "files": {
+    "all": "all.txt",
+    "all_base64": "all.base64.txt",
+    "countries": "countries/",
+    "enriched": "enriched-configs.json"
+  }
+}
