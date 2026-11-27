@@ -65,6 +65,13 @@ jobs:
       - name: Run Worker test suite
         run: node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
 
+      - name: Check Worker sources are not bundled output
+        run: |
+          if grep -Eq '__name2|sourceMappingURL' workers/proxy-chain-subscription/index.js workers/proxy-egress-ip-check/index.js; then
+            echo "Generated esbuild helpers or source maps found in Worker source files." >&2
+            exit 1
+          fi
+
       # Exercise the production subscription renderer with Mihomo itself.
       # This catches profile-level incompatibilities that string assertions
       # cannot detect (one unsupported node can invalidate the entire feed).
