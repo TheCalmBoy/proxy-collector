@@ -2,6 +2,7 @@ import asyncio
 import base64
 import importlib.util
 import io
+import ipaddress
 import json
 import os
 import tempfile
@@ -66,6 +67,17 @@ class InboundPortAllocationTests(unittest.TestCase):
 
 
 class VerifyPortRoutingTests(unittest.TestCase):
+    def setUp(self):
+        def public_fixture(host):
+            try:
+                return host if ipaddress.ip_address(host).is_global else None
+            except ValueError:
+                return "93.184.216.34"
+
+        patcher = mock.patch.object(verify, "resolve_public_endpoint", side_effect=public_fixture)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_build_preserves_remote_and_local_ports(self):
         config, records, _ = verify.build_sing_box_config(
             ["socks5://user:pass@example.com:1080"]
@@ -78,6 +90,24 @@ class VerifyPortRoutingTests(unittest.TestCase):
         # overlapped 32768-60999 on large batches.
         self.assertLess(records[0]["port"], verify._ephemeral_bounds()[0])
         self.assertEqual(config["inbounds"][0]["listen_port"], records[0]["port"])
+
+    def test_outbound_is_pinned_but_metadata_keeps_original_host(self):
+        with mock.patch.object(verify, "resolve_public_endpoint", return_value="8.8.4.4"):
+            config, records, _ = verify.build_sing_box_config(
+                ["trojan://pass@example.com:443?sni=front.example"]
+            )
+        self.assertEqual(config["outbounds"][0]["server"], "8.8.4.4")
+        self.assertEqual(config["outbounds"][0]["tls"]["server_name"], "front.example")
+        self.assertEqual(records[0]["server"], "example.com")
+
+    def test_non_global_literal_is_rejected_before_probe_config(self):
+        config, records, stats = verify.build_sing_box_config(
+            ["socks5://127.0.0.1:1080"]
+        )
+        self.assertEqual(records, [])
+        self.assertEqual(stats["unsupported"], 1)
+        self.assertEqual(stats["skip_non_global_or_unresolved_endpoint"], 1)
+        self.assertEqual(config["outbounds"], [{"type": "direct", "tag": "direct"}])
 
     def test_limit_verification_keeps_config_and_records_in_sync(self):
         config, records, stats = verify.build_sing_box_config(

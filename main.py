@@ -6,7 +6,6 @@ import ipaddress
 import json
 import os
 import re
-import socket
 import time
 import urllib.parse
 from collections import Counter, defaultdict
@@ -17,6 +16,9 @@ from typing import Any
 
 import geoip2.database
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from tools.endpoint_safety import resolve_public_endpoint
 
 
 # One upstream, and that is a measured decision rather than a default.
@@ -109,6 +111,21 @@ SOURCE_URLS = tuple(
     if url.strip()
 ) or DEFAULT_SOURCE_URLS
 SOURCE_URL = os.getenv("SOURCE_URL", DEFAULT_SOURCE_URLS[0])
+
+
+def source_label(url: str) -> str:
+    """A source identifier that preserves public paths but strips URL secrets."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "<invalid source URL>"
+        host = parsed.hostname
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        path = parsed.path or "/"
+        return f"{parsed.scheme}://{host}{path}"
+    except ValueError:
+        return "<invalid source URL>"
 IP_API_URL = os.getenv("IP_API_URL", "http://ip-api.com/batch")
 # The free ip-api tier rate-limits per source IP, and one runner resolving every
 # config in the corpus trips it long before the batch/pacing logic can help.
@@ -130,7 +147,7 @@ HTTP_TIMEOUT = 30
 # thread/process ceiling and well under the file-descriptor limit, and DNS
 # lookups are pure network wait, so this is I/O bound rather than CPU bound.
 DNS_WARMUP_WORKERS = 32
-USER_AGENT = "proxy-collector/1.0 (+https://github.com/your-repo)"
+USER_AGENT = "proxy-collector/1.0 (+https://github.com/TheCalmBoy/proxy-collector)"
 
 
 # Protocols whose endpoint can normally be extracted from a URI using urlsplit().
@@ -173,10 +190,10 @@ def decode_base64_feed(text: str) -> str:
     response is never decoded -- it falls through as-is and yields nothing.
     """
     looks_like_plain = sum(1 for line in text.splitlines() if "://" in line)
-    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/=\s]", text)
+    looks_like_b64 = text.strip() and not re.search(r"[^A-Za-z0-9+/_=\-\s]", text)
     if looks_like_b64 and looks_like_plain == 0:
         try:
-            return base64.b64decode(text.strip() + "=" * (-len(text.strip()) % 4)).decode("utf-8", "replace")
+            return safe_b64decode(text).decode("utf-8", "replace")
         except Exception:
             return text
     return text
@@ -236,15 +253,10 @@ def parse_endpoint(uri: str) -> tuple[str | None, str | None]:
 
 def is_public_ip(value: str) -> bool:
     try:
-        ip = ipaddress.ip_address(value)
-        return not (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        )
+        # `not private/reserved` is not the same as globally routable: e.g.
+        # shared carrier-grade NAT space (100.64.0.0/10) has historically
+        # slipped through those exclusions. Only accept globally reachable IPs.
+        return ipaddress.ip_address(value).is_global
     except ValueError:
         return False
 
@@ -329,31 +341,7 @@ def _resolve_host_uncached(host: str) -> str | None:
     if any(len(label) > 63 for label in host.split(".")):
         return None
 
-    try:
-        ipaddress.ip_address(host)
-        return host if is_public_ip(host) else None
-    except ValueError:
-        pass
-
-    try:
-        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except (OSError, UnicodeError, ValueError):
-        # gaierror/herror/timeout are OSError; UnicodeError covers the idna
-        # failures above; ValueError keeps the ip_address branch honest.
-        return None
-
-    candidates: list[str] = []
-    for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            continue
-        address = sockaddr[0]
-        if is_public_ip(address) and address not in candidates:
-            candidates.append(address)
-
-    # Prefer IPv4 for compatibility with downstream APIs and simpler diagnostics.
-    candidates.sort(key=lambda value: (":" in value, value))
-    return candidates[0] if candidates else None
+    return resolve_public_endpoint(host)
 
 
 def fetch_source_configs(
@@ -379,7 +367,7 @@ def fetch_source_configs(
             response = session.get(url, timeout=HTTP_TIMEOUT)
             response.raise_for_status()
         except requests.RequestException as error:
-            print(f"Source unavailable, skipping: {url} ({error})")
+            print(f"Source unavailable, skipping: {source_label(url)} ({type(error).__name__})")
             continue
 
         added = 0
@@ -389,9 +377,9 @@ def fetch_source_configs(
                 continue
             seen.add(line)
             lines.append(line)
-            provenance[line] = url
+            provenance[line] = source_label(url)
             added += 1
-        print(f"  {added:>6} new  {url}")
+        print(f"  {added:>6} new  {source_label(url)}")
 
     if not lines:
         raise RuntimeError("No upstream source returned any configs")
@@ -414,14 +402,14 @@ def fetch_previous_verified(session: requests.Session) -> list[str]:
     if not url:
         return []
 
-    print(f"Re-seeding from previous verified output: {url}")
+    print(f"Re-seeding from previous verified output: {source_label(url)}")
     try:
         response = session.get(url, timeout=HTTP_TIMEOUT)
         response.raise_for_status()
     except requests.RequestException as error:
         # Never fail the run because the carry-over is unavailable; upstream is
         # still a valid source on its own.
-        print(f"Previous verified output unavailable ({error}); continuing without it.")
+        print(f"Previous verified output unavailable ({type(error).__name__}); continuing without it.")
         return []
 
     # The published file is plain text, but accept the base64 sibling too so a
@@ -733,6 +721,7 @@ def write_text_and_b64(path: Path, lines: list[str]) -> None:
 
 
 def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
+    output_started = time.monotonic()
     countries_dir = OUTPUT_DIR / "countries"
     countries_dir.mkdir(parents=True, exist_ok=True)
 
@@ -794,9 +783,13 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
         for source in sorted(per_source_published | per_source_candidates)
     }
 
+    stats.setdefault("durations_seconds", {})["build_outputs_before_manifest"] = round(
+        time.monotonic() - output_started, 3
+    )
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": SOURCE_URL,
+        "source": source_label(SOURCE_URL),
+        "sources": [source_label(url) for url in SOURCE_URLS],
         "geoip_database": "DB-IP Lite IP to Country MMDB",
         "geoip_license": "CC BY 4.0 (attribution: https://db-ip.com)",
         "ip_classification": "ip-api.com batch (hosting -> DC/RES)",
@@ -844,8 +837,26 @@ def build_outputs(records: list[dict[str, Any]], stats: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    run_started = time.monotonic()
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
+    # Feed and carry-over reads are idempotent GETs. Retry transient upstream
+    # failures with bounded backoff so one temporary 429/5xx does not silently
+    # shrink the candidate pool. POST geolocation batches are deliberately not
+    # retried here; query_ip_api owns their rate-limit behavior.
+    source_retries = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=source_retries, pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
     if not Path(MMDB_PATH).exists():
         raise FileNotFoundError(
@@ -853,8 +864,10 @@ def main() -> None:
             "The GitHub Actions workflow should download DB-IP Lite before running main.py."
         )
 
+    stage_started = time.monotonic()
     upstream_lines, line_sources = fetch_source_configs(session)
     carryover_lines = fetch_previous_verified(session)
+    fetch_seconds = time.monotonic() - stage_started
     print(f"Loaded {len(upstream_lines)} unique config lines from the source.")
 
     # Union upstream with our own last winners. Dedup on the base URI (the part
@@ -901,10 +914,12 @@ def main() -> None:
     # and would otherwise block on the first lookup for each distinct name.
     # Collecting hosts first costs one extra cheap pass over the lines and
     # makes the wait a single measurable, concurrent step.
+    stage_started = time.monotonic()
     endpoints = [parse_endpoint(line) for line in source_lines]
     distinct_hosts = {host for _, host in endpoints if host}
     print(f"Collected {len(distinct_hosts)} distinct hosts from {len(source_lines)} lines.")
     prewarm_dns(sorted(distinct_hosts))
+    dns_seconds = time.monotonic() - stage_started
 
     stats: dict[str, Any] = {
         "source_entries": len(source_lines),
@@ -920,6 +935,7 @@ def main() -> None:
         "classifications": {},
     }
 
+    stage_started = time.monotonic()
     records: list[dict[str, Any]] = []
     protocol_counter: Counter[str] = Counter()
     ip_to_records: defaultdict[str, list[int]] = defaultdict(list)
@@ -954,9 +970,11 @@ def main() -> None:
 
     unique_ips = sorted(ip_to_records)
     stats["unique_ips"] = len(unique_ips)
+    parse_geoip_seconds = time.monotonic() - stage_started
 
     print(f"Parsed {stats['parsed_entries']} entries; {len(unique_ips)} unique public IPs.")
     print("Querying hosting/ISP metadata...")
+    stage_started = time.monotonic()
     api_results = query_ip_api(build_ip_api_session(session), unique_ips)
 
     classifications: Counter[str] = Counter()
@@ -979,6 +997,13 @@ def main() -> None:
 
     stats["protocols"] = dict(sorted(protocol_counter.items()))
     stats["classifications"] = dict(sorted(classifications.items()))
+    stats["durations_seconds"] = {
+        "fetch_sources": round(fetch_seconds, 3),
+        "parse_and_dns": round(dns_seconds, 3),
+        "parse_and_geoip": round(parse_geoip_seconds, 3),
+        "ip_api_and_annotation": round(time.monotonic() - stage_started, 3),
+        "before_output": round(time.monotonic() - run_started, 3),
+    }
 
     build_outputs(records, stats)
 

@@ -9,8 +9,25 @@ var __name22 = /* @__PURE__ */ __name2((target, value) => __defProp22(target, "n
 var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
 // Above the soft threshold we still serve the index (aged) instead of hard-failing
 // the whole subscription; above this we ignore it entirely and serve unfiltered.
-var HEALTH_HARD_MAX_AGE_MS = 7 * 24 * 60 * 6e4;
+var HEALTH_HARD_MAX_AGE_MS = 48 * 60 * 6e4;
 var COUNTRY_RE = /^[A-Z]{2}$/;
+var PROTOCOL_ALIASES = {
+  ss: "ss",
+  shadowsocks: "ss",
+  socks: "socks5",
+  socks5: "socks5",
+  hy2: "hysteria2"
+};
+var FILTERABLE_PROTOCOLS = /* @__PURE__ */ new Set([
+  "vless", "vmess", "trojan", "ss", "socks5", "http", "wireguard",
+  "masque", "hysteria2", "tuic", "anytls"
+]);
+function canonicalProtocol(type) {
+  return PROTOCOL_ALIASES[type] || type;
+}
+__name(canonicalProtocol, "canonicalProtocol");
+__name2(canonicalProtocol, "canonicalProtocol");
+__name22(canonicalProtocol, "canonicalProtocol");
 // Local traffic must never be sent through an exit node. Without these the only
 // rule is MATCH,<proxy>, so the router, NAS, printers, mDNS names and loopback
 // all get tunnelled to a foreign exit - where they simply fail. no-resolve
@@ -31,7 +48,8 @@ var LOCAL_DIRECT_RULES = [
   "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
   "DOMAIN-SUFFIX,local,DIRECT"
 ];
-var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"]);
+var ALLOWED_SCHEMES = /* @__PURE__ */ new Set(["vless", "vmess", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque", "hysteria2", "hy2", "tuic", "anytls"]);
+var MIHOMO_SS_CIPHERS = /* @__PURE__ */ new Set(["aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "rc4-md5", "chacha20-ietf", "xchacha20", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305", "none"]);
 function reply(body, status = 200, type = "application/json; charset=utf-8", extra = null) {
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
   return new Response(body, { status, headers });
@@ -39,6 +57,54 @@ function reply(body, status = 200, type = "application/json; charset=utf-8", ext
 __name(reply, "reply");
 __name2(reply, "reply");
 __name22(reply, "reply");
+async function replyWithEtag(request, body, type, extra = null) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+  const encoded = btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const etag = `"${encoded}"`;
+  const headers = {
+    "content-type": type,
+    "cache-control": "private, no-cache, must-revalidate",
+    "x-content-type-options": "nosniff",
+    etag,
+    ...extra || {}
+  };
+  const condition = request.headers.get("if-none-match");
+  const matches = condition && condition.split(",").some((candidate) => {
+    const value = candidate.trim();
+    return value === "*" || value.replace(/^W\//, "") === etag;
+  });
+  return matches ? new Response(null, { status: 304, headers }) : new Response(body, { status: 200, headers });
+}
+__name(replyWithEtag, "replyWithEtag");
+__name2(replyWithEtag, "replyWithEtag");
+__name22(replyWithEtag, "replyWithEtag");
+async function digestToken(value) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  return btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+__name(digestToken, "digestToken");
+function requestMatchesEtag(request, etag) {
+  const condition = request.headers.get("if-none-match");
+  return Boolean(condition && condition.split(",").some((candidate) => {
+    const value = candidate.trim();
+    return value === "*" || value.replace(/^W\//, "") === etag.replace(/^W\//, "");
+  }));
+}
+__name(requestMatchesEtag, "requestMatchesEtag");
+async function replyWithStreamEtag(request, body, type, extra = null, seed = "") {
+  const etag = `W/"${await digestToken(seed)}"`;
+  const headers = {
+    "content-type": type,
+    "cache-control": "private, no-cache, must-revalidate",
+    "x-content-type-options": "nosniff",
+    etag,
+    ...extra || {}
+  };
+  if (requestMatchesEtag(request, etag))
+    return new Response(null, { status: 304, headers });
+  return new Response(body, { status: 200, headers });
+}
+__name(replyWithStreamEtag, "replyWithStreamEtag");
 function fail(error, status = 400, extra = null) {
   return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
@@ -127,10 +193,10 @@ function configDisplayName(proxy) {
 __name(configDisplayName, "configDisplayName");
 __name2(configDisplayName, "configDisplayName");
 __name22(configDisplayName, "configDisplayName");
-function friendlyExitName(country, index, proxy, healthById, entrypointNumber = null, speedByEndpoint = null) {
+function friendlyExitName(country, index, proxy, healthById, entrypointNumber = null, speedByEndpoint = null, endpointIndex = null) {
   const serial = String(index + 1).padStart(2, "0");
   const remark = /^([A-Z]{2})-(RES|DC|UNKNOWN)-(.+)-([A-F0-9]{6,12})$/.exec(proxy.name || "");
-  const health = resolveHealthFor({ proxy }, healthById, buildEndpointIndex(healthById)) || (remark ? healthById[remark[4]] : null);
+  const health = resolveHealthFor({ proxy }, healthById, endpointIndex || buildEndpointIndex(healthById)) || (remark ? healthById[remark[4]] : null);
   const healthClassification = health && typeof health.classification === "object" ? health.classification : health;
   const rotatesAcrossCountries = !!healthClassification && (String(healthClassification.type || "").startsWith("dynamic") || String(healthClassification.subgroup || "").startsWith("dynamic")) && String(healthClassification.same_country) === "false";
   const flag = countryFlag(country, rotatesAcrossCountries);
@@ -145,11 +211,13 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
     const riskFromScore = Number.isFinite(fraud) ? fraud < 20 ? "low" : fraud < 50 ? "medium" : fraud < 80 ? "high" : "critical" : "";
     const risk = { low: "Low", medium: "Med", high: "High", critical: "Crit" }[riskValue || riskFromScore] || "Unrated";
     const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
-    const geminiTag = gemini?.flagged === true ? "Gem \u2717" : gemini?.clean === true ? "Gem \u2713" : "";
+    const geminiTag = gemini?.flagged === true ? "Gemini HTTP 401/403" : gemini?.clean === true ? "Gemini HTTP 2xx/3xx" : "";
     const kindRaw = classification.connection_type ?? health.connection_type;
     const kindValue = typeof kindRaw === "string" ? kindRaw.replace(/[^a-z0-9 -]/gi, "").trim() : "";
     const kind = /resi/i.test(kindValue) ? "Resi" : /data.?center|hosting/i.test(kindValue) ? "DC" : "";
     const tags = [`${risk}${kind ? " " + kind : ""}`];
+    if (health.stale === true)
+      tags.push("Stale health");
     if (geminiTag)
       tags.push(geminiTag);
     const stability = health.stability || (String(classification.type || "").startsWith("dynamic") ? "Changed" : null);
@@ -283,8 +351,11 @@ function parseProxy(uri, index) {
     } catch {
       return null;
     }
+    if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.add !== "string" || typeof data.id !== "string")
+      return null;
     const port2 = Number(data.port);
-    if (!data.add || !port2)
+    const alterId = Number(data.aid || 0);
+    if (!data.add.trim() || !data.id.trim() || !Number.isInteger(port2) || port2 < 1 || port2 > 65535 || !Number.isInteger(alterId) || alterId < 0)
       return null;
     let displayName = fragment || data.ps;
     try {
@@ -297,7 +368,7 @@ function parseProxy(uri, index) {
       server: data.add,
       port: port2,
       uuid: data.id,
-      alterId: Number(data.aid || 0),
+      alterId,
       cipher: data.scy || "auto",
       tls: data.tls === "tls",
       network: data.net || "tcp",
@@ -316,7 +387,7 @@ function parseProxy(uri, index) {
     return null;
   }
   const type = u.protocol.slice(0, -1).toLowerCase();
-  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque"].includes(type))
+  if (!["vless", "trojan", "ss", "socks", "socks5", "http", "wireguard", "masque", "hysteria2", "hy2", "tuic", "anytls"].includes(type))
     return null;
   const server = u.hostname;
   const port = Number(u.port);
@@ -381,15 +452,94 @@ function parseProxy(uri, index) {
       ...first("uri") ? { uri: first("uri") } : {}
     };
   }
+  if (type === "hysteria2" || type === "hy2") {
+    let password;
+    try {
+      password = decodeURIComponent(u.username || "") || u.searchParams.get("password") || u.searchParams.get("auth") || "";
+    } catch {
+      return null;
+    }
+    if (!password)
+      return null;
+    const obfs = u.searchParams.get("obfs") || "";
+    const obfsPassword = u.searchParams.get("obfs-password") || u.searchParams.get("obfs_password") || "";
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const up = u.searchParams.get("up") || u.searchParams.get("upmbps") || "";
+    const down = u.searchParams.get("down") || u.searchParams.get("downmbps") || "";
+    return {
+      type: "hysteria2", name, server, port, password,
+      ...obfs ? { obfs } : {},
+      ...obfsPassword ? { "obfs-password": obfsPassword } : {},
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...alpn.length ? { alpn } : {},
+      ...up ? { up } : {},
+      ...down ? { down } : {},
+      udp: true
+    };
+  }
+  if (type === "tuic") {
+    let uuid, password;
+    try {
+      uuid = decodeURIComponent(u.username || "") || u.searchParams.get("uuid") || u.searchParams.get("id") || "";
+      password = decodeURIComponent(u.password || "") || u.searchParams.get("password") || "";
+    } catch {
+      return null;
+    }
+    const token = u.searchParams.get("token") || "";
+    if (!token && (!uuid || !password))
+      return null;
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const heartbeat = Number(u.searchParams.get("heartbeat-interval") || 0);
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    const proxy = {
+      type, name, server, port,
+      ...uuid ? { uuid } : {},
+      ...password ? { password } : {},
+      ...token ? { token } : {},
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...alpn.length ? { alpn } : {},
+      ...u.searchParams.get("udp-relay-mode") ? { "udp-relay-mode": u.searchParams.get("udp-relay-mode") } : {},
+      ...u.searchParams.get("congestion-controller") || u.searchParams.get("congestion_control") ? { "congestion-controller": u.searchParams.get("congestion-controller") || u.searchParams.get("congestion_control") } : {},
+      ...Number.isFinite(heartbeat) && heartbeat > 0 ? { "heartbeat-interval": heartbeat } : {},
+      udp: true
+    };
+    return proxy;
+  }
+  if (type === "anytls") {
+    let password;
+    try {
+      password = decodeURIComponent(u.username || "") || u.searchParams.get("password") || "";
+    } catch {
+      return null;
+    }
+    if (!password)
+      return null;
+    const alpn = (u.searchParams.get("alpn") || "").split(",").map((value) => value.trim()).filter(Boolean);
+    const insecure = /^(1|true|yes|on)$/i.test(u.searchParams.get("insecure") || u.searchParams.get("skip-cert-verify") || "");
+    return {
+      type, name, server, port, password,
+      sni: u.searchParams.get("sni") || u.searchParams.get("servername") || server,
+      "skip-cert-verify": insecure,
+      ...u.searchParams.get("fp") ? { "client-fingerprint": u.searchParams.get("fp") } : {},
+      ...alpn.length ? { alpn } : {},
+      udp: true
+    };
+  }
   if (type === "vless") {
     const network = u.searchParams.get("type") || "tcp";
     const tlsMode = u.searchParams.get("security") || "none";
+    let uuid;
+    try { uuid = decodeURIComponent(u.username); } catch { return null; }
+    if (!uuid) return null;
     const proxy = {
       type,
       name,
       server,
       port,
-      uuid: decodeURIComponent(u.username),
+      uuid,
       tls: tlsMode !== "none",
       servername: u.searchParams.get("sni") || u.searchParams.get("servername") || void 0,
       network,
@@ -413,16 +563,20 @@ function parseProxy(uri, index) {
       proxy["ws-opts"] = { path, headers: { Host: u.searchParams.get("host") || server } };
     return proxy;
   }
-  if (type === "trojan")
+  if (type === "trojan") {
+    let password;
+    try { password = decodeURIComponent(u.username); } catch { return null; }
+    if (!password) return null;
     return {
       type,
       name,
       server,
       port,
-      password: decodeURIComponent(u.username),
+      password,
       sni: u.searchParams.get("sni") || void 0,
       udp: true
     };
+  }
   if (type === "ss") {
     let credentials;
     if (u.password) {
@@ -445,14 +599,29 @@ function parseProxy(uri, index) {
     const colon = credentials.indexOf(":");
     if (colon < 1)
       return null;
-    return { type, name, server, port, cipher: credentials.slice(0, colon), password: credentials.slice(colon + 1), udp: true };
+    const cipher = credentials.slice(0, colon);
+    const password = credentials.slice(colon + 1);
+    if (!MIHOMO_SS_CIPHERS.has(cipher) || !password)
+      return null;
+    return { type, name, server, port, cipher, password, udp: true };
   }
-  const user = decodeURIComponent(u.username || ""), password = decodeURIComponent(u.password || "");
+  let user, password;
+  try { user = decodeURIComponent(u.username || ""); password = decodeURIComponent(u.password || ""); } catch { return null; }
   return { type: type === "socks5" ? "socks5" : type, name, server, port, ...user ? { username: user } : {}, ...password ? { password } : {}, udp: true };
 }
 __name(parseProxy, "parseProxy");
 __name2(parseProxy, "parseProxy");
 __name22(parseProxy, "parseProxy");
+function parseProxySafely(uri, index) {
+  try {
+    return parseProxy(uri, index);
+  } catch {
+    return null;
+  }
+}
+__name(parseProxySafely, "parseProxySafely");
+__name2(parseProxySafely, "parseProxySafely");
+__name22(parseProxySafely, "parseProxySafely");
 function parseEntry(uri) {
   const proxy = parseProxy(uri, 0);
   if (!proxy)
@@ -663,129 +832,143 @@ function dnsLines(enabled = true) {
 }
 __name(dnsLines, "dnsLines");
 function mihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
-  const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint);
-  const lines = ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"];
-  const appendProxy = /* @__PURE__ */ __name22((proxy, name, dialerProxy = void 0) => {
-    if (proxy.type === "wireguard") {
-      const localIp = proxy.address?.find((value) => value.includes(".")) || proxy.address?.[0] || "";
-      lines.push(
-        `  - name: ${yamlScalar(name)}`,
-        "    type: wireguard",
-        `    ip: ${yamlScalar(localIp.split("/")[0])}`,
-        `    private-key: ${yamlScalar(proxy.secretKey)}`,
-        "    peers:",
-        `      - server: ${yamlScalar(proxy.server)}`,
-        `        port: ${proxy.port}`,
-        `        public-key: ${yamlScalar(proxy.publicKey)}`,
-        '        allowed-ips: ["0.0.0.0/0", "::/0"]',
-        ...proxy.reserved?.length ? [`        reserved: [${proxy.reserved.join(", ")}]`] : [],
-        "    udp: true",
-        ...proxy.mtu ? [`    mtu: ${proxy.mtu}`] : [],
-        ...proxy.keepAlive ? [`    persistent-keepalive: ${proxy.keepAlive}`] : [],
-        ...amneziaWgOption(proxy),
-        ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
-      );
-    } else {
-      const { ech, ...scalarProxy } = { ...proxy, type: mihomoType(proxy.type), name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
-      lines.push(`  -\n${scalarFields(scalarProxy)}`);
-      if (proxy.reality)
-        lines.push(`    reality-opts:
-      public-key: ${yamlScalar(proxy.reality["public-key"])}
-      short-id: ${yamlScalar(proxy.reality["short-id"])}`);
-      if (proxy.alpn?.length)
-        lines.push(`    alpn:
-${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
-      if (proxy["ws-opts"])
-        lines.push(`    ws-opts:
-      path: ${yamlScalar(proxy["ws-opts"].path)}
-      headers:
-        Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
-      const echOpts = proxy.tls ? parseEch(ech) : null;
-      if (echOpts) {
-        lines.push("    ech-opts:", "      enable: true");
-        if (echOpts.config)
-          lines.push(`      config: ${yamlScalar(echOpts.config)}`);
-        if (echOpts.queryServerName)
-          lines.push(`      query-server-name: ${yamlScalar(echOpts.queryServerName)}`);
-      }
-    }
-  }, "appendProxy");
-  for (const entry of entries)
-    appendProxy(entry.proxy, entry.tag);
-  for (const country of countries) {
-    for (const item of country.variants)
-      appendProxy(item.proxy, item.name, item.dialerProxy);
-  }
-  lines.push("proxy-groups:");
-  const rootGroups = [];
-  if (entries.length) {
-    lines.push(`  - name: ${yamlScalar("EntryPoints")}`, "    type: select", "    proxies:");
-    entries.forEach((entry) => lines.push(`      - ${yamlScalar(entry.tag)}`));
-    rootGroups.push("EntryPoints");
-  }
-  if (countries.length === 1) {
-    const only = countries[0];
-    lines.push(`  - name: ${yamlScalar(`${countryName(only.code)} ${countryFlag(only.code)}`.trim())}`, "    type: select", "    proxies:");
-    only.variants.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    if (autoBest.length > 1) {
-      lines.push(
-        `  - name: ${yamlScalar("Best")}`,
-        "    type: url-test",
-        "    url: http://www.gstatic.com/generate_204",
-        "    interval: 300",
-        "    tolerance: 50",
-        "    lazy: true",
-        "    proxies:"
-      );
-      autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-      pushRules(lines, "MATCH,Best");
-    } else {
-      pushRules(lines, `MATCH,${`${countryName(only.code)} ${countryFlag(only.code)}`.trim()}`);
-    }
-    return lines.join("\n") + "\n";
-  }
-  if (countries.length > 1) {
-    const groupTitle = /* @__PURE__ */ __name2((code) => `${countryName(code)} ${countryFlag(code)}`.trim(), "groupTitle");
-    const cardNames = countries.map((country) => groupTitle(country.code));
-    lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
-    if (autoBest.length > 1)
-      lines.push(`      - ${yamlScalar("Best")}`);
-    rootGroups.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-    cardNames.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-    for (const country of countries) {
-      lines.push(`  - name: ${yamlScalar(groupTitle(country.code))}`, "    type: select", "    proxies:");
-      country.variants.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    }
-    if (autoBest.length > 1) {
-      lines.push(
-        `  - name: ${yamlScalar("Best")}`,
-        "    type: url-test",
-        "    url: http://www.gstatic.com/generate_204",
-        "    interval: 300",
-        "    tolerance: 50",
-        "    lazy: true",
-        "    proxies:"
-      );
-      autoBest.forEach((item) => lines.push(`      - ${yamlScalar(item.name)}`));
-    }
-    pushRules(lines, "MATCH,Proxy");
-    return lines.join("\n") + "\n";
-  }
-  const ordered = [];
-  for (const country of countries) {
-    for (const item of country.variants)
-      ordered.push(item.name);
-  }
-  for (const entry of entries)
-    ordered.push(entry.tag);
-  lines.push(`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:");
-  ordered.forEach((name) => lines.push(`      - ${yamlScalar(name)}`));
-  pushRules(lines, "MATCH,Proxy");
-  return lines.join("\n") + "\n";
+  return [...mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options)].join("");
 }
 __name(mihomo, "mihomo");
 __name2(mihomo, "mihomo");
 __name22(mihomo, "mihomo");
+function mihomoVariantsForExit(country, index, entries = []) {
+  if (Array.isArray(country.variants)) {
+    const marker = `${country.code}-${String(index + 1).padStart(2, "0")}e`;
+    return country.variants.filter((item) => (item.tag || "").startsWith(marker));
+  }
+  const exits = country.exits || (country.items || []).map((item) => item.proxy);
+  const names = country.baseNames || exits.map((proxy, itemIndex) => proxy.name || `${country.code} ${itemIndex + 1}`);
+  if (index >= exits.length) return [];
+  if (!entries.length) return [{ proxy: exits[index], name: names[index] }];
+  return entries.map((entry, slot) => {
+    const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
+    return { proxy: exits[index], name: `${prefix} - ${names[index]}`, tag: `${country.code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`, dialerProxy: entry.tag };
+  });
+}
+__name(mihomoVariantsForExit, "mihomoVariantsForExit");
+function* eachCountryVariant(country, entries = []) {
+  if (Array.isArray(country.variants)) {
+    yield* country.variants;
+    return;
+  }
+  const exits = country.exits || (country.items || []).map((item) => item.proxy);
+  for (let index = 0; index < exits.length; index += 1)
+    yield* mihomoVariantsForExit(country, index, entries);
+}
+__name(eachCountryVariant, "eachCountryVariant");
+function mihomoProxyBlock(proxy, name, dialerProxy = void 0) {
+  const lines = [];
+  if (proxy.type === "wireguard") {
+    const localIp = proxy.address?.find((value) => value.includes(".")) || proxy.address?.[0] || "";
+    lines.push(
+      `  - name: ${yamlScalar(name)}`, "    type: wireguard",
+      `    ip: ${yamlScalar(localIp.split("/")[0])}`,
+      `    private-key: ${yamlScalar(proxy.secretKey)}`, "    peers:",
+      `      - server: ${yamlScalar(proxy.server)}`, `        port: ${proxy.port}`,
+      `        public-key: ${yamlScalar(proxy.publicKey)}`,
+      '        allowed-ips: ["0.0.0.0/0", "::/0"]',
+      ...proxy.reserved?.length ? [`        reserved: [${proxy.reserved.join(", ")}]`] : [],
+      "    udp: true", ...proxy.mtu ? [`    mtu: ${proxy.mtu}`] : [],
+      ...proxy.keepAlive ? [`    persistent-keepalive: ${proxy.keepAlive}`] : [],
+      ...amneziaWgOption(proxy), ...dialerProxy ? [`    dialer-proxy: ${yamlScalar(dialerProxy)}`] : []
+    );
+  } else {
+    const { ech, ...scalarProxy } = { ...proxy, type: mihomoType(proxy.type), name, ...dialerProxy ? { "dialer-proxy": dialerProxy } : {} };
+    lines.push(`  -\n${scalarFields(scalarProxy)}`);
+    if (proxy.reality)
+      lines.push(`    reality-opts:\n      public-key: ${yamlScalar(proxy.reality["public-key"])}\n      short-id: ${yamlScalar(proxy.reality["short-id"])}`);
+    if (proxy.alpn?.length)
+      lines.push(`    alpn:\n${proxy.alpn.map((item) => `      - ${yamlScalar(item)}`).join("\n")}`);
+    if (proxy["ws-opts"])
+      lines.push(`    ws-opts:\n      path: ${yamlScalar(proxy["ws-opts"].path)}\n      headers:\n        Host: ${yamlScalar(proxy["ws-opts"].headers.Host)}`);
+    const echOpts = proxy.tls ? parseEch(ech) : null;
+    if (echOpts) {
+      lines.push("    ech-opts:", "      enable: true");
+      if (echOpts.config) lines.push(`      config: ${yamlScalar(echOpts.config)}`);
+      if (echOpts.queryServerName) lines.push(`      query-server-name: ${yamlScalar(echOpts.queryServerName)}`);
+    }
+  }
+  return lines.join("\n");
+}
+__name(mihomoProxyBlock, "mihomoProxyBlock");
+function* mihomoStreamChunks(entries, countries, healthById, speedByEndpoint = null, options = {}) {
+  const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint, entries);
+  yield ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"].join("\n") + "\n";
+  for (const entry of entries) yield mihomoProxyBlock(entry.proxy, entry.tag) + "\n";
+  for (const country of countries)
+    for (const item of eachCountryVariant(country, entries))
+      yield mihomoProxyBlock(item.proxy, item.name, item.dialerProxy) + "\n";
+
+  yield "proxy-groups:\n";
+  if (entries.length)
+    yield [`  - name: ${yamlScalar("EntryPoints")}`, "    type: select", "    proxies:", ...entries.map((entry) => `      - ${yamlScalar(entry.tag)}`)].join("\n") + "\n";
+  if (countries.length === 1) {
+    const only = countries[0];
+    const title = `${countryName(only.code)} ${countryFlag(only.code)}`.trim();
+    yield [`  - name: ${yamlScalar(title)}`, "    type: select", "    proxies:"].join("\n") + "\n";
+    for (const item of eachCountryVariant(only, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+    if (autoBest.length > 1) {
+      yield [`  - name: ${yamlScalar("Best")}`, "    type: url-test", "    url: http://www.gstatic.com/generate_204", "    interval: 300", "    tolerance: 50", "    lazy: true", "    proxies:", ...autoBest.map((item) => `      - ${yamlScalar(item.name)}`)].join("\n") + "\n";
+      yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Best"].join("\n") + "\n";
+    } else {
+      yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), `  - MATCH,${title}`].join("\n") + "\n";
+    }
+    return;
+  }
+  if (countries.length > 1) {
+    const groupTitle = (code) => `${countryName(code)} ${countryFlag(code)}`.trim();
+    const root = [`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:"];
+    if (autoBest.length > 1) root.push(`      - ${yamlScalar("Best")}`);
+    if (entries.length) root.push(`      - ${yamlScalar("EntryPoints")}`);
+    for (const country of countries) root.push(`      - ${yamlScalar(groupTitle(country.code))}`);
+    yield root.join("\n") + "\n";
+    for (const country of countries) {
+      yield [`  - name: ${yamlScalar(groupTitle(country.code))}`, "    type: select", "    proxies:"].join("\n") + "\n";
+      for (const item of eachCountryVariant(country, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+    }
+    if (autoBest.length > 1)
+      yield [`  - name: ${yamlScalar("Best")}`, "    type: url-test", "    url: http://www.gstatic.com/generate_204", "    interval: 300", "    tolerance: 50", "    lazy: true", "    proxies:", ...autoBest.map((item) => `      - ${yamlScalar(item.name)}`)].join("\n") + "\n";
+    yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Proxy"].join("\n") + "\n";
+    return;
+  }
+  yield [`  - name: ${yamlScalar("Proxy")}`, "    type: select", "    proxies:"].join("\n") + "\n";
+  for (const country of countries)
+    for (const item of eachCountryVariant(country, entries)) yield `      - ${yamlScalar(item.name)}\n`;
+  for (const entry of entries) yield `      - ${yamlScalar(entry.tag)}\n`;
+  yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Proxy"].join("\n") + "\n";
+}
+__name(mihomoStreamChunks, "mihomoStreamChunks");
+function streamMihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
+  const iterator = mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options);
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    pull(controller) {
+      let chunk = "";
+      try {
+        while (chunk.length < 16 * 1024) {
+          const next = iterator.next();
+          if (next.done) {
+            if (chunk) controller.enqueue(encoder.encode(chunk));
+            controller.close();
+            return;
+          }
+          chunk += next.value;
+        }
+        controller.enqueue(encoder.encode(chunk));
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel() { iterator.return?.(); }
+  });
+}
+__name(streamMihomo, "streamMihomo");
 function pushRules(lines, match) {
   lines.push("rules:");
   for (const rule of LOCAL_DIRECT_RULES)
@@ -918,7 +1101,7 @@ __name2(xrayOutbound, "xrayOutbound");
 __name22(xrayOutbound, "xrayOutbound");
 var GOOD_ENOUGH_MB_S = 50;
 function qualityScore(health, stage3Speed = null) {
-  if (!health)
+  if (!health || health.stale === true)
     return -1;
   const speed = Number(stage3Speed);
   if (!Number.isFinite(speed) || speed < 0.01)
@@ -928,9 +1111,7 @@ function qualityScore(health, stage3Speed = null) {
   const type = String(health?.classification?.connection_type ?? health?.connection_type ?? "").toLowerCase();
   const speedPart = Math.min(1, speed / GOOD_ENOUGH_MB_S);
   const residential = /resi/.test(type) ? 0.4 : 0;
-  const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
-  const geminiPenalty = gemini?.flagged === true ? -2.5 : 0;
-  return 1.5 * speedPart + residential - 1 * (risk / 100) + geminiPenalty;
+  return 1.5 * speedPart + residential - 1 * (risk / 100);
 }
 __name(qualityScore, "qualityScore");
 __name2(qualityScore, "qualityScore");
@@ -954,20 +1135,50 @@ __name2(scoreForProxy, "scoreForProxy");
 __name22(scoreForProxy, "scoreForProxy");
 var TOP_N = 10;
 var COUNTRY_CAP = 60;
-function topQualityVariants(countries, healthById, speedByEndpoint = null) {
+function topQualityVariants(countries, healthById, speedByEndpoint = null, entries = []) {
   const endpointIndex = buildEndpointIndex(healthById || {});
   const scored = [];
+  const keepCandidate = (candidate) => {
+    let index = 0;
+    // Keep equal scores in their original feed order, matching stable sort.
+    while (index < scored.length && scored[index].score >= candidate.score) index += 1;
+    if (index >= TOP_N) return;
+    scored.splice(index, 0, candidate);
+    if (scored.length > TOP_N) scored.pop();
+  };
   for (const country of countries) {
-    for (const item of country.variants) {
-      const proxy = item.proxy || item;
-      const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
-      const score = qualityScore(resolveHealthFor(item, healthById, endpointIndex), measured);
-      if (score >= 0)
-        scored.push({ item, score });
+    if (!Array.isArray(country.variants) && Array.isArray(country.exits)) {
+      for (let index = 0; index < country.exits.length; index += 1) {
+        const proxy = country.exits[index];
+        const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
+        const score = qualityScore(resolveHealthFor({ proxy }, healthById, endpointIndex), measured);
+        if (score >= 0)
+          keepCandidate({ country, index, score });
+      }
+    } else {
+      for (const item of country.variants || []) {
+        const proxy = item.proxy || item;
+        const measured = speedByEndpoint ? speedByEndpoint[endpointKeyOf(proxy?.server, Number(proxy?.port ?? proxy?.server_port))] : null;
+        const score = qualityScore(resolveHealthFor(item, healthById, endpointIndex), measured);
+        if (score >= 0)
+          keepCandidate({ item, score });
+      }
     }
   }
-  scored.sort((left, right) => right.score - left.score);
-  return scored.slice(0, TOP_N).map((entry) => entry.item);
+  const top = [];
+  for (const candidate of scored) {
+    if (candidate.item) {
+      top.push(candidate.item);
+      if (top.length === TOP_N) break;
+      continue;
+    }
+    for (const item of mihomoVariantsForExit(candidate.country, candidate.index, entries)) {
+      top.push(item);
+      if (top.length === TOP_N) break;
+    }
+    if (top.length === TOP_N) break;
+  }
+  return top;
 }
 __name(topQualityVariants, "topQualityVariants");
 __name2(topQualityVariants, "topQualityVariants");
@@ -1001,7 +1212,22 @@ __name2(xrayConfig, "xrayConfig");
 __name22(xrayConfig, "xrayConfig");
 function singboxOutbound(proxy, tag, detour = void 0) {
   const out = { type: proxy.type === "socks5" ? "socks" : proxy.type, tag, server: proxy.server, server_port: proxy.port };
-  if (proxy.type === "vless") {
+  if (proxy.type === "hysteria2") {
+    out.password = proxy.password;
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+    if (proxy.obfs)
+      out.obfs = { type: proxy.obfs, ...proxy["obfs-password"] ? { password: proxy["obfs-password"] } : {} };
+  } else if (proxy.type === "tuic") {
+    if (proxy.uuid) out.uuid = proxy.uuid;
+    if (proxy.password) out.password = proxy.password;
+    if (proxy.token) out.token = proxy.token;
+    if (proxy["congestion-controller"]) out.congestion_control = proxy["congestion-controller"];
+    if (proxy["udp-relay-mode"]) out.udp_relay_mode = proxy["udp-relay-mode"];
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+  } else if (proxy.type === "anytls") {
+    out.password = proxy.password;
+    out.tls = { enabled: true, ...proxy.sni ? { server_name: proxy.sni } : {}, ...proxy["skip-cert-verify"] ? { insecure: true } : {} };
+  } else if (proxy.type === "vless") {
     out.uuid = proxy.uuid;
     if (proxy.flow)
       out.flow = proxy.flow;
@@ -1163,6 +1389,22 @@ var index_default = {
     if (requestedCountry && requestedCountry !== "ALL" && !COUNTRY_RE.test(requestedCountry))
       return fail("country_must_be_two_letter_iso_code_or_ALL");
     const country = requestedCountry === "ALL" ? "" : requestedCountry;
+    const rawProtocols = url.searchParams.get("protocol");
+    let protocolFilter = null;
+    if (rawProtocols !== null) {
+      const requestedProtocols = rawProtocols.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+      if (!requestedProtocols.length || requestedProtocols.some((item) => !FILTERABLE_PROTOCOLS.has(canonicalProtocol(item))))
+        return fail("protocol_must_be_a_comma_separated_list_of_supported_protocols");
+      protocolFilter = new Set(requestedProtocols.map(canonicalProtocol));
+    }
+    const rawExcludedCountries = url.searchParams.get("exclude");
+    let excludedCountries = new Set();
+    if (rawExcludedCountries !== null) {
+      const excluded = rawExcludedCountries.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);
+      if (excluded.some((item) => !COUNTRY_RE.test(item)))
+        return fail("exclude_must_be_a_comma_separated_list_of_two_letter_country_codes");
+      excludedCountries = new Set(excluded);
+    }
     let entries;
     try {
       entries = decodeEntries(url);
@@ -1179,6 +1421,8 @@ var index_default = {
       return fail("wireguard_entry_requires_mihomo_xray_or_links_format", 406);
     if (entries.some((entry) => entry.proxy.type === "masque") && format !== "mihomo")
       return fail("masque_entry_requires_mihomo_format", 406);
+    if (entries.some((entry) => ["hysteria2", "tuic", "anytls"].includes(entry.proxy.type)) && format === "xray")
+      return fail("quic_or_anytls_entry_requires_mihomo_or_sing_box_format", 406);
     const origin = (env.FEED_ORIGIN || "https://raw.githubusercontent.com/TheCalmBoy/proxy-collector/gh-pages").replace(/\/$/, "");
     const feedPath = country ? `countries/${country}.txt` : "all.txt";
     const feed = await fetch(`${origin}/${feedPath}`, {
@@ -1192,10 +1436,20 @@ var index_default = {
       return fail("country_feed_not_found", 404);
     if (!feed.ok)
       return fail("country_feed_unavailable", 502);
-    const rows = (await feed.text()).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-    let parsed = rows.map((uri, i) => ({ uri, proxy: parseProxy(uri, i + 1) })).filter((item) => item.proxy);
+    const feedText = await feed.text();
+    const feedVersionToken = feed.headers.get("etag") || feed.headers.get("last-modified") || await digestToken(feedText);
+    const rows = feedText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    let parsed = rows.map((uri, i) => {
+      const scheme = uri.slice(0, uri.indexOf(":")).toLowerCase();
+      if (protocolFilter && !protocolFilter.has(canonicalProtocol(scheme)))
+        return null;
+      const proxy = parseProxySafely(uri, i + 1);
+      return proxy ? { uri, proxy } : null;
+    }).filter(Boolean);
+    if (format === "xray")
+      parsed = parsed.filter((item) => !["hysteria2", "tuic", "anytls"].includes(item.proxy.type));
     if (!parsed.length)
-      return fail("feed_has_no_supported_proxies", 404);
+      return fail(protocolFilter ? "no_proxies_match_protocol_filter" : "feed_has_no_supported_proxies", 404);
     // ?secure=1 keeps only exits whose hop is TLS: something is better than a
     // bare protocol when the ISP is the threat model.
     if (url.searchParams.get("secure") === "1") {
@@ -1211,6 +1465,7 @@ var index_default = {
     // Off by default, because mihomo 1.19.x has no ECH rejection fallback, so a
     // key that rotates takes the config with it.
     let echEmbedded = 0;
+    let echVersionToken = "none";
     if ((url.searchParams.get("ech") || "").toLowerCase() === "embed") {
       const pending = new Map();
       for (const proxy of [...entries.map((entry) => entry.proxy), ...parsed.map((item) => item.proxy)]) {
@@ -1224,6 +1479,7 @@ var index_default = {
       const resolved = new Map(await Promise.all(
         [...pending.keys()].map(async (name) => [name, await fetchEchConfig(name)])
       ));
+      echVersionToken = await digestToken([...resolved.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([name, config]) => `${name}:${config || ""}`).join("\n"));
       for (const [name, proxies] of pending) {
         const config = resolved.get(name);
         if (!config)
@@ -1242,8 +1498,9 @@ var index_default = {
     let healthIndexState = "missing";
     let healthJoin = null;
     let healthAgeMs = null;
+    const healthVersion = Math.floor(Date.now() / (5 * 6e4));
+    let healthVersionToken = `missing:${healthVersion}`;
     try {
-      const healthVersion = Math.floor(Date.now() / (5 * 6e4));
       const healthResponse = await fetch(`${origin}/egress-health.json?v=${healthVersion}`, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(5e3),
@@ -1252,7 +1509,9 @@ var index_default = {
       if (healthResponse.status !== 404)
         healthIndexState = healthResponse.ok ? "stale" : "unavailable";
       if (healthResponse.ok) {
-        const healthDocument = await healthResponse.json();
+        const healthText = await healthResponse.text();
+        healthVersionToken = healthResponse.headers.get("etag") || healthResponse.headers.get("last-modified") || await digestToken(healthText);
+        const healthDocument = JSON.parse(healthText);
         const generatedAt = Date.parse(healthDocument?.generated_at || "");
         const ageMs = Date.now() - generatedAt;
         if (Number.isFinite(generatedAt) && ageMs >= -5 * 6e4 && ageMs <= HEALTH_HARD_MAX_AGE_MS && healthDocument.configs && typeof healthDocument.configs === "object") {
@@ -1265,19 +1524,24 @@ var index_default = {
       }
     } catch {
       healthIndexState = "unavailable";
+      healthVersionToken = `unavailable:${healthVersion}`;
     }
     let speedByEndpoint = {};
+    const enrichedVersion = Math.floor(Date.now() / (5 * 6e4));
+    let enrichedVersionToken = `missing:${enrichedVersion}`;
     try {
-      const enrichedVersion = Math.floor(Date.now() / (5 * 6e4));
       const enrichedResponse = await fetch(`${origin}/enriched-configs.json?v=${enrichedVersion}`, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(5e3),
         cf: { cacheTtl: 300, cacheEverything: true }
       });
       if (enrichedResponse.ok) {
-        speedByEndpoint = buildSpeedIndex(await enrichedResponse.json());
+        const enrichedText = await enrichedResponse.text();
+        enrichedVersionToken = enrichedResponse.headers.get("etag") || enrichedResponse.headers.get("last-modified") || await digestToken(enrichedText);
+        speedByEndpoint = buildSpeedIndex(JSON.parse(enrichedText));
       }
     } catch {
+      enrichedVersionToken = `unavailable:${enrichedVersion}`;
     }
     const healthEndpointIndex = buildEndpointIndex(healthById);
     const healthHeaders = () => ({
@@ -1298,6 +1562,13 @@ var index_default = {
     const RAINBOW_KEY = "ZZ-RAINBOW";
     for (const item of parsed) {
       const health = resolveHealthFor(item.proxy, healthById, healthEndpointIndex);
+      const classification = health?.classification && typeof health.classification === "object" ? health.classification : health || {};
+      const remarkCountry = /^([A-Z]{2})-/.exec(item.proxy.name || "")?.[1];
+      const observedCountries = [health?.primary_country, classification.country, remarkCountry, ...(Array.isArray(classification.countries) ? classification.countries : [])]
+        .filter((value) => typeof value === "string")
+        .map((value) => value.toUpperCase());
+      if (observedCountries.some((code) => excludedCountries.has(code)))
+        continue;
       const crossesBorders = !!health && String(health.classification?.same_country) === "false" && Array.isArray(health.classification?.countries) && health.classification.countries.length > 1;
       if (crossesBorders) {
         if (!grouped.has(RAINBOW_KEY))
@@ -1319,38 +1590,58 @@ var index_default = {
       })).sort((left, right) => right.score - left.score);
       const capped = code === RAINBOW_KEY ? ranked : ranked.slice(0, COUNTRY_CAP);
       const exits = capped.map((entry) => entry.item.proxy);
-      const baseNames = exits.map((proxy, index) => friendlyExitName(code, index, proxy, healthById, null, speedByEndpoint));
-      const variants = [];
-      for (let index = 0; index < exits.length; index += 1) {
-        if (entries.length) {
-          for (let slot = 0; slot < entries.length; slot += 1) {
-            const entry = entries[slot];
-            const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
-            variants.push({
-              proxy: exits[index],
-              name: `${prefix} - ${baseNames[index]}`,
-              tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`,
-              dialerProxy: entry.tag
-            });
+      const baseNames = exits.map((proxy, index) => friendlyExitName(code, index, proxy, healthById, null, speedByEndpoint, endpointIndex));
+      const result = { code, items: capped.map((entry) => entry.item), exits, baseNames };
+      if (format !== "mihomo") {
+        const variants = [];
+        for (let index = 0; index < exits.length; index += 1) {
+          if (entries.length) {
+            for (let slot = 0; slot < entries.length; slot += 1) {
+              const entry = entries[slot];
+              const prefix = (entry.tag || "").split(" ")[0] || `ET${slot + 1}`;
+              variants.push({
+                proxy: exits[index],
+                name: `${prefix} - ${baseNames[index]}`,
+                tag: `${code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`,
+                dialerProxy: entry.tag
+              });
+            }
+          } else {
+            variants.push({ proxy: exits[index], name: baseNames[index] });
           }
-        } else {
-          variants.push({ proxy: exits[index], name: baseNames[index] });
         }
+        result.variants = variants;
       }
-      return { code, items: capped.map((entry) => entry.item), exits, baseNames, variants };
+      return result;
     });
     if (!countries.length)
-      return fail("no_recently_verified_proxies", 503, healthHeaders());
+      return excludedCountries.size
+        ? fail("no_proxies_match_filters", 404, healthHeaders())
+        : fail("no_recently_verified_proxies", 503, healthHeaders());
     const joinHeaders = { ...healthHeaders(), ...echHeaders };
     if (format === "links" || !entries.length && (format === "xray" || format === "unknown")) {
       const links = countries.flatMap((group) => group.items.map((item, index) => withUriName(item.uri, group.baseNames[index])));
       if (entries.length)
         links.unshift(...entries.map((entry) => withUriName(entry.uri, entry.tag)));
-      return reply(b64(links.join("\n")), 200, "text/plain; charset=utf-8", joinHeaders);
+      return replyWithEtag(request, b64(links.join("\n")), "text/plain; charset=utf-8", joinHeaders);
     }
     const dnsPref = url.searchParams.get("dns") !== "0";
-    const render = format === "mihomo" ? (e, c, h, s) => mihomo(e, c, h, s, { dns: dnsPref }) : format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
-    return reply(render(entries, countries, healthById, speedByEndpoint), 200, format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
+    if (format === "mihomo") {
+      const seed = JSON.stringify({
+        renderer: "mihomo-stream-v1",
+        url: request.url,
+        format,
+        feedVersionToken,
+        healthVersionToken,
+        healthIndexState,
+        enrichedVersionToken,
+        echVersionToken,
+        healthMinute: Math.floor(Date.now() / 6e4)
+      });
+      return replyWithStreamEtag(request, streamMihomo(entries, countries, healthById, speedByEndpoint, { dns: dnsPref }), "text/yaml; charset=utf-8", joinHeaders, seed);
+    }
+    const render = format === "sing-box" ? singbox : (e, c, h, s) => xrayConfig(e, c, country || "ALL", h, s);
+    return replyWithEtag(request, render(entries, countries, healthById, speedByEndpoint), format === "mihomo" ? "text/yaml; charset=utf-8" : "application/json; charset=utf-8", joinHeaders);
   }
 };
 export {

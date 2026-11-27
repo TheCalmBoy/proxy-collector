@@ -25,7 +25,11 @@ UNKNOWN_COUNTRY = "ZZ"
 def load_records(path: Path) -> list[dict]:
     data = json.loads(path.read_text())
     records = data["configs"] if isinstance(data, dict) else data
-    return [r for r in records if r.get("stages", {}).get("https", {}).get("passed")]
+    required_stages = ("tcp", "speed", "https")
+    return [
+        record for record in records
+        if all(record.get("stages", {}).get(stage, {}).get("passed") is True for stage in required_stages)
+    ]
 
 
 def country_of(record: dict) -> str:
@@ -41,8 +45,9 @@ def write_list(name: str, lines: list[str]) -> None:
         Path(name).unlink(missing_ok=True)
         return
     Path(name).write_text("\n".join(unique) + "\n", encoding="utf-8")
+    encoded = base64.b64encode(("\n".join(unique) + "\n").encode("utf-8")).decode("ascii")
     Path(name).with_name(Path(name).name.replace(".txt", ".base64.txt")).write_text(
-        "\n".join(base64.b64encode(l.encode()).decode() for l in unique) + "\n",
+        encoded + "\n",
         encoding="utf-8",
     )
 

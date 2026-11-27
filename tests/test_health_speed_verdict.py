@@ -63,10 +63,14 @@ def _run(speed_mb_s: float | None) -> dict:
 
     with mock.patch.object(probe_egress.asyncio, "create_subprocess_exec",
                            new=mock.AsyncMock(return_value=FakeProc())):
-        return asyncio.run(
-            _speed_test(_record(), "https://worker.example", "tok",
-                        asyncio.Semaphore(1))
-        )
+        with mock.patch.object(
+            probe_egress, "_gemini_probe",
+            new=mock.AsyncMock(return_value={"ok": None}),
+        ):
+            return asyncio.run(
+                _speed_test(_record(), "https://worker.example", "tok",
+                            asyncio.Semaphore(1))
+            )
 
 
 class SpeedVerdictTests(unittest.TestCase):
@@ -118,6 +122,29 @@ class SpeedVerdictTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertTrue(out["speed_ok"])
         self.assertAlmostEqual(out["download_mb_s"], 12.8, places=1)
+
+    def test_final_pass_can_skip_a_second_gemini_request(self):
+        payload = _worker_payload(5.0)
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self, stdin=None):
+                return payload, b""
+
+        with mock.patch.object(
+            probe_egress.asyncio, "create_subprocess_exec",
+            new=mock.AsyncMock(return_value=FakeProc()),
+        ), mock.patch.object(
+            probe_egress, "_gemini_probe", new=mock.AsyncMock()
+        ) as gemini_probe:
+            out = asyncio.run(_speed_test(
+                _record(), "https://worker.example", "tok", asyncio.Semaphore(1),
+                probe_gemini=False,
+            ))
+
+        self.assertTrue(out["ok"])
+        gemini_probe.assert_not_awaited()
 
 
 if __name__ == "__main__":

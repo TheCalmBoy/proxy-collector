@@ -94,6 +94,16 @@ class TestPublishStep(unittest.TestCase):
         self.assertIn("vless://aaaa1111@example.com:443?type=ws#node-us", all_txt)
         self.assertFalse(any("stale" in line for line in all_txt))
 
+    def test_publisher_requires_every_mandatory_stage(self):
+        data = realistic_enriched()
+        candidate = data["configs"][0]
+        candidate["stages"]["speed"]["passed"] = False
+        (self.root / "verify-output" / "enriched-configs.json").write_text(json.dumps(data))
+        proc = self._run_publish()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        all_txt = (self.root / "output" / "all.txt").read_text()
+        self.assertNotIn(candidate["uri"], all_txt)
+
     def test_country_files_written(self):
         self.assertEqual(self._run_publish().returncode, 0)
         us = (self.root / "output" / "countries" / "US.txt").read_text().splitlines()
@@ -108,11 +118,9 @@ class TestPublishStep(unittest.TestCase):
 
     def test_base64_mirror_matches_main_py_convention(self):
         self.assertEqual(self._run_publish().returncode, 0)
-        plain = (self.root / "output" / "all.txt").read_text().splitlines()
-        encoded = (self.root / "output" / "all.base64.txt").read_text().splitlines()
-        self.assertEqual(
-            [base64.b64decode(e).decode() for e in encoded], plain
-        )
+        plain = (self.root / "output" / "all.txt").read_bytes()
+        encoded = (self.root / "output" / "all.base64.txt").read_text().strip()
+        self.assertEqual(base64.b64decode(encoded), plain)
 
     def test_enriched_data_is_published(self):
         self.assertEqual(self._run_publish().returncode, 0)

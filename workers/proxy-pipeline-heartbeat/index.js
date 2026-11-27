@@ -49,14 +49,16 @@ export default {
     await beat(env);
   },
 
-  // Kept so a beat can be fired by hand when testing (POST the worker URL),
-  // and so an accidental GET explains itself instead of erroring.
+  // Scheduled events do not pass through this handler. Keep manual dispatch
+  // available for maintainers, but never expose the GitHub Actions trigger to
+  // arbitrary callers who discover the Worker URL.
   async fetch(request, env) {
     if (request.method !== "POST") {
-      return new Response(
-        "proxy-pipeline-heartbeat: POST here to fire one beat (update-now).\n",
-        { status: 200 },
-      );
+      return new Response("method not allowed\n", { status: 405, headers: { allow: "POST" } });
+    }
+    const manualToken = env.MANUAL_TRIGGER_TOKEN;
+    if (!manualToken || request.headers.get("authorization") !== `Bearer ${manualToken}`) {
+      return new Response("not found\n", { status: 404 });
     }
     const status = await beat(env);
     return new Response(

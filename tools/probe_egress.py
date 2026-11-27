@@ -31,6 +31,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.endpoint_safety import prewarm_public_endpoints, resolve_public_endpoint
+
 ENRICHED_PATH = Path(os.getenv("ENRICHED_PATH", "verify-output/enriched-configs.json"))
 OUTPUT = Path(os.getenv("PROBE_OUTPUT", "probe-output"))
 SING_BOX = os.getenv("SING_BOX", "sing-box")
@@ -506,6 +509,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
     # contiguous and outside the ephemeral range.
     base_port = _pick_inbound_base(len(uris))
 
+    prepared: list[tuple[str, dict[str, Any]]] = []
     for uri in uris:
         try:
             outbound = parse_proxy_uri(uri)
@@ -513,6 +517,19 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             stats["unsupported"] += 1
             reasons[str(exc)] = reasons.get(str(exc), 0) + 1
             continue
+        prepared.append((uri, outbound))
+
+    prewarm_public_endpoints([outbound.get("server", "") for _, outbound in prepared])
+    for uri, outbound in prepared:
+        original_server = outbound.get("server")
+        resolved_server = resolve_public_endpoint(original_server)
+        if not resolved_server:
+            stats["unsupported"] += 1
+            reason = "non_global_or_unresolved_endpoint"
+            reasons[reason] = reasons.get(reason, 0) + 1
+            continue
+        outbound["server"] = resolved_server
+
         identifier = _record_id(uri)
         inbound_tag = f"in-{identifier}"
         outbound_tag = f"proxy-{identifier}"
@@ -530,7 +547,7 @@ def build_sing_box_config(uris: list[str]) -> tuple[dict[str, Any], list[dict[st
             # egress-health.json, and it was reading these off the record.
             # They were never stored, so the run raised KeyError: 'server'
             # as soon as a config survived long enough to be classified.
-            "server": outbound.get("server"),
+            "server": original_server,
             "server_port": outbound.get("server_port"),
         })
         stats["supported"] += 1
@@ -613,20 +630,19 @@ GEMINI_URL = os.getenv("GEMINI_PROBE_URL", "https://gemini.google.com/")
 
 
 async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
-    """Ask Gemini for a page through the proxy and report the raw verdict.
+    """Check Gemini front-page reachability through this exit.
 
-    Returns ``ok`` only when Gemini actually served content (HTTP 2xx/3xx). A
-    403 is the interesting answer, not an error to swallow: it means the egress
-    IP is flagged. A curl timeout or a 5xx means we learned nothing and is
-    reported as ``ok: False`` with a distinct reason, so the worker can tell
-    "flagged" apart from "we did not manage to check".
+    ``ok`` is True for 2xx/3xx, False only for reputation-style 401/403/429,
+    and None when inconclusive. This unauthenticated check does not prove that
+    a user's Gemini account/session can use Gemini. Discard the page body; only
+    the status is needed and retaining it wastes bandwidth and memory.
     """
     config_lines = [
         f'proxy = "socks5h://127.0.0.1:{proxy_port}"',
         f'url = "{GEMINI_URL}"',
         "silent",
         "show-error",
-        "fail",
+        'output = "/dev/null"',
         "connect-timeout = 5",
         "max-time = 15",
     ]
@@ -640,27 +656,42 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
     stdout, _ = await process.communicate(("\n".join(config_lines) + "\n").encode())
 
     if process.returncode != 0:
-        return {"ok": False, "error": f"curl_exit_{process.returncode}"}
+        return {"ok": None, "error": f"curl_exit_{process.returncode}"}
 
     try:
         text = stdout.decode(errors="replace").strip()
-        body, _, code = text.rpartition("\n")
+        _, _, code = text.rpartition("\n")
         status = int(code.strip()) if code.strip().isdigit() else 0
     except Exception:
-        return {"ok": False, "error": "parse_failed"}
+        return {"ok": None, "error": "parse_failed"}
 
     if status == 0:
-        return {"ok": False, "error": "no_status"}
-    # 2xx and 3xx mean Gemini served us. 401/403/429 are the reputation gates:
-    # the exit is reachable but flagged, which is exactly what we want to know.
+        return {"ok": None, "error": "no_status"}
+    # Only explicit reputation-style responses count as flagged. Server errors
+    # and unexpected statuses are inconclusive, not evidence against the exit.
+    if status in (401, 403):
+        return {"ok": False, "flagged": True, "http_status": status}
+    if status == 429:
+        # A rate limit can be caused by probe volume/shared exits; it is not
+        # sufficient evidence that Google has reputation-blocked this IP.
+        return {"ok": None, "flagged": None, "http_status": status, "error": "rate_limited"}
+    if status >= 400:
+        return {"ok": None, "flagged": None, "http_status": status}
     return {
-        "ok": 200 <= status < 400,
-        "flagged": status in (401, 403, 429),
+        "ok": True,
+        "flagged": False,
         "http_status": status,
     }
 
 
-async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semaphore: asyncio.Semaphore) -> dict[str, Any]:
+async def _speed_test(
+    record: dict[str, Any],
+    worker_url: str,
+    token: str,
+    semaphore: asyncio.Semaphore,
+    *,
+    probe_gemini: bool = True,
+) -> dict[str, Any]:
     """Ask the Worker which IP this config egresses from.
 
     Phase 1 already measures real throughput (Stage 3's 5 MB transfer), and
@@ -723,12 +754,12 @@ async def _speed_test(record: dict[str, Any], worker_url: str, token: str, semap
     # too quickly to satisfy MIN_DOWNLOAD_MB_S.
     ok = bool(result.get("ip"))
 
-    # Ask Gemini from the same exit, on the same SOCKS port we just used. This
-    # is one extra request per config per round, and it is the only place we
-    # learn whether Google will actually serve this IP. A node we never asked
-    # gets None, never True.
+    # Ask Gemini at most once per config per full run. The final speed pass
+    # skips it for configs that answered in the initial pass; if the initial
+    # pass failed, the final pass gets the one attempt. This is only a
+    # reachability signal, not a logged-in usability check.
     gemini: dict[str, Any] = {}
-    if ok:
+    if ok and probe_gemini:
         try:
             gemini = await _gemini_probe(record["port"])
         except Exception as exc:  # a failed reputation check must not drop a
@@ -785,16 +816,15 @@ async def _run_stability_check(records: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def _gemini_verdict(history: list[bool | None]) -> dict[str, Any]:
-    """Roll per-round Gemini verdicts into one honest answer.
+    """Reduce the one per-run Gemini probe to one honest answer.
 
     Three outcomes, kept distinct on purpose:
-      clean    - at least one round served us, and no round was flagged
-      flagged  - any round came back 401/403/429; the IP is on a reputation list
+      clean    - the probe served us
+      flagged  - the probe came back 401/403, an explicit access rejection
       unknown  - we never got an answer we can act on
 
-    A config that fails the check on one round and passes on another is
-    "flagged", not "clean": a user who hits the 403 has still lost the node, and
-    averaging the two would hide exactly the case worth knowing about.
+    It accepts a list to fit the existing health aggregation flow, but current
+    runs append at most one result for this signal.
     """
     known = [v for v in history if v is not None]
     if not known:
@@ -970,7 +1000,11 @@ def merge_previous_health(
       - a row this run actually measured always wins - fresh beats stale;
       - rows older than max_age_hours are dropped: beyond that the exit may
         have moved and the row would claim a country/speed that no longer
-        holds (the worker's own document gate is also 24h);
+        holds (the worker filters on fresh documents through 24h and ignores
+        documents older than 48h);
+      - carried rows retain their original measurement timestamp and are
+        explicitly marked stale so the worker can keep them available for
+        manual selection without ranking them into Best;
       - a missing or malformed previous index is a no-op, not an error - the
         probe must still publish this run's measurements.
     """
@@ -998,7 +1032,9 @@ def merge_previous_health(
             updated = updated.replace(tzinfo=timezone.utc)
         if updated < cutoff:
             continue
-        merged[rid] = row
+        carried_row = dict(row)
+        carried_row["stale"] = True
+        merged[rid] = carried_row
         carried += 1
     return merged, carried
 
@@ -1177,8 +1213,8 @@ async def main() -> int:
         fraud_history = {r["id"]: [] for r in records}
         country_history = {r["id"]: [] for r in records}
         hosting_history = {r["id"]: [] for r in records}
-        # Gemini verdicts, same shape as the other per-round histories. A None
-        # entry means the probe did not answer this round; it is not a pass.
+        # Retain the Gemini answer in the same aggregation shape as the other
+        # observations. Current runs probe each config at most once.
         gemini_history = {r["id"]: [] for r in records}
 
         # Include initial results
@@ -1244,7 +1280,17 @@ async def main() -> int:
         # Final speed test via Worker
         print("Running final speed test via Worker...", flush=True)
         await _ensure_core()
-        final = await asyncio.gather(*(_speed_test(r, worker_url, worker_token, semaphore) for r, _ in live))
+        first_by_id = {record["id"]: result for record, result in zip(records, first)}
+        final = await asyncio.gather(*(
+            _speed_test(
+                record,
+                worker_url,
+                worker_token,
+                semaphore,
+                probe_gemini=not first_by_id.get(record["id"], {}).get("ok", False),
+            )
+            for record, _ in live
+        ))
         ok = sum(1 for r in final if r.get("ok"))
         print(f"Final: {ok}/{len(live)} returned an IP", flush=True)
         print(f"[t3] final round done in {time.monotonic() - phase_started:.0f}s total", flush=True)
@@ -1315,6 +1361,7 @@ async def main() -> int:
         # so the same config resolves to the same key on every run - the
         # deterministic, non-random "naming system" used to track a config's
         # egress IP across the 5-min probes (see `ip_changed` below).
+        measured_at = datetime.now(timezone.utc).isoformat()
         health[rid] = {
             "scheme": record["scheme"],
             "server": record["server"],
@@ -1345,7 +1392,9 @@ async def main() -> int:
             # without this the two are indistinguishable in the index.
             "ip_family": families_of(ips),
             "primary_country": classification.get("country"),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": measured_at,
+            "measured_at": measured_at,
+            "stale": False,
         }
 
     # Rolling union: fold the previously-published index back in for any pool

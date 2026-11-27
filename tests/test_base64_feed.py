@@ -42,6 +42,10 @@ def _b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
+def _b64url(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+
+
 class _FakeResponse:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -61,6 +65,12 @@ class _FakeSession:
 class TestDecodeBase64Feed(unittest.TestCase):
     def test_base64_only_body_is_decoded(self):
         self.assertEqual(main.decode_base64_feed(_b64(PLAIN)), PLAIN)
+
+    def test_url_safe_base64_body_is_decoded(self):
+        text = "vless://one@1.1.1.1:443#x¾"
+        encoded = _b64url(text)
+        self.assertRegex(encoded, r"[-_]", "fixture must exercise the URL-safe alphabet")
+        self.assertEqual(main.decode_base64_feed(encoded), text)
 
     def test_plain_body_is_returned_unchanged(self):
         self.assertEqual(main.decode_base64_feed(PLAIN), PLAIN)

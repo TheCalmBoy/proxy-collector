@@ -52,6 +52,7 @@ class TestHealthUnion(unittest.TestCase):
         )
         self.assertEqual(1, carried)
         self.assertEqual("DE", merged["AAAA1111"]["primary_country"])
+        self.assertIs(merged["AAAA1111"]["stale"], True)
 
     def test_fresh_measurement_beats_stale_previous_row(self):
         # The previous row claims US; this run re-measured and it's DE.
@@ -102,8 +103,9 @@ class TestHealthUnion(unittest.TestCase):
         )
         self.assertEqual(1, carried)
         self.assertEqual(2, len(merged))
-        # the carried row is the previous one, untouched
-        self.assertEqual(prev["configs"]["B2222222"], merged["B2222222"])
+        # Carried measurements keep their timestamp and are marked stale.
+        expected = dict(prev["configs"]["B2222222"], stale=True)
+        self.assertEqual(expected, merged["B2222222"])
 
 
 if __name__ == "__main__":

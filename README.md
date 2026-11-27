@@ -36,6 +36,10 @@ best-effort scheduler cannot skip it. `update.yml` receives that event directly:
 verify → publish to `gh-pages`, then chain `probe-egress.yml` with `gh workflow run`, so
 the probe measures the pool that was just published. One beat, one pool, measured once.
 
+The heartbeat's manual HTTP trigger requires a separate `MANUAL_TRIGGER_TOKEN` secret
+and an `Authorization: Bearer <token>` header. The scheduled cron dispatch does not use
+this manual token.
+
 The beat is 30 minutes rather than 15 because a full chain is update (~6.5 min median,
 12.5 max) plus probe (~5.2 min). At a 15-minute beat the next tick landed mid-chain, the
 update queued on its concurrency group instead of running, and its chained probe landed
@@ -47,9 +51,10 @@ Every workflow is also runnable by hand via `workflow_dispatch`.
 
 | File | Contents |
 |---|---|
+| `index.html` | static dashboard with pool size, protocol mix, country labels, and health freshness |
 | `all.txt` | every verified proxy URI, annotated |
 | `countries/<CC>.txt` | the same, split by endpoint country |
-| `all.txt.base64`, `countries/<CC>.base64.txt` | base64 of the above |
+| `all.base64.txt`, `countries/<CC>.base64.txt` | whole-file base64 mirrors of the corresponding plain-text feeds |
 | `manifest.json`, `ATTRIBUTION.txt`, `source_map.json` | index, credits, URI → source |
 | `enriched-configs.json` | configs with their probe and country metadata |
 | `egress-health.json` | measured egress health per exit, refreshed by `probe-egress` |
@@ -67,9 +72,26 @@ client's User-Agent; override it when detection gets it wrong.
 | `entry64` | none | base64 proxy URI for an entrypoint; repeatable. A node link, or a `masque://` URI for the mihomo formats |
 | `secure=1` | off | keep only exits whose hop is TLS |
 | `ech=embed` | off | pin the ECH key into the config instead of leaving it to the client's DNS |
+| `protocol` | all supported | comma-separated exit protocols, such as `vless,vmess,hysteria2,tuic,anytls` |
+| `exclude` | none | comma-separated country codes to omit, such as `CN,RU`; dynamic exits observed in an excluded country are omitted too |
 
-Response headers report pipeline state: `x-health-index` (`fresh` / `aged`),
-`x-health-join`, `x-ech-mode`.
+Successful responses include an `ETag` and honor `If-None-Match`, so clients that
+support conditional requests can avoid downloading an unchanged config. The
+response is marked private because entrypoint links can contain credentials.
+Other headers report pipeline state: `x-health-index` (`fresh` / `aged`),
+`x-health-join`, `x-health-age`, and `x-ech-mode`.
+
+The `Gemini HTTP 2xx/3xx` label means only that an unauthenticated request to
+the Gemini front page returned that status class from the pipeline runner. It
+does not prove that Gemini will work with a subscriber's Google account, client
+session, or network. HTTP 401/403 are shown separately and do not affect proxy
+ranking. HTTP 429 is treated as rate-limited and unknown because probe volume
+or shared exits can cause it; transport failures and server errors are also
+unknown rather than evidence of an IP block.
+
+Health rows carried from an earlier probe remain available for manual selection
+for at most 24 hours. They are labeled `Stale health` and are excluded from the
+automatic `Best` group; health documents older than 48 hours are ignored.
 
 **Entrypoints and exits.** `entry64` is the hop that gets out of a filtered network; the
 Worker chains the feed's exits behind it with `dialer-proxy`. Every exit is rendered once
@@ -80,9 +102,15 @@ A `masque://` entrypoint (Cloudflare WARP over HTTP/2) carries no share-link for
 mihomo has no masque node scheme; it is a worker-internal shape that renders for
 `format=mihomo` only. The other formats return 406 `masque_entry_requires_mihomo_format`.
 
-**Size.** There is no cap on how many entrypoints you send, how long one may be, or how
-large the response grows: the worker renders the whole feed. Per-country exits are still
-capped at `COUNTRY_CAP`, which is what keeps the output a sane size.
+**Size.** The Mihomo response is streamed, and entrypoint/exit variants are generated on
+demand. The Worker does not truncate a valid profile to a fixed output count or byte
+budget. Per-country exits are still capped at `COUNTRY_CAP`. Cloudflare still limits
+request URLs to 16 KB and each Worker to 128 MB of memory, and the Worker parses the
+upstream feed before it starts streaming ([Cloudflare limits](https://developers.cloudflare.com/workers/platform/limits/),
+[Workers Streams API](https://developers.cloudflare.com/workers/runtime-apis/streams/)).
+Streaming avoids buffering the final YAML body, but it cannot remove the CPU and memory
+cost of parsing the feed or guarantee that arbitrarily large source data will finish
+within the Worker's runtime limits.
 
 ### ECH
 
@@ -98,12 +126,11 @@ every 30–60 minutes if you use it.
 ```bash
 python3 run_tests.py                  # all pipeline tests
 python3 run_tests.py classify         # only files whose name matches "classify"
-cd workers/proxy-chain-subscription && node --test   # Worker tests
+node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
 ```
 
-CI runs the Python suite on every push and pull request
-(`.github/workflows/test.yml`). The Worker tests are not wired into CI — run them with
-`node --test` as above.
+CI runs both the Python and Worker suites on every push and pull request
+(`.github/workflows/test.yml`). Run the Worker tests locally with `node --test` as above.
 
 `workers/proxy-chain-subscription/scripts/verify-chain.sh` is the end-to-end check
 against a live Worker: it parses the rendered YAML, starts mihomo on it, fetches through
@@ -120,8 +147,17 @@ Needs a DB-IP Lite MMDB named `GeoLite2-Country.mmdb` in the repository root:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt
 python main.py
+```
+
+`requirements.in` holds the allowed dependency ranges; `requirements.txt` is
+the Python 3.13 hash-locked resolution used by CI. Regenerate it after an
+intentional dependency update with:
+
+```bash
+uv pip compile requirements.in --generate-hashes --python-version 3.13 \
+  --output-file requirements.txt
 ```
 
 Output lands in `output/`. `MMDB_PATH`, `OUTPUT_DIR`, and `IP_API_URL` are overridable by
