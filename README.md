@@ -47,6 +47,20 @@ update queued on its concurrency group instead of running, and its chained probe
 
 Every workflow is also runnable by hand via `workflow_dispatch`.
 
+## Worker deployments
+
+Merging Worker changes to `main` deploys all three Workers through
+`.github/workflows/deploy-workers.yml`. The workflow tests the subscription and heartbeat
+Workers first; `workflow_dispatch` can rerun deployment from `main`.
+
+The `cloudflare-production` GitHub Environment must contain the
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. The deployment workflow pins
+`cloudflare/wrangler-action` v3.14.1 to its verified commit SHA. Each deploy sets
+`GIT_SHA`, and `GET /version` on the subscription Worker returns it as JSON. The dashboard
+footer reads that endpoint when the optional repository variable `WORKER_URL` is set to
+the subscription Worker's HTTPS origin (without credentials, path, or query string).
+That same variable enables the post-deploy version check.
+
 ## Published data (`gh-pages`)
 
 | File | Contents |

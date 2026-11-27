@@ -1,0 +1,68 @@
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+    paths: ["workers/**", ".github/workflows/deploy-workers.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-workers
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - run: node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cloudflare-production
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        worker: [proxy-chain-subscription, proxy-egress-ip-check, proxy-pipeline-heartbeat]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/${{ matrix.worker }}
+          command: deploy --keep-vars --var GIT_SHA:${{ github.sha }}
+      - name: Verify subscription Worker version
+        if: ${{ matrix.worker == 'proxy-chain-subscription' && vars.WORKER_URL != '' }}
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          case "$WORKER_URL" in
+            https://*) ;;
+            *) echo "WORKER_URL must be an HTTPS origin" >&2; exit 1 ;;
+          esac
+          case "$WORKER_URL" in
+            *\?*|*\#*|*://*@*) echo "WORKER_URL must not contain a query, fragment, or credentials" >&2; exit 1 ;;
+          esac
+          version_url="${WORKER_URL%/}/version"
+          if ! curl --fail --silent --max-time 20 "$version_url" -o /tmp/worker-version.json; then
+            echo "subscription Worker version request failed" >&2
+            exit 1
+          fi
+          if ! actual_sha="$(jq -er '.sha // empty' /tmp/worker-version.json 2>/dev/null)" || [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "subscription Worker version does not match the deployed commit" >&2
+            exit 1
+          fi

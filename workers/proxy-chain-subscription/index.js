@@ -1383,6 +1383,8 @@ var index_default = {
     const url = new URL(request.url);
     if (request.method !== "GET")
       return fail("method_not_allowed", 405);
+    if (url.pathname === "/version")
+      return reply(JSON.stringify({ sha: typeof env?.GIT_SHA === "string" && env.GIT_SHA ? env.GIT_SHA : "unknown" }), 200, "application/json; charset=utf-8", { "access-control-allow-origin": "*" });
     if (url.pathname !== "/sub")
       return fail("not_found", 404);
     const requestedCountry = (url.searchParams.get("country") || "").toUpperCase();

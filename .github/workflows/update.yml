@@ -479,7 +479,33 @@ jobs:
 
       - name: Add the public pool dashboard
         if: github.ref == 'refs/heads/main'
-        run: cp dashboard/index.html output/index.html
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
+        run: |
+          cp dashboard/index.html output/index.html
+          python - <<'PY'
+          from html import escape
+          from os import environ
+          from pathlib import Path
+          from urllib.parse import urlsplit
+
+          worker_url = environ.get("WORKER_URL", "").strip().rstrip("/")
+          if worker_url:
+              parsed = urlsplit(worker_url)
+              if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+                      or parsed.password or parsed.path or parsed.query or parsed.fragment):
+                  raise SystemExit("WORKER_URL must be an HTTPS origin without credentials, path, query, or fragment")
+          page = Path("output/index.html")
+          contents = page.read_text(encoding="utf-8")
+          marker = '<meta name="worker-base-url" content="">'
+          if marker not in contents:
+              raise SystemExit("dashboard worker URL placeholder is missing")
+          contents = contents.replace(
+              marker,
+              f'<meta name="worker-base-url" content="{escape(worker_url, quote=True)}">',
+          )
+          page.write_text(contents, encoding="utf-8")
+          PY
 
       - name: Deploy generated database to gh-pages
         if: github.ref == 'refs/heads/main'
