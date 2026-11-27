@@ -140,9 +140,16 @@ every 30–60 minutes if you use it.
 python3 run_tests.py                  # all pipeline tests
 python3 run_tests.py classify         # only files whose name matches "classify"
 node --test workers/proxy-chain-subscription/test/*.test.mjs workers/proxy-pipeline-heartbeat/test/*.test.mjs
+bash scripts/check.sh                 # full Python, Worker, and Mihomo baseline
 ```
 
-CI runs both the Python and Worker suites on every push and pull request
+The fixed Mihomo renderer fixture is regenerated with:
+
+```bash
+node workers/proxy-chain-subscription/scripts/render-mihomo-golden.mjs > workers/proxy-chain-subscription/test/fixtures/mihomo-golden.yaml
+```
+
+CI runs `scripts/check.sh` in the `test` job on every push and pull request
 (`.github/workflows/test.yml`). Run the Worker tests locally with `node --test` as above.
 
 `workers/proxy-chain-subscription/scripts/verify-chain.sh` is the end-to-end check

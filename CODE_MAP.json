@@ -35,8 +35,8 @@
   "cf_workers": {
     "proxy-chain-subscription": {
       "path": "workers/proxy-chain-subscription/",
-      "file": "index.js (1338 lines, 58173 bytes, committed as the deployed bundle - this is esbuild output, not original source)",
-      "endpoint": "GET /sub (any other path 404s)",
+      "file": "index.js (Worker source; Wrangler bundles main at deploy time)",
+      "endpoint": "GET /sub and GET /version",
       "purpose": "Subscription endpoint. Reads base64 entrypoint URIs (entry64: a node link, or a worker-internal masque:// shape), chains feed exits behind EACH entrypoint with dialer-proxy, and renders the result in the client's format.",
       "format_detection": "User-Agent first (clash/mihomo/stash -> mihomo, sing-box/nekobox -> sing-box, xray/v2rayng/mahsa -> links); ?format= overrides",
       "query_options": {
@@ -89,10 +89,15 @@
     "test.yml": {
       "name": "Test",
       "trigger": "push, pull_request, workflow_dispatch",
-      "runs": "the Python suite only (python -m unittest discover -s tests). The Worker node tests are NOT wired into CI."
+      "runs": "scripts/check.sh (Python, Worker, and Mihomo baseline)"
     },
     "runner-probe.yml": {"name": "Runner capacity probe", "trigger": "workflow_dispatch", "purpose": "Checks runner health"},
-    "s3diag.yml": {"name": "Stage 3 Diagnostics", "trigger": "workflow_dispatch", "purpose": "Classifies why each candidate failed the download gate, and whether it can reach strict sites (tools/s3diag.py). NOT Amazon S3."}
+    "s3diag.yml": {"name": "Stage 3 Diagnostics", "trigger": "workflow_dispatch", "purpose": "Classifies why each candidate failed the download gate, and whether it can reach strict sites (tools/s3diag.py). NOT Amazon S3."},
+    "deploy-workers.yml": {
+      "name": "Deploy Workers",
+      "trigger": "push to main when workers/** or this workflow changes; workflow_dispatch",
+      "deploys": ["proxy-chain-subscription", "proxy-egress-ip-check", "proxy-pipeline-heartbeat"]
+    }
   },
   "python_source": {
     "main.py": {"lines": 935, "bytes": 36770, "purpose": "Core collection pipeline; writes output/ (all.txt, countries/, base64, manifest.json, source_map.json, ATTRIBUTION.txt)"},
@@ -102,24 +107,39 @@
       "probe_egress.py": "61781 bytes - Egress IP probing",
       "country_consistency.py": "Country verification",
       "ipapi_proxy_pool.py": "ip-api egress proxy pool sidecar",
-      "s3diag.py": "Stage 3 failure classification"
-    }
+      "s3diag.py": "Stage 3 failure classification",
+      "ab_translate.py": "Translation helpers for A/B experiment artifacts",
+      "endpoint_safety.py": "Public DNS resolution and pinned endpoint safety checks",
+      "source_retries.py": "Capped Retry-After policy for upstream source requests"
+    },
+    "tracked_tools_python_files": [
+      "tools/ab_translate.py",
+      "tools/country_consistency.py",
+      "tools/endpoint_safety.py",
+      "tools/ipapi_proxy_pool.py",
+      "tools/probe_egress.py",
+      "tools/s3diag.py",
+      "tools/source_retries.py",
+      "tools/verify.py"
+    ]
   },
   "tests": {
     "runner": "python3 run_tests.py [name-fragment]",
-    "count": 23,
+    "count": 34,
     "files": [
-      "tests/test_classify.py", "tests/test_country_consistency.py", "tests/test_dns_cache.py",
-      "tests/test_dns_prewarm.py", "tests/test_gemini_verdict.py",
-      "tests/test_health_speed_verdict.py", "tests/test_https_gate_stability.py",
-      "tests/test_per_source_survival.py", "tests/test_probe_egress.py", "tests/test_probe_egress_retry.py",
-      "tests/test_probe_health_union.py", "tests/test_probe_inbound_ports.py", "tests/test_publish_step.py",
-      "tests/test_rejected_endpoints.py", "tests/test_socks_connect.py", "tests/test_source_attribution.py",
-      "tests/test_speed_test_verdict.py", "tests/test_stage23_concurrency.py", "tests/test_udp_associate_probe.py",
-      "tests/test_udp_nonblocking.py", "tests/test_udp_probe_capability.py", "tests/test_verify.py",
-      "tests/test_workflow_env_contract.py"
+      "tests/test_ab_translation_fixes.py", "tests/test_base64_feed.py", "tests/test_classify.py",
+      "tests/test_code_map.py", "tests/test_country_consistency.py", "tests/test_dns_cache.py",
+      "tests/test_dns_prewarm.py", "tests/test_endpoint_safety.py", "tests/test_gemini_verdict.py",
+      "tests/test_health_speed_verdict.py", "tests/test_https_gate_stability.py", "tests/test_per_source_survival.py",
+      "tests/test_probe_egress.py", "tests/test_probe_egress_retry.py", "tests/test_probe_health_union.py",
+      "tests/test_probe_inbound_ports.py", "tests/test_publish_step.py", "tests/test_rejected_endpoints.py",
+      "tests/test_resolve_host_robustness.py", "tests/test_retry_after_cap.py", "tests/test_sing_box_batch_robustness.py", "tests/test_socks_connect.py",
+      "tests/test_source_attribution.py", "tests/test_speed_test_verdict.py", "tests/test_stage23_concurrency.py",
+      "tests/test_udp_associate_probe.py", "tests/test_udp_nonblocking.py", "tests/test_udp_probe_capability.py",
+      "tests/test_uri_protocols.py", "tests/test_uri_tls_fields.py", "tests/test_uri_transports.py",
+      "tests/test_verify.py", "tests/test_worker_error_docs.py", "tests/test_workflow_env_contract.py"
     ],
-    "worker": "workers/proxy-chain-subscription/test/*.mjs (chain integrity, one variant per entrypoint with the ETn prefix and a matching dialer-proxy, masque entry render + its 406 guard, health headers, byte limits, ECH shapes, secure filter, embed coverage)"
+    "worker": "workers/proxy-chain-subscription/test/*.mjs (chain integrity, one variant per entrypoint with the ETn prefix and a matching dialer-proxy, masque entry render + its 406 guard, health headers, byte limits, ECH shapes, secure filter, embed coverage, Mihomo golden renderer fixture)"
   },
   "history": {
     "2026-10-01": "GitHub free-tier schedule: crons stopped firing for this repo and froze the pipeline - the watchdog meant to recover it shared the same scheduler. Fixed by moving the clock to a Cloudflare Worker (now workers/proxy-pipeline-heartbeat/).",
@@ -127,5 +147,13 @@
     "2026-10-15": "ECH output format corrected; round-robin across entrypoints fixed; whole-node byte capping; direct rules for private ranges; ?secure=1 and ?ech=embed added.",
     "2026-10-16": "The three size caps (per-entry bytes, entry count, response bytes) were removed: the worker now renders the whole feed. They only ever mattered for an unauthenticated public endpoint, and they cost a binary-search re-render whenever the feed grew. The tester's six silent field losses were fixed the same day (reality emitted without enabled, alpn, insecure, fp, httpupgrade/h2, hy2/tuic/anytls, vmess tls) - 0xRadikal 13.46% -> 23.61%, whitedns 5.96% -> 15.17%. patterniha/Free-Configs was removed at 0.0% in two full runs (dead pinned edge, handshake-dropped SNI names measured from inside Iran). Later the same day the heartbeat was consolidated: two source copies of one deployed Worker existed (heartbeat/ and workers/proxy-pipeline-heartbeat/, same name), the beat moved from */15 to */30 so the chain fits inside its own beat, the orphaned standalone-probe dispatch was dropped, and freshness-watchdog.yml plus tools/freshness_watch.py were deleted.",
     "2026-10-17": "Subscription worker: masque:// entrypoints added. Cloudflare WARP over HTTP/2 is a config-only proxy - mihomo has no masque node scheme - so the worker transcodes a worker-internal URI (server, port, private-key, public-key, ip, ipv6, sni, network, mtu, handshake-timeout) into a type: masque proxy block and refuses the formats that cannot express it (406 masque_entry_requires_mihomo_format). The same day the entrypoint round-robin from 2026-10-15 was reverted: it gave each exit a single entrypoint, so an exit was reachable through one hop only (148 exits via ET1, 147 via ET2 on a 295-exit feed) and the loss was invisible - the proxy count still looked right and the config still validated. Every exit is now rendered once per entrypoint, named ETn - <exit>, each dialing through its own entrypoint."
+  },
+  "paths": {
+    "dashboard/": "Static dashboard source copied to the published gh-pages index.",
+    "docs/": "Maintainer-facing references, including Worker error codes.",
+    "scripts/check.sh": "Runs the required Python, Worker, and Mihomo baseline checks.",
+    "scripts/install-mihomo.sh": "Installs the pinned Mihomo binary used by validation.",
+    "tools/endpoint_safety.py": "Resolves public endpoints, pins IPs, and bounds DNS prewarming.",
+    ".github/workflows/deploy-workers.yml": "Tests and deploys Cloudflare Workers from main."
   }
 }
