@@ -1635,8 +1635,7 @@ var index_default = {
         healthVersionToken,
         healthIndexState,
         enrichedVersionToken,
-        echVersionToken,
-        healthMinute: Math.floor(Date.now() / 6e4)
+        echVersionToken
       });
       return replyWithStreamEtag(request, streamMihomo(entries, countries, healthById, speedByEndpoint, { dns: dnsPref }), "text/yaml; charset=utf-8", joinHeaders, seed);
     }
