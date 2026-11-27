@@ -17,8 +17,8 @@ from typing import Any
 import geoip2.database
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from tools.endpoint_safety import resolve_public_endpoint
+from tools.source_retries import source_retry_policy
 
 
 # One upstream, and that is a measured decision rather than a default.
@@ -844,16 +844,7 @@ def main() -> None:
     # failures with bounded backoff so one temporary 429/5xx does not silently
     # shrink the candidate pool. POST geolocation batches are deliberately not
     # retried here; query_ip_api owns their rate-limit behavior.
-    source_retries = Retry(
-        total=3,
-        connect=3,
-        read=2,
-        status=3,
-        backoff_factor=0.5,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
+    source_retries = source_retry_policy()
     adapter = HTTPAdapter(max_retries=source_retries, pool_connections=16, pool_maxsize=16)
     session.mount("https://", adapter)
     session.mount("http://", adapter)

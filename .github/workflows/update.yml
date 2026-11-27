@@ -75,6 +75,11 @@ on:
         description: "Per-packet UDP budget in seconds. Raise it if Stage 2 reports many 'no reply' failures on proxies you expect to relay."
         required: false
         default: "6.0"
+      force:
+        description: "Allow publishing even if the verified pool is below the shrink guard."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -445,8 +450,35 @@ jobs:
               )
           PY
 
+      - name: Fetch previous published pool for shrink guard
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous=/tmp/proxy-collector-previous-all.txt
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/all.txt"
+          if ! http_code="$(curl --location --silent --max-time 30 --output "$previous" --write-out '%{http_code}' "$url")"; then
+            echo "Could not fetch the previous published pool; refusing to publish."
+            exit 1
+          fi
+          case "$http_code" in
+            200) echo "Previous published pool loaded for the shrink check." ;;
+            404)
+              rm -f "$previous"
+              echo "No previous published pool exists; the shrink check will be skipped."
+              ;;
+            *)
+              echo "Could not verify the previous published pool (HTTP $http_code); refusing to publish."
+              exit 1
+              ;;
+          esac
+
       - name: Publish only the configs that passed verification
         if: github.ref == 'refs/heads/main'
+        env:
+          PREVIOUS_PUBLISHED_POOL_PATH: /tmp/proxy-collector-previous-all.txt
+          PUBLISH_MIN_POOL_FRACTION: ${{ vars.PUBLISH_MIN_POOL_FRACTION || '0.5' }}
+          FORCE_PUBLISH_SHRINK: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
         shell: bash
         run: |
           set -euo pipefail

@@ -163,6 +163,12 @@ uv pip compile requirements.in --generate-hashes --python-version 3.13 \
 Output lands in `output/`. `MMDB_PATH`, `OUTPUT_DIR`, and `IP_API_URL` are overridable by
 environment variable.
 
+The DNS prewarm uses an overall deadline of 60 seconds; set
+`ENDPOINT_PREWARM_TIMEOUT_SECONDS` to tune it. Before publishing, the workflow compares
+the verified pool with the previous published pool and refuses a result below 50% by
+default. Set the repository variable `PUBLISH_MIN_POOL_FRACTION` to change that floor,
+or use the `workflow_dispatch` input `force` for an intentional smaller pool.
+
 ## How a proxy is classified
 
 The country is the country of the resolved endpoint IP according to DB-IP Lite. It is
