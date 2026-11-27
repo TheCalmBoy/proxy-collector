@@ -1,4 +1,4 @@
-# proxy-collector
+# proxy-collector 
 
 Collects public proxy configs, verifies which ones actually work, and publishes them as
 ready-to-use subscriptions.
