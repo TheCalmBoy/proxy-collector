@@ -31,7 +31,7 @@ def realistic_enriched() -> dict:
             "stages": {
                 "tcp": {"attempts": 20, "success_rate": 1.0, "passed": True},
                 "udp": {"attempts": 20, "success_rate": 0.0, "supports_udp": False},
-                "speed": {"attempts": 1, "success_rate": 1.0, "passed": True},
+                "download": {"speed_mb_s": 1.5, "latency_ms": 120.0, "passed": True},
                 "https": {"attempts": 20, "success_rate": 1.0 if https_passed else 0.0,
                           "passed": https_passed},
             },
@@ -107,7 +107,7 @@ class TestPublishStep(unittest.TestCase):
     def test_publisher_requires_every_mandatory_stage(self):
         data = realistic_enriched()
         candidate = data["configs"][0]
-        candidate["stages"]["speed"]["passed"] = False
+        candidate["stages"]["download"]["passed"] = False
         (self.root / "verify-output" / "enriched-configs.json").write_text(json.dumps(data))
         proc = self._run_publish()
         self.assertEqual(proc.returncode, 0, proc.stderr)
