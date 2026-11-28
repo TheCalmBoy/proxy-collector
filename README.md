@@ -73,6 +73,17 @@ That same variable enables the post-deploy version check.
 | `egress-health.json` | measured egress health per exit, refreshed by `probe-egress` |
 | `rejected-endpoints.json` | what the probes rejected, and why |
 
+The optional `YT Music reachable` subscription label means the runner reached
+the unauthenticated `music.youtube.com` app shell through that exit. It does
+not test sign-in, an account, Premium, or playback. Region availability is not
+verified: the first 64 KiB from sampled US and Russia exits had the same app
+shell marker; `contentRegion` and `hl` differed, but neither sample showed an
+unavailable-country message. Any regional message reported by a future probe
+would be what the runner's exit received, not a guarantee about the user's location.
+The signal is informational and does not affect ranking. Set
+`YTMUSIC_PROBE_URL` to override the probe URL; the default is
+`https://music.youtube.com/`.
+
 ## Subscription endpoint
 
 `GET /sub` on `workers/proxy-chain-subscription`. The format is detected from the
