@@ -1,0 +1,96 @@
+{
+  "generated_at": "2026-11-28T13:11:16.905292+00:00",
+  "endpoints": [
+    {
+      "server": "139.162.27.96",
+      "server_port": 2096,
+      "scheme": "vless",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.876223+00:00"
+    },
+    {
+      "server": "185.164.175.81",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.868312+00:00"
+    },
+    {
+      "server": "185.176.204.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.877630+00:00"
+    },
+    {
+      "server": "185.215.132.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.865065+00:00"
+    },
+    {
+      "server": "193.151.160.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.880079+00:00"
+    },
+    {
+      "server": "193.151.163.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.874059+00:00"
+    },
+    {
+      "server": "202.50.253.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.869196+00:00"
+    },
+    {
+      "server": "202.50.253.27",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.868547+00:00"
+    },
+    {
+      "server": "202.50.253.45",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.873845+00:00"
+    },
+    {
+      "server": "202.50.253.90",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.871284+00:00"
+    },
+    {
+      "server": "45.86.51.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.889215+00:00"
+    },
+    {
+      "server": "82.110.60.9",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.869799+00:00"
+    },
+    {
+      "server": "95.215.201.18",
+      "server_port": 19999,
+      "scheme": "shadowsocks",
+      "reason": "egress-dynamic-country",
+      "rejected_at": "2026-11-28T13:11:16.874199+00:00"
+    }
+  ]
+}
