@@ -7,6 +7,7 @@ published layout matches what main.py produces.
 """
 import base64
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -75,11 +76,20 @@ class TestPublishStep(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run_publish(self):
+    def _run_publish(self, extra_env=None):
         script = (REPO / ".github" / "workflows" / "publish_step.py")
+        env = os.environ.copy()
+        for name in (
+            "PREVIOUS_PUBLISHED_POOL_PATH",
+            "PUBLISH_MIN_POOL_FRACTION",
+            "FORCE_PUBLISH_SHRINK",
+        ):
+            env.pop(name, None)
+        env["PREVIOUS_PUBLISHED_POOL_PATH"] = str(self.root / "previous-published-all.txt")
+        env.update(extra_env or {})
         return subprocess.run(
             ["python3", str(script)],
-            cwd=self.root, capture_output=True, text=True,
+            cwd=self.root, capture_output=True, text=True, env=env,
         )
 
     def test_publishes_only_https_survivors(self):
@@ -200,6 +210,52 @@ class TestPublishStep(unittest.TestCase):
         proc = self._run_publish()
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("stale", (self.root / "output" / "all.txt").read_text())
+
+    def test_shrink_guard_refuses_below_default_half_and_preserves_output(self):
+        previous = self.root / "previous-published-all.txt"
+        previous.write_text("\n".join(f"previous-{index}" for index in range(7)))
+        original = (self.root / "output" / "all.txt").read_text()
+
+        proc = self._run_publish()
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("refusing to publish pool shrink", proc.stderr)
+        self.assertEqual((self.root / "output" / "all.txt").read_text(), original)
+
+    def test_shrink_guard_allows_exactly_half(self):
+        previous = self.root / "previous-published-all.txt"
+        previous.write_text("\n".join(f"previous-{index}" for index in range(6)))
+
+        proc = self._run_publish()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len((self.root / "output" / "all.txt").read_text().splitlines()), 3)
+
+    def test_shrink_guard_fraction_is_configurable(self):
+        previous = self.root / "previous-published-all.txt"
+        previous.write_text("\n".join(f"previous-{index}" for index in range(7)))
+
+        proc = self._run_publish({"PUBLISH_MIN_POOL_FRACTION": "0.4"})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_workflow_dispatch_force_input_overrides_shrink_guard(self):
+        previous = self.root / "previous-published-all.txt"
+        previous.write_text("\n".join(f"previous-{index}" for index in range(7)))
+
+        proc = self._run_publish({"FORCE_PUBLISH_SHRINK": "true"})
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("force input accepted", proc.stdout)
+
+    def test_invalid_shrink_fraction_refuses_to_publish(self):
+        previous = self.root / "previous-published-all.txt"
+        previous.write_text("previous-1\n")
+
+        proc = self._run_publish({"PUBLISH_MIN_POOL_FRACTION": "not-a-number"})
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("must be a number from 0 to 1", proc.stderr)
 
 
 if __name__ == "__main__":

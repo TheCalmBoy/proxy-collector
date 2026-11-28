@@ -12,6 +12,8 @@ Kept as a script rather than inline in the workflow so it can be tested.
 """
 import base64
 import json
+import math
+import os
 import shutil
 import sys
 from collections import defaultdict
@@ -20,6 +22,10 @@ from pathlib import Path
 VERIFIED = Path("verify-output/enriched-configs.json")
 OUTPUT = Path("output")
 UNKNOWN_COUNTRY = "ZZ"
+PREVIOUS_PUBLISHED_POOL_ENV = "PREVIOUS_PUBLISHED_POOL_PATH"
+MIN_POOL_FRACTION_ENV = "PUBLISH_MIN_POOL_FRACTION"
+FORCE_SHRINK_ENV = "FORCE_PUBLISH_SHRINK"
+DEFAULT_MIN_POOL_FRACTION = 0.5
 
 
 def load_records(path: Path) -> list[dict]:
@@ -52,6 +58,39 @@ def write_list(name: str, lines: list[str]) -> None:
     )
 
 
+def passes_shrink_guard(records: list[dict]) -> bool:
+    """Reject a major pool shrink against the previous published feed."""
+    try:
+        minimum_fraction = float(os.environ.get(MIN_POOL_FRACTION_ENV, DEFAULT_MIN_POOL_FRACTION))
+    except (TypeError, ValueError):
+        print(f"{MIN_POOL_FRACTION_ENV} must be a number from 0 to 1", file=sys.stderr)
+        return False
+    if not math.isfinite(minimum_fraction) or not 0 <= minimum_fraction <= 1:
+        print(f"{MIN_POOL_FRACTION_ENV} must be a number from 0 to 1", file=sys.stderr)
+        return False
+
+    previous_path = Path(os.environ.get(PREVIOUS_PUBLISHED_POOL_ENV, "/tmp/proxy-collector-previous-all.txt"))
+    if not previous_path.is_file():
+        return True
+    previous_count = len({line.strip() for line in previous_path.read_text().splitlines() if line.strip()})
+    if previous_count == 0:
+        return True
+
+    verified_count = len({record["uri"] for record in records if record.get("uri")})
+    below_threshold = verified_count / previous_count < minimum_fraction
+    forced = os.environ.get(FORCE_SHRINK_ENV, "").strip().lower() in {"1", "true", "yes"}
+    if below_threshold and not forced:
+        print(
+            f"refusing to publish pool shrink: {verified_count} verified vs {previous_count} previous "
+            f"(minimum {minimum_fraction:.0%}); set the workflow_dispatch force input to override",
+            file=sys.stderr,
+        )
+        return False
+    if below_threshold and forced:
+        print(f"force input accepted; publishing {verified_count} verified configs vs {previous_count} previous")
+    return True
+
+
 def main() -> int:
     if not VERIFIED.exists():
         print(f"missing {VERIFIED}", file=sys.stderr)
@@ -63,6 +102,8 @@ def main() -> int:
         # also means verification broke, so fail loudly instead.
         print("no config passed verification; refusing to publish an empty database",
               file=sys.stderr)
+        return 1
+    if not passes_shrink_guard(records):
         return 1
 
     by_country: dict[str, list[str]] = defaultdict(list)
