@@ -1,0 +1,114 @@
+{
+  "generated_at": "2026-11-28T13:00:55.853805+00:00",
+  "source": "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+  "sources": [
+    "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt",
+    "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt",
+    "https://raw.githubusercontent.com/iampedii/whitedns-sub/main/base64.txt"
+  ],
+  "geoip_database": "DB-IP Lite IP to Country MMDB",
+  "geoip_license": "CC BY 4.0 (attribution: https://db-ip.com)",
+  "ip_classification": "ip-api.com batch (hosting -> DC/RES)",
+  "stats": {
+    "source_entries": 1335,
+    "upstream_entries": 3022,
+    "carryover_entries": 0,
+    "parsed_entries": 1335,
+    "unresolved_entries": 0,
+    "unsupported_entries": 0,
+    "unique_ips": 765,
+    "ip_api_success": 1335,
+    "ip_api_failed": 0,
+    "protocols": {
+      "hy2": 1,
+      "hysteria2": 6,
+      "socks": 4,
+      "ss": 698,
+      "trojan": 4,
+      "vless": 411,
+      "vmess": 211
+    },
+    "classifications": {
+      "DC": 625,
+      "RES": 709,
+      "UNKNOWN": 1
+    },
+    "durations_seconds": {
+      "fetch_sources": 0.278,
+      "parse_and_dns": 3.381,
+      "parse_and_geoip": 0.011,
+      "ip_api_and_annotation": 0.95,
+      "before_output": 4.621,
+      "build_outputs_before_manifest": 0.005
+    },
+    "country_counts": {
+      "AE": 1,
+      "AL": 3,
+      "AT": 8,
+      "AU": 2,
+      "BG": 4,
+      "BR": 6,
+      "BY": 7,
+      "CA": 105,
+      "CH": 17,
+      "CZ": 2,
+      "DE": 122,
+      "EE": 4,
+      "ES": 18,
+      "FI": 16,
+      "FR": 70,
+      "GB": 54,
+      "HK": 15,
+      "IE": 6,
+      "IN": 1,
+      "IR": 16,
+      "IT": 39,
+      "JP": 103,
+      "KR": 16,
+      "KZ": 5,
+      "LT": 6,
+      "LU": 1,
+      "LV": 8,
+      "NL": 174,
+      "NO": 3,
+      "PL": 15,
+      "RO": 2,
+      "RU": 25,
+      "SE": 19,
+      "SG": 48,
+      "SK": 1,
+      "TH": 1,
+      "TR": 8,
+      "UA": 1,
+      "US": 379,
+      "VN": 1,
+      "ZA": 3
+    },
+    "output_entries": 1335,
+    "per_source": {
+      "https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/verified/configs.txt": {
+        "candidates": 795,
+        "after_dedup": 795,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/hamedcode/port-based-v2ray-configs/main/sub/ss.txt": {
+        "candidates": 469,
+        "after_dedup": 469,
+        "overlap": 0
+      },
+      "https://raw.githubusercontent.com/iampedii/whitedns-sub/main/base64.txt": {
+        "candidates": 71,
+        "after_dedup": 71,
+        "overlap": 0
+      }
+    },
+    "verified_survivors": 322,
+    "verified_countries": 27
+  },
+  "files": {
+    "all": "all.txt",
+    "all_base64": "all.base64.txt",
+    "countries": "countries/",
+    "enriched": "enriched-configs.json"
+  }
+}

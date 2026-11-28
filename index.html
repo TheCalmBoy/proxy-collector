@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="worker-base-url" content="">
+  <title>Proxy Collector Pool</title>
+  <style>
+    :root { font: 16px/1.5 system-ui, sans-serif; color-scheme: light dark; }
+    body { margin: 0 auto; max-width: 66rem; padding: 2rem 1.25rem 4rem; }
+    header { border-bottom: 1px solid color-mix(in srgb, CanvasText 20%, transparent); margin-bottom: 1.5rem; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.5rem); margin: 0; }
+    p { color: color-mix(in srgb, CanvasText 75%, transparent); }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .8rem; margin: 1.5rem 0 2rem; }
+    .card, section { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .7rem; padding: 1rem; }
+    .card span { display: block; color: color-mix(in srgb, CanvasText 70%, transparent); font-size: .9rem; }
+    .card strong { display: block; font-size: 1.7rem; font-variant-numeric: tabular-nums; }
+    .tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem; }
+    h2 { font-size: 1.15rem; margin: 0 0 .7rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent); padding: .4rem .25rem; text-align: left; }
+    th:last-child, td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    #status { min-height: 1.5rem; }
+    footer { margin-top: 1.5rem; font-size: .9rem; }
+    a { color: LinkText; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Proxy Collector Pool</h1>
+    <p>Public snapshot of the Mihomo feed and its latest measured egress health.</p>
+  </header>
+
+  <p id="status" role="status">Loading published pool data…</p>
+  <div class="cards" aria-label="Pool summary">
+    <div class="card"><span>Published exits</span><strong id="exit-count">—</strong></div>
+    <div class="card"><span>Countries in feed</span><strong id="country-count">—</strong></div>
+    <div class="card"><span>Current health rows</span><strong id="health-count">—</strong></div>
+    <div class="card"><span>Carried health rows</span><strong id="stale-count">—</strong></div>
+  </div>
+
+  <div class="tables">
+    <section>
+      <h2>Protocol mix</h2>
+      <table><thead><tr><th>Protocol</th><th>Exits</th></tr></thead><tbody id="protocols"></tbody></table>
+    </section>
+    <section>
+      <h2>Feed country labels</h2>
+      <table><thead><tr><th>Country</th><th>Exits</th></tr></thead><tbody id="countries"></tbody></table>
+    </section>
+  </div>
+
+  <footer>
+    <p id="updated">Health measurement time: unavailable.</p>
+    <p id="worker-version">Subscription Worker revision: unavailable.</p>
+    <p>Country labels describe proxy endpoints. They do not guarantee the country a website sees after the proxy connects.</p>
+    <p>The optional “YT Music reachable” subscription label means the runner reached the unauthenticated app shell. It does not test an account, Premium, or playback, and region availability is not verified. Any regional message is what the runner's exit received.</p>
+    <p><a href="all.txt">Plain Mihomo feed</a> · <a href="manifest.json">Feed manifest</a> · <a href="egress-health.json">Egress health data</a></p>
+  </footer>
+
+  <script type="module">
+    const number = (value) => new Intl.NumberFormat().format(value);
+    const setText = (id, value) => { document.getElementById(id).textContent = value; };
+    const workerBaseUrl = document.querySelector('meta[name="worker-base-url"]')?.content.trim();
+    const showWorkerVersion = async () => {
+      if (!workerBaseUrl) {
+        setText("worker-version", "Subscription Worker revision: unavailable (WORKER_URL is not configured).");
+        return;
+      }
+      try {
+        const response = await fetch(`${workerBaseUrl.replace(/\/+$/, "")}/version`, { cache: "no-store" });
+        if (!response.ok) throw new Error("version request failed");
+        const version = await response.json();
+        if (typeof version.sha !== "string" || !version.sha) throw new Error("version missing");
+        setText("worker-version", `Subscription Worker revision: ${version.sha}.`);
+      } catch {
+        setText("worker-version", "Subscription Worker revision: unavailable.");
+      }
+    };
+    void showWorkerVersion();
+    const get = async (path, parse = (response) => response.text()) => {
+      const response = await fetch(path, { cache: "no-store" });
+      if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+      return parse(response);
+    };
+    const row = (label, count) => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td");
+      const total = document.createElement("td");
+      name.textContent = label;
+      total.textContent = number(count);
+      tr.append(name, total);
+      return tr;
+    };
+    const schemeOf = (uri) => uri.slice(0, uri.indexOf(":")).toLowerCase();
+    const countryOf = (uri) => {
+      const fragment = uri.split("#", 2)[1] || "";
+      let name = fragment;
+      try { name = decodeURIComponent(fragment.replaceAll("+", " ")); } catch { /* retain the original label */ }
+      return /^([A-Z]{2})-/.exec(name)?.[1] || "Unknown";
+    };
+    try {
+      const [feed, health] = await Promise.all([
+        get("all.txt"),
+        get("egress-health.json", (response) => response.json()).catch(() => null),
+      ]);
+      const uris = feed.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+      const protocols = new Map();
+      const countries = new Map();
+      for (const uri of uris) {
+        const scheme = schemeOf(uri);
+        protocols.set(scheme, (protocols.get(scheme) || 0) + 1);
+        const country = countryOf(uri);
+        countries.set(country, (countries.get(country) || 0) + 1);
+      }
+      const healthRows = Object.values(health?.configs || {});
+      const stale = healthRows.filter((item) => item?.stale === true).length;
+      setText("exit-count", number(uris.length));
+      setText("country-count", number(countries.size));
+      setText("health-count", number(healthRows.length - stale));
+      setText("stale-count", number(stale));
+      for (const [name, count] of [...protocols].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])))
+        document.getElementById("protocols").append(row(name, count));
+      for (const [code, count] of [...countries].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])))
+        document.getElementById("countries").append(row(code, count));
+      const generated = health?.generated_at ? new Date(health.generated_at) : null;
+      setText("updated", generated && !Number.isNaN(generated.getTime())
+        ? `Health measurement time: ${generated.toLocaleString()}.`
+        : "Health measurement time: unavailable.");
+      setText("status", `Loaded ${number(uris.length)} published exits.`);
+    } catch (error) {
+      setText("status", `Could not load the published pool data: ${error.message}`);
+    }
+  </script>
+</body>
+</html>

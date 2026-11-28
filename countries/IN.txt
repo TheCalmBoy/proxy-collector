@@ -1,0 +1,2 @@
+vless://591e7de6-f2dd-4ff9-ae21-8e00d5affa2a@147.93.171.8:8443?security=tls&type=ws&path=%2Fvpn-live&host=147-93-171-8.sslip.io&alpn=http%2F1.1&sni=147-93-171-8.sslip.io&fp=chrome#FR-DC-AS141995-228FD876FD91
+vless://6bdc8320-7eae-46fc-be08-f5f54e65dfc8@in.smrtai.top:443?fp=chrome&path=%2F&pbk=3LbVuwKpQv55GngyRhvGl9KyAHIDAgvJx_VRM5mUD2Q&security=reality&sid=6bdc8320&sni=www.cloudflare.com&type=tcp#FR-DC-AS141995-68A8458D35F9

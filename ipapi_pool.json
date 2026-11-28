@@ -1,0 +1,179 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11080
+    },
+    {
+      "type": "mixed",
+      "tag": "api-in",
+      "listen": "127.0.0.1",
+      "listen_port": 11081
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "hysteria2",
+      "server": "47.89.232.46",
+      "server_port": 8443,
+      "password": "4afd4e1b1b0edd429b10d800a1cf64a7",
+      "tls": {
+        "enabled": true,
+        "server_name": "hysteria2.local",
+        "insecure": true
+      },
+      "tag": "p0"
+    },
+    {
+      "type": "hysteria2",
+      "server": "51.15.16.68",
+      "server_port": 8444,
+      "password": "capadmae6e0190:moJK4Js1rEdUv1eWIqyjX1QB",
+      "obfs": {
+        "type": "salamander",
+        "password": "HVD1C0uyo38mMz8B"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.local",
+        "insecure": true
+      },
+      "tag": "p1"
+    },
+    {
+      "type": "hysteria2",
+      "server": "51.15.16.68",
+      "server_port": 8445,
+      "password": "capadmae6e0190:moJK4Js1rEdUv1eWIqyjX1QB",
+      "obfs": {
+        "type": "salamander",
+        "password": "HVD1C0uyo38mMz8B"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.local",
+        "insecure": true
+      },
+      "tag": "p2"
+    },
+    {
+      "type": "hysteria2",
+      "server": "51.15.16.68",
+      "server_port": 8447,
+      "password": "capadmae6e0190:moJK4Js1rEdUv1eWIqyjX1QB",
+      "obfs": {
+        "type": "salamander",
+        "password": "HVD1C0uyo38mMz8B"
+      },
+      "tls": {
+        "enabled": true,
+        "server_name": "vpn.local",
+        "insecure": true
+      },
+      "tag": "p3"
+    },
+    {
+      "type": "hysteria2",
+      "server": "129.225.181.46",
+      "server_port": 8443,
+      "password": "oracle_hy2_pass_2026",
+      "tls": {
+        "enabled": true,
+        "server_name": "bing.com",
+        "insecure": true
+      },
+      "tag": "p4"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "8.209.72.224",
+      "server_port": 443,
+      "method": "2022-blake3-chacha20-poly1305",
+      "password": "8yO3ANWefuuGs1lRKXECQA1FEhxlWFV2ppQMcBaZo5Y=",
+      "tag": "p5"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "47.254.175.2",
+      "server_port": 443,
+      "method": "2022-blake3-chacha20-poly1305",
+      "password": "8yO3ANWefuuGs1lRKXECQA1FEhxlWFV2ppQMcBaZo5Y=",
+      "tag": "p6"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "193.29.139.234",
+      "server_port": 8080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "4a2rfixophdjffa8KVA4Aa",
+      "tag": "p7"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "jp-telegram-khp25-viber-09773510813.premiumx.giize.com",
+      "server_port": 1080,
+      "method": "chacha20-ietf-poly1305",
+      "password": "53dea5063dff45e4961fb9cba5d3f83a",
+      "tag": "p8"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "108.181.88.2",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "6yzcGxLalx0T",
+      "tag": "p9"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "leviko-fr1459.shopingggg.ir",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "ySGkGhr2sKHV",
+      "tag": "p10"
+    },
+    {
+      "type": "shadowsocks",
+      "server": "67.220.73.247",
+      "server_port": 443,
+      "method": "chacha20-ietf-poly1305",
+      "password": "DGjtV63aPW3E",
+      "tag": "p11"
+    },
+    {
+      "type": "selector",
+      "tag": "pool",
+      "outbounds": [
+        "p0",
+        "p1",
+        "p2",
+        "p3",
+        "p4",
+        "p5",
+        "p6",
+        "p7",
+        "p8",
+        "p9",
+        "p10",
+        "p11"
+      ],
+      "default": "p0",
+      "interrupt_exist_connections": false
+    }
+  ],
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:11082"
+    }
+  },
+  "route": {
+    "final": "pool",
+    "auto_detect_interface": true
+  }
+}

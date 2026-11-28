@@ -1,0 +1,2 @@
+vless://27c5483f-17f4-48ae-9a04-def53d88440d@152.69.226.63:25555?host=152.69.226.63&path=%2F&security=none&type=ws#KR-DC-AS31898-05C2E56AD8F1
+vless://db906786-8c49-4b17-9182-cea680ef954d@krd.80782636.xyz:443?&security=tls&fp=chrome&sni=krd.80782636.xyz&type=ws&headerType=none&host=krd.80782636.xyz&path=/kw7x2mq9#KR-DC-AS132203-5EEBF4815A27
