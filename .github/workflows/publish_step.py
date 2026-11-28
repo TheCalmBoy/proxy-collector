@@ -31,7 +31,9 @@ DEFAULT_MIN_POOL_FRACTION = 0.5
 def load_records(path: Path) -> list[dict]:
     data = json.loads(path.read_text())
     records = data["configs"] if isinstance(data, dict) else data
-    required_stages = ("tcp", "speed", "https")
+    # verify.py writes the speed gate under `stages.download` because this
+    # stage carries both throughput and latency.
+    required_stages = ("tcp", "download", "https")
     return [
         record for record in records
         if all(record.get("stages", {}).get(stage, {}).get("passed") is True for stage in required_stages)
