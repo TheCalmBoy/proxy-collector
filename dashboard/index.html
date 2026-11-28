@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="worker-base-url" content="">
   <title>Proxy Collector Pool</title>
   <style>
     :root { font: 16px/1.5 system-ui, sans-serif; color-scheme: light dark; }
@@ -52,6 +53,7 @@
 
   <footer>
     <p id="updated">Health measurement time: unavailable.</p>
+    <p id="worker-version">Subscription Worker revision: unavailable.</p>
     <p>Country labels describe proxy endpoints. They do not guarantee the country a website sees after the proxy connects.</p>
     <p><a href="all.txt">Plain Mihomo feed</a> · <a href="manifest.json">Feed manifest</a> · <a href="egress-health.json">Egress health data</a></p>
   </footer>
@@ -59,6 +61,23 @@
   <script type="module">
     const number = (value) => new Intl.NumberFormat().format(value);
     const setText = (id, value) => { document.getElementById(id).textContent = value; };
+    const workerBaseUrl = document.querySelector('meta[name="worker-base-url"]')?.content.trim();
+    const showWorkerVersion = async () => {
+      if (!workerBaseUrl) {
+        setText("worker-version", "Subscription Worker revision: unavailable (WORKER_URL is not configured).");
+        return;
+      }
+      try {
+        const response = await fetch(`${workerBaseUrl.replace(/\/+$/, "")}/version`, { cache: "no-store" });
+        if (!response.ok) throw new Error("version request failed");
+        const version = await response.json();
+        if (typeof version.sha !== "string" || !version.sha) throw new Error("version missing");
+        setText("worker-version", `Subscription Worker revision: ${version.sha}.`);
+      } catch {
+        setText("worker-version", "Subscription Worker revision: unavailable.");
+      }
+    };
+    void showWorkerVersion();
     const get = async (path, parse = (response) => response.text()) => {
       const response = await fetch(path, { cache: "no-store" });
       if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
