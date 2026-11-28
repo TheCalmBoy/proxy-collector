@@ -21,9 +21,8 @@ It runs in two places:
 | `CODE_MAP.json` | machine-readable map of the above |
 
 Every Worker lives under `workers/`, holding what Cloudflare actually runs.
-`proxy-chain-subscription` and `proxy-egress-ip-check` are committed as the esbuild output
-Cloudflare executes; `proxy-pipeline-heartbeat` is a small hand-written module, so its
-committed file is both source and bundle.
+The committed `index.js` files are the Worker source; Wrangler bundles each `main` at
+deploy time, so generated bundles and source maps are not committed.
 
 ## Scheduling
 

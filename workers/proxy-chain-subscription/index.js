@@ -1,11 +1,4 @@
-var __defProp = Object.defineProperty;
-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
-
 // index.js
-var __defProp2 = Object.defineProperty;
-var __name2 = /* @__PURE__ */ __name((target, value) => __defProp2(target, "name", { value, configurable: true }), "__name");
-var __defProp22 = Object.defineProperty;
-var __name22 = /* @__PURE__ */ __name2((target, value) => __defProp22(target, "name", { value, configurable: true }), "__name");
 var STALE_HEALTH_MAX_AGE_MS = 24 * 60 * 6e4;
 // Above the soft threshold we still serve the index (aged) instead of hard-failing
 // the whole subscription; above this we ignore it entirely and serve unfiltered.
@@ -25,9 +18,6 @@ var FILTERABLE_PROTOCOLS = /* @__PURE__ */ new Set([
 function canonicalProtocol(type) {
   return PROTOCOL_ALIASES[type] || type;
 }
-__name(canonicalProtocol, "canonicalProtocol");
-__name2(canonicalProtocol, "canonicalProtocol");
-__name22(canonicalProtocol, "canonicalProtocol");
 // Local traffic must never be sent through an exit node. Without these the only
 // rule is MATCH,<proxy>, so the router, NAS, printers, mDNS names and loopback
 // all get tunnelled to a foreign exit - where they simply fail. no-resolve
@@ -54,9 +44,6 @@ function reply(body, status = 200, type = "application/json; charset=utf-8", ext
   const headers = { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff", ...extra || {} };
   return new Response(body, { status, headers });
 }
-__name(reply, "reply");
-__name2(reply, "reply");
-__name22(reply, "reply");
 async function replyWithEtag(request, body, type, extra = null) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
   const encoded = btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -75,14 +62,10 @@ async function replyWithEtag(request, body, type, extra = null) {
   });
   return matches ? new Response(null, { status: 304, headers }) : new Response(body, { status: 200, headers });
 }
-__name(replyWithEtag, "replyWithEtag");
-__name2(replyWithEtag, "replyWithEtag");
-__name22(replyWithEtag, "replyWithEtag");
 async function digestToken(value) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
   return btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
-__name(digestToken, "digestToken");
 function requestMatchesEtag(request, etag) {
   const condition = request.headers.get("if-none-match");
   return Boolean(condition && condition.split(",").some((candidate) => {
@@ -90,7 +73,6 @@ function requestMatchesEtag(request, etag) {
     return value === "*" || value.replace(/^W\//, "") === etag.replace(/^W\//, "");
   }));
 }
-__name(requestMatchesEtag, "requestMatchesEtag");
 async function replyWithStreamEtag(request, body, type, extra = null, seed = "") {
   const etag = `W/"${await digestToken(seed)}"`;
   const headers = {
@@ -104,13 +86,9 @@ async function replyWithStreamEtag(request, body, type, extra = null, seed = "")
     return new Response(null, { status: 304, headers });
   return new Response(body, { status: 200, headers });
 }
-__name(replyWithStreamEtag, "replyWithStreamEtag");
 function fail(error, status = 400, extra = null) {
   return reply(JSON.stringify({ error }), status, "application/json; charset=utf-8", extra);
 }
-__name(fail, "fail");
-__name2(fail, "fail");
-__name22(fail, "fail");
 function decodeEntries(url) {
   const values = url.searchParams.getAll("entry64");
   const unique = /* @__PURE__ */ new Set();
@@ -137,23 +115,14 @@ function decodeEntries(url) {
   }
   return entries.map((item, index) => ({ ...item, tag: entryName(item.proxy, index + 1) }));
 }
-__name(decodeEntries, "decodeEntries");
-__name2(decodeEntries, "decodeEntries");
-__name22(decodeEntries, "decodeEntries");
 function safeName(value, fallback) {
   const name = (value || fallback).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/["\\]/g, "").trim();
   return name.slice(0, 96) || fallback;
 }
-__name(safeName, "safeName");
-__name2(safeName, "safeName");
-__name22(safeName, "safeName");
 function withUriName(uri, name) {
   const base = uri.split("#", 1)[0];
   return `${base}#${encodeURIComponent(name)}`;
 }
-__name(withUriName, "withUriName");
-__name2(withUriName, "withUriName");
-__name22(withUriName, "withUriName");
 function buildSpeedIndex(enrichedDocument) {
   const out = {};
   const rows = Array.isArray(enrichedDocument?.configs) ? enrichedDocument.configs : [];
@@ -170,9 +139,6 @@ function buildSpeedIndex(enrichedDocument) {
   }
   return out;
 }
-__name(buildSpeedIndex, "buildSpeedIndex");
-__name2(buildSpeedIndex, "buildSpeedIndex");
-__name22(buildSpeedIndex, "buildSpeedIndex");
 function fnv1a(str) {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
@@ -181,18 +147,12 @@ function fnv1a(str) {
   }
   return h >>> 0;
 }
-__name(fnv1a, "fnv1a");
-__name2(fnv1a, "fnv1a");
-__name22(fnv1a, "fnv1a");
 function configDisplayName(proxy) {
   const id = feedEntryId(proxy);
   if (id)
     return id.slice(-8).toUpperCase();
   return fnv1a(String(proxy.server || "") + ":" + (proxy.port ?? proxy.server_port ?? "")).toString(16).padStart(8, "0").toUpperCase();
 }
-__name(configDisplayName, "configDisplayName");
-__name2(configDisplayName, "configDisplayName");
-__name22(configDisplayName, "configDisplayName");
 function friendlyExitName(country, index, proxy, healthById, entrypointNumber = null, speedByEndpoint = null, endpointIndex = null) {
   const serial = String(index + 1).padStart(2, "0");
   const remark = /^([A-Z]{2})-(RES|DC|UNKNOWN)-(.+)-([A-F0-9]{6,12})$/.exec(proxy.name || "");
@@ -243,9 +203,6 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
   const network = remark[3] === "UNKNOWN" ? "" : ` \xB7 ${remark[3]}`;
   return `${prefix}${label} \xB7 ${category}${network}`;
 }
-__name(friendlyExitName, "friendlyExitName");
-__name2(friendlyExitName, "friendlyExitName");
-__name22(friendlyExitName, "friendlyExitName");
 function feedEntryId(proxy) {
   const name = proxy.name || "";
   const tail = name.split("|").pop().trim();
@@ -253,9 +210,6 @@ function feedEntryId(proxy) {
     return tail.toUpperCase();
   return /-([A-F0-9]{8,12})$/.exec(name)?.[1] || null;
 }
-__name(feedEntryId, "feedEntryId");
-__name2(feedEntryId, "feedEntryId");
-__name22(feedEntryId, "feedEntryId");
 function resolveHealth(healthById, id, endpoint) {
   if (!healthById || typeof healthById !== "object")
     return null;
@@ -276,15 +230,9 @@ function resolveHealth(healthById, id, endpoint) {
   );
   return matches.length === 1 ? healthById[matches[0]] : null;
 }
-__name(resolveHealth, "resolveHealth");
-__name2(resolveHealth, "resolveHealth");
-__name22(resolveHealth, "resolveHealth");
 function endpointKeyOf(server, port) {
   return `${String(server).trim().toLowerCase()}:${Number(port)}`;
 }
-__name(endpointKeyOf, "endpointKeyOf");
-__name2(endpointKeyOf, "endpointKeyOf");
-__name22(endpointKeyOf, "endpointKeyOf");
 var endpointIndexDoc = null;
 var endpointIndexCache = /* @__PURE__ */ new Map();
 function buildEndpointIndex(healthById) {
@@ -308,9 +256,6 @@ function buildEndpointIndex(healthById) {
   endpointIndexCache = index;
   return index;
 }
-__name(buildEndpointIndex, "buildEndpointIndex");
-__name2(buildEndpointIndex, "buildEndpointIndex");
-__name22(buildEndpointIndex, "buildEndpointIndex");
 function resolveHealthFor(item, healthById, endpointIndex) {
   const proxy = item?.proxy || item;
   const server = proxy?.server;
@@ -322,9 +267,6 @@ function resolveHealthFor(item, healthById, endpointIndex) {
   }
   return resolveHealth(healthById, feedEntryId(proxy || {}), null);
 }
-__name(resolveHealthFor, "resolveHealthFor");
-__name2(resolveHealthFor, "resolveHealthFor");
-__name22(resolveHealthFor, "resolveHealthFor");
 function healthByEndpoint(healthById, endpoint) {
   const [server, port] = String(endpoint).split(":");
   const direct = healthById[`${server}:${port}`];
@@ -335,9 +277,6 @@ function healthByEndpoint(healthById, endpoint) {
   );
   return row || null;
 }
-__name(healthByEndpoint, "healthByEndpoint");
-__name2(healthByEndpoint, "healthByEndpoint");
-__name22(healthByEndpoint, "healthByEndpoint");
 function parseProxy(uri, index) {
   const scheme = uri.slice(0, uri.indexOf(":")).toLowerCase();
   if (scheme === "vmess") {
@@ -400,7 +339,7 @@ function parseProxy(uri, index) {
   }
   const name = safeName(decodedName, `exit-${index}`);
   if (type === "wireguard") {
-    const first = /* @__PURE__ */ __name22((...keys) => keys.map((key) => u.searchParams.get(key)).find((value) => value !== null && value !== "") || "", "first");
+    const first = (...keys) => keys.map((key) => u.searchParams.get(key)).find((value) => value !== null && value !== "") || "";
     const address = first("address", "ip").split(",").map((value) => value.trim()).filter(Boolean);
     const publicKey = first("publickey", "publicKey", "public-key");
     if (!u.username || !server || !port || !address.length || !publicKey)
@@ -426,7 +365,7 @@ function parseProxy(uri, index) {
     };
   }
   if (type === "masque") {
-    const first = /* @__PURE__ */ __name22((...keys) => keys.map((key) => u.searchParams.get(key)).find((value) => value !== null && value !== "") || "", "first");
+    const first = (...keys) => keys.map((key) => u.searchParams.get(key)).find((value) => value !== null && value !== "") || "";
     const privateKey = first("private-key", "privatekey", "secret") || (u.username ? decodeURIComponent(u.username) : "");
     const publicKey = first("public-key", "publickey", "publicKey");
     const ip = first("ip", "ipv4", "address").split(",")[0].trim();
@@ -609,9 +548,6 @@ function parseProxy(uri, index) {
   try { user = decodeURIComponent(u.username || ""); password = decodeURIComponent(u.password || ""); } catch { return null; }
   return { type: type === "socks5" ? "socks5" : type, name, server, port, ...user ? { username: user } : {}, ...password ? { password } : {}, udp: true };
 }
-__name(parseProxy, "parseProxy");
-__name2(parseProxy, "parseProxy");
-__name22(parseProxy, "parseProxy");
 function parseProxySafely(uri, index) {
   try {
     return parseProxy(uri, index);
@@ -619,9 +555,6 @@ function parseProxySafely(uri, index) {
     return null;
   }
 }
-__name(parseProxySafely, "parseProxySafely");
-__name2(parseProxySafely, "parseProxySafely");
-__name22(parseProxySafely, "parseProxySafely");
 function parseEntry(uri) {
   const proxy = parseProxy(uri, 0);
   if (!proxy)
@@ -629,16 +562,10 @@ function parseEntry(uri) {
   proxy.name = safeName(proxy.name, "entrypoint");
   return proxy;
 }
-__name(parseEntry, "parseEntry");
-__name2(parseEntry, "parseEntry");
-__name22(parseEntry, "parseEntry");
 function entryName(entry, index) {
   const protocol = { wireguard: "WARP", masque: "MASQUE", vless: "VLESS", vmess: "VMess", trojan: "Trojan", ss: "Shadowsocks", socks: "SOCKS", socks5: "SOCKS", http: "HTTP" }[entry.type] || "Proxy";
   return safeName(`ET${index} - ${entry.name || protocol}`, `ET${index}`);
 }
-__name(entryName, "entryName");
-__name2(entryName, "entryName");
-__name22(entryName, "entryName");
 function countryName(code) {
   if (code === "ZZ")
     return "Unknown";
@@ -646,9 +573,6 @@ function countryName(code) {
     return "Rainbow";
   return /^[A-Z]{2}$/i.test(code || "") ? code.toUpperCase() : code;
 }
-__name(countryName, "countryName");
-__name2(countryName, "countryName");
-__name22(countryName, "countryName");
 var RAINBOW_FLAG = "\u{1F308}";
 function countryFlag(code, dynamic = false) {
   if (dynamic)
@@ -657,15 +581,9 @@ function countryFlag(code, dynamic = false) {
     return "";
   return String.fromCodePoint(...[...code.toUpperCase()].map((c) => 127397 + c.charCodeAt(0)));
 }
-__name(countryFlag, "countryFlag");
-__name2(countryFlag, "countryFlag");
-__name22(countryFlag, "countryFlag");
 function yamlScalar(value) {
   return JSON.stringify(value).replace(/[\u007f-\u009f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
-__name(yamlScalar, "yamlScalar");
-__name2(yamlScalar, "yamlScalar");
-__name22(yamlScalar, "yamlScalar");
 // `socks` is the sing-box spelling of the protocol; mihomo only knows `socks5`.
 // mihomo refuses the ENTIRE profile when a single proxy names a type it does not
 // have ("proxy 74: unsupport proxy type: socks"), so one SOCKS5 exit node made
@@ -675,9 +593,6 @@ __name22(yamlScalar, "yamlScalar");
 function mihomoType(type) {
   return type === "socks" ? "socks5" : type;
 }
-__name(mihomoType, "mihomoType");
-__name2(mihomoType, "mihomoType");
-__name22(mihomoType, "mihomoType");
 // Normalises the share-link `ech` param. Accepts:
 //   base64 ECHConfigList                           -> { config }
 //   "cloudflare-ech.com"                           -> { queryServerName }
@@ -692,9 +607,6 @@ function parseEch(raw) {
 function scalarFields(object) {
   return Object.entries(object).filter(([, v]) => v !== void 0 && v !== null && typeof v !== "object").map(([k, v]) => `    ${k}: ${typeof v === "string" ? yamlScalar(v) : v}`).join("\n");
 }
-__name(scalarFields, "scalarFields");
-__name2(scalarFields, "scalarFields");
-__name22(scalarFields, "scalarFields");
 
 // Cloudflare publishes the ECH config for a decoy name as a DNS HTTPS (type 65)
 // record. Fetching it is what ?ech=embed does, so a client whose own DNS cannot
@@ -795,10 +707,10 @@ var WARP_SERVER_KEY = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=";
 function amneziaWgOption(proxy) {
   if (!proxy.wnoise && proxy.publicKey !== WARP_SERVER_KEY)
     return [];
-  const num = /* @__PURE__ */ __name22((value, fallback) => {
+  const num = (value, fallback) => {
     const parsed = Number.parseInt(String(value ?? "").trim(), 10);
     return Number.isFinite(parsed) ? parsed : fallback;
-  }, "num");
+  };
   return [
     "    amnezia-wg-option:",
     `      jc: ${num(proxy.wnoisecount, 5)}`,
@@ -806,9 +718,6 @@ function amneziaWgOption(proxy) {
     `      jmax: ${AMNEZIA_JMAX}`
   ];
 }
-__name(amneziaWgOption, "amneziaWgOption");
-__name2(amneziaWgOption, "amneziaWgOption");
-__name22(amneziaWgOption, "amneziaWgOption");
 const DNS_RESOLVERS = ["223.5.5.5", "223.6.6.6", "178.22.122.100"];
 function dnsLines(enabled = true) {
   if (!enabled) return [];
@@ -830,13 +739,9 @@ function dnsLines(enabled = true) {
     ...resolverList("proxy-server-nameserver")
   ];
 }
-__name(dnsLines, "dnsLines");
 function mihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
   return [...mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options)].join("");
 }
-__name(mihomo, "mihomo");
-__name2(mihomo, "mihomo");
-__name22(mihomo, "mihomo");
 function mihomoVariantsForExit(country, index, entries = []) {
   if (Array.isArray(country.variants)) {
     const marker = `${country.code}-${String(index + 1).padStart(2, "0")}e`;
@@ -851,7 +756,6 @@ function mihomoVariantsForExit(country, index, entries = []) {
     return { proxy: exits[index], name: `${prefix} - ${names[index]}`, tag: `${country.code}-${String(index + 1).padStart(2, "0")}e${slot + 1}`, dialerProxy: entry.tag };
   });
 }
-__name(mihomoVariantsForExit, "mihomoVariantsForExit");
 function* eachCountryVariant(country, entries = []) {
   if (Array.isArray(country.variants)) {
     yield* country.variants;
@@ -861,7 +765,6 @@ function* eachCountryVariant(country, entries = []) {
   for (let index = 0; index < exits.length; index += 1)
     yield* mihomoVariantsForExit(country, index, entries);
 }
-__name(eachCountryVariant, "eachCountryVariant");
 function mihomoProxyBlock(proxy, name, dialerProxy = void 0) {
   const lines = [];
   if (proxy.type === "wireguard") {
@@ -896,7 +799,6 @@ function mihomoProxyBlock(proxy, name, dialerProxy = void 0) {
   }
   return lines.join("\n");
 }
-__name(mihomoProxyBlock, "mihomoProxyBlock");
 function* mihomoStreamChunks(entries, countries, healthById, speedByEndpoint = null, options = {}) {
   const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint, entries);
   yield ["# Generated proxy subscription", ...dnsLines(options.dns !== false), "proxies:"].join("\n") + "\n";
@@ -943,7 +845,6 @@ function* mihomoStreamChunks(entries, countries, healthById, speedByEndpoint = n
   for (const entry of entries) yield `      - ${yamlScalar(entry.tag)}\n`;
   yield ["rules:", ...LOCAL_DIRECT_RULES.map((rule) => `  - ${rule}`), "  - MATCH,Proxy"].join("\n") + "\n";
 }
-__name(mihomoStreamChunks, "mihomoStreamChunks");
 function streamMihomo(entries, countries, healthById, speedByEndpoint = null, options = {}) {
   const iterator = mihomoStreamChunks(entries, countries, healthById, speedByEndpoint, options);
   const encoder = new TextEncoder();
@@ -968,22 +869,15 @@ function streamMihomo(entries, countries, healthById, speedByEndpoint = null, op
     cancel() { iterator.return?.(); }
   });
 }
-__name(streamMihomo, "streamMihomo");
 function pushRules(lines, match) {
   lines.push("rules:");
   for (const rule of LOCAL_DIRECT_RULES)
     lines.push(`  - ${rule}`);
   lines.push(`  - ${match}`);
 }
-__name(pushRules, "pushRules");
-__name2(pushRules, "pushRules");
-__name22(pushRules, "pushRules");
 function b64(text) {
   return btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 }
-__name(b64, "b64");
-__name2(b64, "b64");
-__name22(b64, "b64");
 var FORMAT_ALIASES = {
   // "clash" was already special-cased to mihomo before this table existed.
   clash: "mihomo",
@@ -1027,9 +921,6 @@ function guessFormat(request, url) {
     return "links";
   return "unknown";
 }
-__name(guessFormat, "guessFormat");
-__name2(guessFormat, "guessFormat");
-__name22(guessFormat, "guessFormat");
 function xrayOutbound(proxy, tag, dialerProxy) {
   const protocol = proxy.type === "ss" ? "shadowsocks" : proxy.type === "socks5" ? "socks" : proxy.type;
   const outbound = { tag, protocol, settings: {} };
@@ -1096,9 +987,6 @@ function xrayOutbound(proxy, tag, dialerProxy) {
   outbound.streamSettings = stream;
   return outbound;
 }
-__name(xrayOutbound, "xrayOutbound");
-__name2(xrayOutbound, "xrayOutbound");
-__name22(xrayOutbound, "xrayOutbound");
 var GOOD_ENOUGH_MB_S = 50;
 function qualityScore(health, stage3Speed = null) {
   if (!health || health.stale === true)
@@ -1113,15 +1001,9 @@ function qualityScore(health, stage3Speed = null) {
   const residential = /resi/.test(type) ? 0.4 : 0;
   return 1.5 * speedPart + residential - 1 * (risk / 100);
 }
-__name(qualityScore, "qualityScore");
-__name2(qualityScore, "qualityScore");
-__name22(qualityScore, "qualityScore");
 function rankScore(health, stage3Speed = null) {
   return qualityScore(health, stage3Speed);
 }
-__name(rankScore, "rankScore");
-__name2(rankScore, "rankScore");
-__name22(rankScore, "rankScore");
 function scoreForProxy(proxy, healthById, endpointIndex, speedByEndpoint) {
   const health = resolveHealthFor({ proxy }, healthById, endpointIndex);
   if (!health)
@@ -1130,9 +1012,6 @@ function scoreForProxy(proxy, healthById, endpointIndex, speedByEndpoint) {
   const measured = speedByEndpoint ? Number(speedByEndpoint[key]) : NaN;
   return rankScore(health, Number.isFinite(measured) && measured > 0 ? measured : null);
 }
-__name(scoreForProxy, "scoreForProxy");
-__name2(scoreForProxy, "scoreForProxy");
-__name22(scoreForProxy, "scoreForProxy");
 var TOP_N = 10;
 var COUNTRY_CAP = 60;
 function topQualityVariants(countries, healthById, speedByEndpoint = null, entries = []) {
@@ -1180,9 +1059,6 @@ function topQualityVariants(countries, healthById, speedByEndpoint = null, entri
   }
   return top;
 }
-__name(topQualityVariants, "topQualityVariants");
-__name2(topQualityVariants, "topQualityVariants");
-__name22(topQualityVariants, "topQualityVariants");
 function xrayConfig(entries, countries, scope, healthById, speedByEndpoint = null) {
   const outbounds = [];
   entries.forEach((entry) => outbounds.push(xrayOutbound(entry.proxy, entry.tag)));
@@ -1207,9 +1083,6 @@ function xrayConfig(entries, countries, scope, healthById, speedByEndpoint = nul
   };
   return JSON.stringify(config, null, 2) + "\n";
 }
-__name(xrayConfig, "xrayConfig");
-__name2(xrayConfig, "xrayConfig");
-__name22(xrayConfig, "xrayConfig");
 function singboxOutbound(proxy, tag, detour = void 0) {
   const out = { type: proxy.type === "socks5" ? "socks" : proxy.type, tag, server: proxy.server, server_port: proxy.port };
   if (proxy.type === "hysteria2") {
@@ -1280,9 +1153,6 @@ function singboxOutbound(proxy, tag, detour = void 0) {
     out.detour = detour;
   return out;
 }
-__name(singboxOutbound, "singboxOutbound");
-__name2(singboxOutbound, "singboxOutbound");
-__name22(singboxOutbound, "singboxOutbound");
 function singbox(entries, countries, healthById, speedByEndpoint = null) {
   const outbounds = [];
   const autoBest = topQualityVariants(countries, healthById || {}, speedByEndpoint);
@@ -1375,9 +1245,6 @@ function singbox(entries, countries, healthById, speedByEndpoint = null) {
     route
   }, null, 2) + "\n";
 }
-__name(singbox, "singbox");
-__name2(singbox, "singbox");
-__name22(singbox, "singbox");
 var index_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1660,4 +1527,3 @@ export {
   scoreForProxy,
   topQualityVariants
 };
-//# sourceMappingURL=index.js.map

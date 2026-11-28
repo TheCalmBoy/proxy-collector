@@ -1,5 +1,3 @@
-var __defProp = Object.defineProperty;
-var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
 // src/index.js
 var FFRAUD_ORIGIN = "https://api.ffraud.com";
@@ -13,7 +11,6 @@ function json(data, status = 200, headers = {}) {
     headers: { "content-type": "application/json; charset=utf-8", ...headers }
   });
 }
-__name(json, "json");
 function isIpAddress(value) {
   if (typeof value !== "string" || value.length > 45) return false;
   if (value.includes(":")) {
@@ -24,11 +21,9 @@ function isIpAddress(value) {
     (part) => /^\d{1,3}$/.test(part) && Number(part) <= 255
   );
 }
-__name(isIpAddress, "isIpAddress");
 function addressFamily(ip) {
   return ip.includes(":") ? "ipv6" : "ipv4";
 }
-__name(addressFamily, "addressFamily");
 function downloadResponse(metadata, byteCount) {
   const prefix = new TextEncoder().encode(`${JSON.stringify(metadata)}
 `);
@@ -62,11 +57,9 @@ function downloadResponse(metadata, byteCount) {
     }
   });
 }
-__name(downloadResponse, "downloadResponse");
 function cacheKey(ip) {
   return new Request(`https://ip-fraud-cache.invalid/${CACHE_SALT}/${encodeURIComponent(ip)}`);
 }
-__name(cacheKey, "cacheKey");
 async function getFfraud(ip, env, ctx) {
   const key = cacheKey(ip);
   const cache = caches.default;
@@ -100,7 +93,6 @@ async function getFfraud(ip, env, ctx) {
   ctx.waitUntil(cache.put(key, cacheResponse));
   return { result, cached: false };
 }
-__name(getFfraud, "getFfraud");
 var index_default = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -162,4 +154,3 @@ var index_default = {
 export {
   index_default as default
 };
-//# sourceMappingURL=index.js.map
