@@ -3,6 +3,8 @@ set -euo pipefail
 
 # Keep CI deterministic and verify the release asset independently of the
 # optional digest field in GitHub's release API.
+# Pinned Mihomo Meta v1.19.34, verified 2026-11-28. Manually bump this version,
+# asset, and SHA together when upgrading; Dependabot does not track this binary.
 version="v1.19.34"
 asset="mihomo-linux-amd64-v1.19.34.gz"
 sha256="223fab877e5795ce780ba39902e5f0b1113c1256ae244a7160f1165e017e9ccc"
