@@ -172,6 +172,14 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
     const risk = { low: "Low", medium: "Med", high: "High", critical: "Crit" }[riskValue || riskFromScore] || "Unrated";
     const gemini = health.gemini && typeof health.gemini === "object" ? health.gemini : null;
     const geminiTag = gemini?.flagged === true ? "Gemini HTTP 401/403" : gemini?.clean === true ? "Gemini HTTP 2xx/3xx" : "";
+    const ytmusic = health.ytmusic && typeof health.ytmusic === "object" ? health.ytmusic : null;
+    const ytmusicTag = ytmusic?.status === "blocked_region"
+      ? "YT Music region unavailable"
+      : ytmusic?.status === "flagged"
+        ? "YT Music flagged"
+        : ytmusic?.status === "ok"
+          ? "YT Music reachable"
+          : "";
     const kindRaw = classification.connection_type ?? health.connection_type;
     const kindValue = typeof kindRaw === "string" ? kindRaw.replace(/[^a-z0-9 -]/gi, "").trim() : "";
     const kind = /resi/i.test(kindValue) ? "Resi" : /data.?center|hosting/i.test(kindValue) ? "DC" : "";
@@ -180,6 +188,8 @@ function friendlyExitName(country, index, proxy, healthById, entrypointNumber = 
       tags.push("Stale health");
     if (geminiTag)
       tags.push(geminiTag);
+    if (geminiTag && ytmusicTag)
+      tags.push(ytmusicTag);
     const stability = health.stability || (String(classification.type || "").startsWith("dynamic") ? "Changed" : null);
     if (stability === "Changed" || String(classification.subgroup || "").startsWith("dynamic"))
       tags.push("Dynamic");

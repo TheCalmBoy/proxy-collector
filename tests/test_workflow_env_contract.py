@@ -413,5 +413,14 @@ class ScheduleOrderingTests(unittest.TestCase):
             "the probe step must point PREVIOUS_HEALTH at the fetched index",
         )
 
+    def test_probe_publishes_enriched_reachability_signals(self):
+        """YT Music summaries attached by the probe must reach the public feed."""
+        text = self.CONSUMER.read_text(encoding="utf-8")
+        self.assertIn("path: 'enriched-configs.json'", text)
+        self.assertIn(
+            "local: 'verify-output/enriched-configs.json'", text,
+            "the updated enriched configs must be published to gh-pages",
+        )
+
 if __name__ == "__main__":
     unittest.main()

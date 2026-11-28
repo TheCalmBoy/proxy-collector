@@ -627,6 +627,23 @@ async def _cloudflare_trace(proxy_port: int) -> dict[str, Any]:
 # the same check in the main pipeline so the answer reaches egress-health.json
 # and the worker's ranking.
 GEMINI_URL = os.getenv("GEMINI_PROBE_URL", "https://gemini.google.com/")
+YTMUSIC_PROBE_URL = os.getenv("YTMUSIC_PROBE_URL", "https://music.youtube.com/")
+YTMUSIC_MAX_BODY_BYTES = 64 * 1024
+YTMUSIC_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Observed 2026-11-28 through one fresh US exit and one RU feed exit whose
+# Cloudflare trace confirmed RU. Both returned HTTP 200 at music.youtube.com/;
+# the first 64 KiB had the same app shell and differed at contentRegion/hl
+# (US/en_US versus RU/ru_RU), with no unavailable-country message. No regional
+# block signature is configured: ok means reachable, region not verified.
+YTMUSIC_APP_SHELL_SIGNATURE = re.compile(
+    r"[\"']contentRegion[\"']\s*:\s*[\"'][A-Z]{2}[\"']"
+)
+YTMUSIC_REGION_UNAVAILABLE_SIGNATURES: tuple[re.Pattern[str], ...] = ()
+YTMUSIC_SORRY_PATH_SIGNATURE = re.compile(r"^/sorry(?:/|$)", re.IGNORECASE)
 
 
 async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
@@ -684,6 +701,190 @@ async def _gemini_probe(proxy_port: int) -> dict[str, Any]:
     }
 
 
+def _curl_config_quote(value: str) -> str:
+    """Quote a value for curl's config stdin without allowing a new option."""
+    safe = value.replace("\\", "\\\\").replace('"', '\\"')
+    safe = safe.replace("\r", "").replace("\n", "")
+    return f'"{safe}"'
+
+
+def _ytmusic_classify(
+    *,
+    returncode: int,
+    http_status: int,
+    final_host: str,
+    final_path: str,
+    body: str,
+    body_limit_reached: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "http_status": http_status or None,
+        "final_host": final_host or None,
+        "final_path": final_path or None,
+    }
+
+    # Rate limits and server failures are never reputation verdicts, even if
+    # Google routes the response through a path that otherwise looks flagged.
+    if http_status == 429 or 500 <= http_status <= 599:
+        return {**result, "status": "unknown", "error": "transient_http_status"}
+
+    # curl returns 63 when --max-filesize stops a larger HTML page. That is the
+    # expected bounded-read path only when exactly the cap was captured; every
+    # other curl failure remains unknown.
+    expected_body_cap = returncode == 63 and body_limit_reached
+    if returncode != 0 and not expected_body_cap:
+        return {**result, "status": "unknown", "error": f"curl_exit_{returncode}"}
+    if http_status == 0:
+        return {**result, "status": "unknown", "error": "no_status"}
+
+    is_google_host = final_host == "google.com" or final_host.endswith(".google.com")
+    if is_google_host and YTMUSIC_SORRY_PATH_SIGNATURE.search(final_path):
+        return {**result, "status": "flagged", "flagged": True}
+    if http_status in (401, 403):
+        return {**result, "status": "flagged", "flagged": True}
+
+    for signature in YTMUSIC_REGION_UNAVAILABLE_SIGNATURES:
+        if signature.search(body):
+            return {**result, "status": "blocked_region", "region_verified": True}
+
+    if (
+        final_host == "music.youtube.com"
+        and 200 <= http_status <= 299
+        and YTMUSIC_APP_SHELL_SIGNATURE.search(body)
+    ):
+        return {
+            **result,
+            "status": "ok",
+            "region_verified": False,
+            "body_truncated": body_limit_reached,
+        }
+    return {**result, "status": "unknown", "error": "unrecognised_page"}
+
+
+async def _ytmusic_probe(proxy_port: int) -> dict[str, Any]:
+    """Read a bounded YouTube Music page through the config's SOCKS exit.
+
+    The body stays in memory, is capped at 64 KiB, and is never returned or
+    logged. Only the final host/path and HTTP status leave this function.
+    """
+    try:
+        requested = urllib.parse.urlsplit(YTMUSIC_PROBE_URL)
+    except ValueError:
+        return {"status": "unknown", "error": "invalid_probe_url"}
+    if (
+        requested.scheme.lower() != "https"
+        or not requested.hostname
+        or any(ord(ch) < 32 for ch in YTMUSIC_PROBE_URL)
+    ):
+        return {"status": "unknown", "error": "invalid_probe_url"}
+
+    config_lines = [
+        f'proxy = {_curl_config_quote(f"socks5h://127.0.0.1:{proxy_port}")}',
+        f'url = {_curl_config_quote(YTMUSIC_PROBE_URL)}',
+        f'user-agent = {_curl_config_quote(YTMUSIC_USER_AGENT)}',
+    ]
+    command = [
+        "curl", "--config", "-",
+        "--location", "--max-redirs", "5",
+        "--range", f"0-{YTMUSIC_MAX_BODY_BYTES - 1}",
+        "--max-filesize", str(YTMUSIC_MAX_BODY_BYTES),
+        "--connect-timeout", "5", "--max-time", "20",
+        "--silent", "--show-error",
+        "--write-out",
+        "%{stderr}\\n__YTMUSIC_META__%{url_effective}\\t%{http_code}",
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=YTMUSIC_MAX_BODY_BYTES,
+        )
+        body, limit_reached, stderr = await asyncio.wait_for(
+            _read_curl_body_bounded(
+                process, ("\n".join(config_lines) + "\n").encode()
+            ),
+            timeout=25,
+        )
+    except asyncio.TimeoutError:
+        if "process" in locals() and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return {"status": "unknown", "error": "curl_timeout"}
+    except OSError as exc:
+        if "process" in locals() and process.returncode is None:
+            process.kill()
+            await process.wait()
+        return {"status": "unknown", "error": f"curl_start_{type(exc).__name__}"}
+
+    # Curl writes the effective URL only to its captured stderr stream. Parse
+    # it in memory, then discard its query and fragment before any field can be
+    # published; curl's error text is never copied to logs or output.
+    marker = b"__YTMUSIC_META__"
+    marker_at = stderr.rfind(marker)
+    if marker_at < 0:
+        return {"status": "unknown", "error": f"curl_exit_{process.returncode}"}
+    metadata = stderr[marker_at + len(marker):].decode("utf-8", "replace").strip()
+    raw_url, separator, raw_status = metadata.partition("\t")
+    if not separator:
+        return {"status": "unknown", "error": "invalid_curl_metadata"}
+    try:
+        final = urllib.parse.urlsplit(raw_url.strip())
+        final_host = (final.hostname or "").lower()
+        final_path = final.path or "/"
+        http_status = int(raw_status) if raw_status.isdigit() else 0
+    except ValueError:
+        return {"status": "unknown", "error": "invalid_curl_metadata"}
+
+    return _ytmusic_classify(
+        returncode=process.returncode,
+        http_status=http_status,
+        final_host=final_host,
+        final_path=final_path[:512],
+        body=body.decode("utf-8", "replace"),
+        body_limit_reached=limit_reached,
+    )
+
+
+async def _read_curl_body_bounded(
+    process: asyncio.subprocess.Process, stdin_data: bytes
+) -> tuple[bytes, bool, bytes]:
+    """Send curl config and retain at most the configured body prefix."""
+    stderr_task = asyncio.create_task(process.stderr.read())
+    body = bytearray()
+    limit_reached = False
+    try:
+        process.stdin.write(stdin_data)
+        await process.stdin.drain()
+        process.stdin.close()
+
+        while len(body) < YTMUSIC_MAX_BODY_BYTES:
+            chunk = await process.stdout.read(YTMUSIC_MAX_BODY_BYTES - len(body))
+            if not chunk:
+                break
+            body.extend(chunk)
+
+        if len(body) == YTMUSIC_MAX_BODY_BYTES:
+            limit_reached = True
+            # Curl's max-filesize normally exits with code 63 here. Do not
+            # drain a possible remainder; if an older curl keeps streaming an
+            # unknown-length response, stop it and leave the verdict unknown.
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+        else:
+            await process.wait()
+
+        return bytes(body), limit_reached, await stderr_task
+    finally:
+        if not stderr_task.done():
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+
+
 async def _speed_test(
     record: dict[str, Any],
     worker_url: str,
@@ -691,6 +892,7 @@ async def _speed_test(
     semaphore: asyncio.Semaphore,
     *,
     probe_gemini: bool = True,
+    probe_ytmusic: bool = True,
 ) -> dict[str, Any]:
     """Ask the Worker which IP this config egresses from.
 
@@ -766,6 +968,13 @@ async def _speed_test(
             # working config; it just leaves the flag unknown.
             gemini = {"ok": None, "error": f"probe_exception_{type(exc).__name__}"}
 
+    ytmusic: dict[str, Any] = {"status": "unknown", "error": "not_probed"}
+    if ok and probe_ytmusic:
+        try:
+            ytmusic = await _ytmusic_probe(record["port"])
+        except Exception as exc:  # the signal must never drop a working config.
+            ytmusic = {"status": "unknown", "error": f"probe_exception_{type(exc).__name__}"}
+
     return {
         "ok": ok,
         "id": record["id"],
@@ -801,6 +1010,7 @@ async def _speed_test(
         "gemini": gemini.get("ok") if isinstance(gemini, dict) else None,
         "gemini_flagged": gemini.get("flagged") if isinstance(gemini, dict) else None,
         "gemini_http_status": gemini.get("http_status") if isinstance(gemini, dict) else None,
+        "ytmusic": ytmusic,
     }
 
 
@@ -833,6 +1043,76 @@ def _gemini_verdict(history: list[bool | None]) -> dict[str, Any]:
     if flagged:
         return {"status": "flagged", "clean": False, "flagged": True, "rounds": len(known)}
     return {"status": "clean", "clean": True, "flagged": False, "rounds": len(known)}
+
+
+def _ytmusic_verdict(history: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """Reduce YT Music samples without treating unknown pages as a verdict."""
+    samples = [
+        sample for sample in history
+        if isinstance(sample, dict) and sample.get("error") != "not_probed"
+    ]
+    statuses = [
+        sample.get("status")
+        for sample in samples
+        if sample.get("status") in {"ok", "blocked_region", "flagged"}
+    ]
+    if "blocked_region" in statuses:
+        status = "blocked_region"
+    elif "flagged" in statuses:
+        status = "flagged"
+    elif "ok" in statuses:
+        status = "ok"
+    else:
+        status = "unknown"
+
+    latest = samples[-1] if samples else {}
+    return {
+        "status": status,
+        "rounds": len(statuses),
+        "http_status": latest.get("http_status"),
+        "final_host": latest.get("final_host"),
+        "final_path": latest.get("final_path"),
+        "region_verified": (
+            True if status == "blocked_region"
+            else False if status == "ok"
+            else None
+        ),
+    }
+
+
+def _endpoint_identity(row: dict[str, Any]) -> tuple[str, str, int] | None:
+    scheme = str(row.get("scheme") or "").strip().lower()
+    server = str(row.get("server") or "").strip().lower().rstrip(".")
+    try:
+        port = int(row.get("server_port") or row.get("port"))
+    except (TypeError, ValueError):
+        return None
+    if not scheme or not server or not (1 <= port <= 65535):
+        return None
+    return scheme, server, port
+
+
+def _attach_probe_signals(
+    enriched: list[dict[str, Any]], health: dict[str, dict[str, Any]]
+) -> None:
+    """Copy per-exit Gemini and YT Music summaries into enriched configs."""
+    by_endpoint: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for row in health.values():
+        endpoint = _endpoint_identity(row)
+        if endpoint:
+            by_endpoint[endpoint] = row
+
+    for row in enriched:
+        endpoint = _endpoint_identity(row)
+        measured = by_endpoint.get(endpoint) if endpoint else None
+        row["gemini"] = (
+            dict(measured.get("gemini") or _gemini_verdict([]))
+            if measured else _gemini_verdict([])
+        )
+        row["ytmusic"] = (
+            dict(measured.get("ytmusic") or _ytmusic_verdict([]))
+            if measured else _ytmusic_verdict([])
+        )
 
 
 def _classify_dynamic(ip_history: list[str], speed_history: list[float | None], fraud_scores: list[int | None], countries: list[str | None], hosting_history: list[bool | None] | None = None) -> dict[str, Any]:
@@ -1216,6 +1496,8 @@ async def main() -> int:
         # Retain the Gemini answer in the same aggregation shape as the other
         # observations. Current runs probe each config at most once.
         gemini_history = {r["id"]: [] for r in records}
+        # YouTube Music is also probed only once per config per full run.
+        ytmusic_history = {r["id"]: [] for r in records}
 
         # Include initial results
         for r in first:
@@ -1227,6 +1509,7 @@ async def main() -> int:
                 country_history[rid].append(r.get("country"))
                 hosting_history[rid].append(r.get("hosting"))
                 gemini_history[rid].append(r.get("gemini"))
+                ytmusic_history[rid].append(r.get("ytmusic"))
 
         print(f"Running {STABILITY_INTERVALS} stability checks at {STABILITY_INTERVAL_SECONDS}s intervals...")
         # Only configs that produced an IP are worth re-checking: the others
@@ -1288,6 +1571,7 @@ async def main() -> int:
                 worker_token,
                 semaphore,
                 probe_gemini=not first_by_id.get(record["id"], {}).get("ok", False),
+                probe_ytmusic=not first_by_id.get(record["id"], {}).get("ok", False),
             )
             for record, _ in live
         ))
@@ -1305,6 +1589,7 @@ async def main() -> int:
                 country_history[rid].append(r.get("country"))
                 hosting_history[rid].append(r.get("hosting"))
                 gemini_history[rid].append(r.get("gemini"))
+                ytmusic_history[rid].append(r.get("ytmusic"))
 
     finally:
         core.terminate()
@@ -1379,6 +1664,10 @@ async def main() -> int:
             # distinct answers, because "we could not check" must never be
             # rendered as "clean" downstream.
             "gemini": _gemini_verdict(gemini_history.get(rid, [])),
+            # The YT Music page did not distinguish the sampled US and RU exits.
+            # `ok` therefore reports app-shell reachability only; it is not a
+            # region-availability or account/Premium verdict.
+            "ytmusic": _ytmusic_verdict(ytmusic_history.get(rid, [])),
             "ip_count": len(ips),
             # Every IP observed this run, round by round: the first entry is
             # the initial round, the rest are the stability re-checks.
@@ -1424,6 +1713,11 @@ async def main() -> int:
     changed = apply_ip_change_flags(health, _previous_last_ips(previous))
     if changed:
         print(f"IP changed since last run: {changed} configs")
+
+    # Keep the public enriched file alongside the health index so consumers of
+    # either document see the same Gemini and YT Music reachability summaries.
+    _attach_probe_signals(enriched, health)
+    ENRICHED_PATH.write_text(json.dumps(enriched_data, indent=2) + "\n")
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     output_path = OUTPUT / "egress-health.json"

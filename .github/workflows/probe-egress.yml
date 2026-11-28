@@ -212,30 +212,36 @@ jobs:
           path: probe-output/report.json
           retention-days: 14
 
-      - name: Publish latest egress health index
-        if: success() && hashFiles('probe-output/egress-health.json') != ''
+      - name: Publish egress health and reachability signals
+        if: success() && hashFiles('probe-output/egress-health.json') != '' && hashFiles('verify-output/enriched-configs.json') != ''
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require('fs');
-            const content = Buffer.from(fs.readFileSync('probe-output/egress-health.json')).toString('base64');
             const { owner, repo } = context.repo;
-            for (let attempt = 0; attempt < 4; attempt++) {
-              let sha;
-              try {
-                const existing = await github.rest.repos.getContent({ owner, repo, path: 'egress-health.json', ref: 'gh-pages' });
-                sha = existing.data.sha;
-              } catch (error) {
-                if (error.status !== 404) throw error;
-              }
-              try {
-                await github.rest.repos.createOrUpdateFileContents({
-                  owner, repo, path: 'egress-health.json', branch: 'gh-pages', sha,
-                  message: 'auto: publish proxy egress health', content,
-                });
-                break;
-              } catch (error) {
-                if (error.status !== 409 || attempt === 3) throw error;
+            const files = [
+              { path: 'egress-health.json', local: 'probe-output/egress-health.json', message: 'auto: publish proxy egress health' },
+              { path: 'enriched-configs.json', local: 'verify-output/enriched-configs.json', message: 'auto: publish probe reachability signals' },
+            ];
+            for (const file of files) {
+              const content = Buffer.from(fs.readFileSync(file.local)).toString('base64');
+              for (let attempt = 0; attempt < 4; attempt++) {
+                let sha;
+                try {
+                  const existing = await github.rest.repos.getContent({ owner, repo, path: file.path, ref: 'gh-pages' });
+                  sha = existing.data.sha;
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+                try {
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner, repo, path: file.path, branch: 'gh-pages', sha,
+                    message: file.message, content,
+                  });
+                  break;
+                } catch (error) {
+                  if (error.status !== 409 || attempt === 3) throw error;
+                }
               }
             }
 

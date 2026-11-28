@@ -66,6 +66,9 @@ def _run(speed_mb_s: float | None) -> dict:
         with mock.patch.object(
             probe_egress, "_gemini_probe",
             new=mock.AsyncMock(return_value={"ok": None}),
+        ), mock.patch.object(
+            probe_egress, "_ytmusic_probe",
+            new=mock.AsyncMock(return_value={"status": "unknown"}),
         ):
             return asyncio.run(
                 _speed_test(_record(), "https://worker.example", "tok",
@@ -137,14 +140,18 @@ class SpeedVerdictTests(unittest.TestCase):
             new=mock.AsyncMock(return_value=FakeProc()),
         ), mock.patch.object(
             probe_egress, "_gemini_probe", new=mock.AsyncMock()
-        ) as gemini_probe:
+        ) as gemini_probe, mock.patch.object(
+            probe_egress, "_ytmusic_probe", new=mock.AsyncMock()
+        ) as ytmusic_probe:
             out = asyncio.run(_speed_test(
                 _record(), "https://worker.example", "tok", asyncio.Semaphore(1),
                 probe_gemini=False,
+                probe_ytmusic=False,
             ))
 
         self.assertTrue(out["ok"])
         gemini_probe.assert_not_awaited()
+        ytmusic_probe.assert_not_awaited()
 
 
 if __name__ == "__main__":
